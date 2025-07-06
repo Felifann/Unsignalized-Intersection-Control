@@ -1,9 +1,10 @@
 import math
 
 class Platoon:
-    def __init__(self, vehicle_list):
+    def __init__(self, vehicle_list, intersection_center=(-188.9, -89.7, 0.0)):
         self.vehicles = vehicle_list  # 每个元素是 dict 状态
         self.leader = self.vehicles[0] if self.vehicles else None
+        self.intersection_center = intersection_center
         self.goal_direction = self._infer_goal_direction()
 
     def _infer_goal_direction(self):
@@ -11,32 +12,49 @@ class Platoon:
         if not self.leader:
             return 'straight'
         
-        # 获取当前yaw角度（弧度）
-        current_yaw = math.radians(self.leader['rotation'][1])
-        
-        # 获取车道信息来推断方向
-        road_id = self.leader['road_id']
-        lane_id = self.leader['lane_id']
-        
-        # 基于yaw角度和车道位置推断转向意图
-        # 这里使用简化的角度判断逻辑
+        # 获取车辆当前位置和朝向
+        vehicle_pos = self.leader['location']
         yaw_degrees = self.leader['rotation'][1]
         
-        # 标准化角度到[-180, 180]
-        while yaw_degrees > 180:
-            yaw_degrees -= 360
-        while yaw_degrees < -180:
-            yaw_degrees += 360
+        # 计算车辆到交叉口中心的向量
+        to_intersection = [
+            self.intersection_center[0] - vehicle_pos[0],
+            self.intersection_center[1] - vehicle_pos[1]
+        ]
         
-        # 基于角度范围判断方向（可根据具体地图调整）
-        if -45 <= yaw_degrees <= 45:
+        # 计算车辆当前朝向向量
+        yaw_rad = math.radians(yaw_degrees)
+        forward_vector = [math.cos(yaw_rad), math.sin(yaw_rad)]
+        
+        # 计算叉积来判断转向方向
+        cross_product = forward_vector[0] * to_intersection[1] - forward_vector[1] * to_intersection[0]
+        
+        # 计算点积来判断是否朝向交叉口
+        dot_product = forward_vector[0] * to_intersection[0] + forward_vector[1] * to_intersection[1]
+        
+        # 结合角度和位置关系判断方向
+        if abs(cross_product) < 0.3 and dot_product > 0:  # 朝向交叉口且基本直行
             return 'straight'
-        elif 45 < yaw_degrees <= 135:
+        elif cross_product > 0.3:  # 需要左转到达交叉口
             return 'left'
-        elif -135 <= yaw_degrees < -45:
+        elif cross_product < -0.3:  # 需要右转到达交叉口
             return 'right'
         else:
-            return 'straight'  # 默认直行
+            # 回退到基于角度的判断
+            yaw_normalized = yaw_degrees
+            while yaw_normalized > 180:
+                yaw_normalized -= 360
+            while yaw_normalized < -180:
+                yaw_normalized += 360
+            
+            if -45 <= yaw_normalized <= 45:
+                return 'straight'
+            elif 45 < yaw_normalized <= 135:
+                return 'left'
+            elif -135 <= yaw_normalized < -45:
+                return 'right'
+            else:
+                return 'straight'
 
     def get_vehicle_ids(self):
         return [v['id'] for v in self.vehicles]

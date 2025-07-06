@@ -27,10 +27,16 @@ class SimulationConfig:
     }
     
     # ===== 目标交叉口设置 =====
-    # Town05 的主十字路口中心坐标
-    TARGET_INTERSECTION_CENTER = (-188.9, -89.7, 0.0)  # 确保中心点正确
+    # Town05 的主十字路口中心坐标 (确认为无信号灯路口)
+    TARGET_INTERSECTION_CENTER = (-188.9, -89.7, 0.0)
     # 监控半径（米）
-    INTERSECTION_RADIUS = 30  # 确保半径足够大
+    INTERSECTION_RADIUS = 40  # 增加到40米，确保能捕获接近的车辆
+    
+    # 新增：明确标识这是无信号灯路口
+    INTERSECTION_TYPE = 'unsignalized'  # 'signalized' 或 'unsignalized'
+    
+    # 新增：控制策略仅应用于目标路口
+    CONTROL_TARGET_INTERSECTION_ONLY = True
     
     # ===== 状态提取设置 =====
     ACTOR_CACHE_INTERVAL = 1  # 改为1，每帧都更新

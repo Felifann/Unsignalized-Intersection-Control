@@ -9,6 +9,9 @@ if egg_path:
 else:
     raise RuntimeError("CARLA egg not found in ./carla/ folder.")
 
+# 添加carla模块的导入
+import carla
+
 # ===== 环境相关模块 =====
 from env.scenario_manager import ScenarioManager
 from env.state_extractor import StateExtractor
@@ -18,11 +21,8 @@ from env.simulation_config import SimulationConfig
 from platooning.platoon_manager import PlatoonManager
 # from platooning.platoon_policy import PlatoonPolicy
 
-# ===== 保留但暂不启用的模块 =====
-# from auction.auction_engine import AuctionEngine
-# from nash.nash_solver import NashSolver
-# from rl.agents.ppo import PPOAgent
-# from policies.composite_policy import CompositePolicy
+# ===== 交通控制模块 =====
+from control import TrafficController
 
 # 初始化环境模块（使用配置文件中的地图）
 scenario = ScenarioManager()
@@ -30,6 +30,9 @@ state_extractor = StateExtractor(scenario.carla)
 
 # 初始化车队管理
 platoon_manager = PlatoonManager(state_extractor)
+
+# 初始化交通控制器
+traffic_controller = TrafficController(scenario.carla, state_extractor)
 
 # 显示地图信息
 spawn_points = scenario.carla.world.get_map().get_spawn_points()
@@ -49,6 +52,7 @@ try:
     step = 0
     print_interval = SimulationConfig.PRINT_INTERVAL
     platoon_update_interval = 10  # 每10步更新一次车队
+    control_update_interval = 5   # 每5步更新一次控制
     
     while True:
         # 先让仿真前进
@@ -59,12 +63,11 @@ try:
         
         # 定期更新车队分组
         if step % platoon_update_interval == 0:
-            platoon_manager.update()
-            if platoon_manager.get_all_platoons():
-                platoon_stats = platoon_manager.get_platoon_stats()
-                print(f"车队更新 - 车队数: {platoon_stats['num_platoons']}, "
-                      f"编队车辆: {platoon_stats['vehicles_in_platoons']}, "
-                      f"平均车队大小: {platoon_stats['avg_platoon_size']:.1f}")
+            platoon_manager.update_and_print_stats()
+        
+        # 定期更新交通控制
+        if step % control_update_interval == 0:
+            traffic_controller.update_control(platoon_manager)
         
         # 减少打印频率以提升性能
         if step % print_interval == 0:
@@ -78,23 +81,26 @@ try:
             print(f"--- Vehicles in {SimulationConfig.INTERSECTION_RADIUS}m Radius: {len(vehicles_in_radius)} ---")
             print(f"--- Vehicles in Junction Area: {len(vehicles_in_junction)} ---")
 
+            # 打印控制状态
+            traffic_controller.print_control_status()
+
             # 打印车队信息
             if step % (print_interval * 3) == 0:  # 每90步打印一次详细车队信息
                 platoon_manager.print_platoon_info()
 
-            for v in vehicles_in_radius[:10]:  # 显示半径内的前10辆车
-                speed_kmh = (v['velocity'][0]**2 + v['velocity'][1]**2)**0.5 * 3.6
-                dist_to_center = v.get('distance_to_center', 0)
-                junction_status = "Junction" if v['is_junction'] else "Road"
-                print(
-                    f"  [ID: {v['id']}] "
-                    f"Pos: ({v['location'][0]:.1f}, {v['location'][1]:.1f}) | "
-                    f"Speed: {speed_kmh:.1f} km/h | "
-                    f"Road/Lane: {v['road_id']}/{v['lane_id']} | "
-                    f"Status: {junction_status} | "
-                    f"LeadDist: {v['leading_vehicle_dist']:.1f} m | "
-                    f"CenterDist: {dist_to_center:.1f} m"
-                )
+            # for v in vehicles_in_radius[:3]:  # 显示半径内的前10辆车
+            #     speed_kmh = (v['velocity'][0]**2 + v['velocity'][1]**2)**0.5 * 3.6
+            #     dist_to_center = v.get('distance_to_center', 0)
+            #     junction_status = "Junction" if v['is_junction'] else "Road"
+            #     print(
+            #         f"  [ID: {v['id']}] "
+            #         f"Pos: ({v['location'][0]:.1f}, {v['location'][1]:.1f}) | "
+            #         f"Speed: {speed_kmh:.1f} km/h | "
+            #         f"Road/Lane: {v['road_id']}/{v['lane_id']} | "
+            #         f"Status: {junction_status} | "
+            #         f"LeadDist: {v['leading_vehicle_dist']:.1f} m | "
+            #         f"CenterDist: {dist_to_center:.1f} m"
+            #     )
         
         # 更新车辆ID标签显示
         scenario.update_vehicle_labels()
@@ -103,6 +109,8 @@ try:
         
 except KeyboardInterrupt:
     print("\n仿真已手动终止。")
+    # 安全关闭：重置所有控制
+    traffic_controller.emergency_reset_all_controls()
 
 # 原计划主循环结构（暂注释）
 """
