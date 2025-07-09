@@ -85,7 +85,11 @@ class StateExtractor:
                 dist_sq = (location.x - target_center[0])**2 + (location.y - target_center[1])**2
                 if dist_sq > self.radius_sq:
                     continue
-
+                
+                # 新增：剔除驶离路口的车辆
+                if self._is_vehicle_leaving_intersection(vehicle, location, transform):
+                    continue
+                
                 velocity = vehicle.get_velocity()
                 current_waypoint = vehicle_waypoints[vehicle.id]
 
@@ -305,3 +309,20 @@ class StateExtractor:
             'states_cache_age': time.time() - self._states_cache_timestamp,
             'waypoint_cache_age': time.time() - self._waypoint_cache_timestamp
         }
+
+    def _is_vehicle_leaving_intersection(self, vehicle, location, transform):
+        """判断车辆是否正在驶离交叉口"""
+        target_center = SimulationConfig.TARGET_INTERSECTION_CENTER
+        
+        # 计算车辆到交叉口中心的方向向量
+        to_center_x = target_center[0] - location.x
+        to_center_y = target_center[1] - location.y
+        
+        # 获取车辆前进方向
+        forward_vector = transform.get_forward_vector()
+        
+        # 计算车辆前进方向与朝向交叉口方向的夹角
+        dot_product = forward_vector.x * to_center_x + forward_vector.y * to_center_y
+        
+        # 如果点积为负，说明车辆正在远离交叉口
+        return dot_product < 0

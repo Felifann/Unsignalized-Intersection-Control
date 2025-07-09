@@ -121,7 +121,7 @@ class PlatoonManager:
             print(f"[Warning] 车队内车辆方向不一致，跳过编队")
             return []
         
-        platoon = Platoon(vehicle_group, self.intersection_center)
+        platoon = Platoon(vehicle_group, self.intersection_center, goal_direction=directions[0])
         if platoon and platoon.is_valid():
             return [platoon]
         else:

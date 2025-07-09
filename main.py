@@ -9,7 +9,6 @@ if egg_path:
 else:
     raise RuntimeError("CARLA egg not found in ./carla/ folder.")
 
-# 添加carla模块的导入
 import carla
 
 # ===== 环境相关模块 =====
@@ -19,73 +18,81 @@ from env.simulation_config import SimulationConfig
 
 # ===== 车队管理模块 =====
 from platooning.platoon_manager import PlatoonManager
-# from platooning.platoon_policy import PlatoonPolicy
+
+# ===== 拍卖系统模块 =====
+from auction.auction_engine import DecentralizedAuctionEngine
 
 # ===== 交通控制模块 =====
 from control import TrafficController
 
-# 初始化环境模块（使用配置文件中的地图）
+# 初始化环境模块
 scenario = ScenarioManager()
 state_extractor = StateExtractor(scenario.carla)
 
 # 初始化车队管理
 platoon_manager = PlatoonManager(state_extractor)
 
+# 初始化分布式拍卖引擎
+auction_engine = DecentralizedAuctionEngine()
+
 # 初始化交通控制器
 traffic_controller = TrafficController(scenario.carla, state_extractor)
 
 # 显示地图信息
 spawn_points = scenario.carla.world.get_map().get_spawn_points()
-print(f"=== 无信号灯交叉路口仿真 ===")
+print(f"=== 无信号灯交叉路口仿真 (集成拍卖系统) ===")
 print(f"当前地图: {SimulationConfig.MAP_NAME}")
 print(f"spawn点数量: {len(spawn_points)}")
 print(f"预计车辆数: {len(spawn_points)}")
-
 print("=============================")
 
 # 生成交通流
 scenario.reset_scenario()
-scenario.show_intersection_area()  # 新增：显示检测点和半径
+scenario.show_intersection_area()
 
-# 主仿真循环（持续运行，Ctrl+C可中断）
+# 主仿真循环
 try:
     step = 0
     print_interval = SimulationConfig.PRINT_INTERVAL
-    platoon_update_interval = 10  # 每10步更新一次车队
-    control_update_interval = 5   # 每5步更新一次控制
+    platoon_update_interval = 10
+    control_update_interval = 5
+    auction_update_interval = 8  # 拍卖更新间隔
     
     while True:
-        # 先让仿真前进
         scenario.carla.world.tick()
-        
-        # 获取车辆状态
         vehicle_states = state_extractor.get_vehicle_states()
         
         # 定期更新车队分组
         if step % platoon_update_interval == 0:
             platoon_manager.update_and_print_stats()
         
-        # 定期更新交通控制
-        if step % control_update_interval == 0:
-            traffic_controller.update_control(platoon_manager)
+        # 定期更新拍卖系统
+        if step % auction_update_interval == 0:
+            auction_engine.update(vehicle_states, platoon_manager)
         
-        # 减少打印频率以提升性能
+        # 定期更新交通控制（现在包含拍卖控制）
+        if step % control_update_interval == 0:
+            traffic_controller.update_control(platoon_manager, auction_engine)
+        
+        # 减少打印频率
         if step % print_interval == 0:
             actual_fps = 1 / SimulationConfig.FIXED_DELTA_SECONDS
             print(f"[Step {step}] Vehicle Total: {len(vehicle_states)} | FPS: {actual_fps:.1f}")
 
-            # 统计并打印交叉口附近车辆信息
             vehicles_in_radius = vehicle_states
             vehicles_in_junction = [v for v in vehicle_states if v['is_junction']]
             
             print(f"--- Vehicles in {SimulationConfig.INTERSECTION_RADIUS}m Radius: {len(vehicles_in_radius)} ---")
             print(f"--- Vehicles in Junction Area: {len(vehicles_in_junction)} ---")
 
-            # 打印控制状态
+            # 打印控制状态（现在包含拍卖信息）
             traffic_controller.print_control_status()
+            
+            # 打印拍卖状态
+            auction_engine.print_auction_status()
 
             # 打印车队信息
-            if step % (print_interval * 3) == 0:  # 每90步打印一次详细车队信息
+            if step % (print_interval * 3) == 0:
                 platoon_manager.print_platoon_info()
 
             # for v in vehicles_in_radius[:3]:  # 显示半径内的前10辆车
@@ -109,31 +116,4 @@ try:
         
 except KeyboardInterrupt:
     print("\n仿真已手动终止。")
-    # 安全关闭：重置所有控制
     traffic_controller.emergency_reset_all_controls()
-
-# 原计划主循环结构（暂注释）
-"""
-for episode in range(num_episodes):
-    env.reset()
-    while not env.done():
-        state = env.get_state()
-
-        # 1. 编队分组
-        platoon_mgr.update(state)
-
-        # 2. 拍卖竞价
-        bids = auction_engine.collect_bids(state)
-
-        # 3. 拍卖冲突 → 纳什均衡解决
-        order = nash_solver.resolve_conflict(bids)
-
-        # 4. PPO策略输出行为（基于分布式/邻域信息）
-        actions = policy.get_actions(state, order)
-
-        # 5. 车辆执行动作
-        env.step(actions)
-
-        # 6. 更新DRL训练
-        ppo_agent.observe(state, actions, reward, next_state, done)
-"""
