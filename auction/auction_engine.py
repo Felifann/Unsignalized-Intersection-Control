@@ -1,6 +1,7 @@
 import time
 import math
 from .bid_policy import AgentBidPolicy
+from nash.conflict_resolver import ConflictResolver
 
 class DecentralizedAuctionEngine:
     def __init__(self, intersection_center=(-188.9, -89.7, 0.0), communication_range=50.0):
@@ -20,19 +21,25 @@ class DecentralizedAuctionEngine:
         # 路口区域定义
         self.intersection_radius = 15.0  # 路口区域半径
         
-        print("🎯 分布式拍卖引擎初始化完成 - 仅路口车辆竞价模式")
+        # 纳什均衡冲突解决器
+        self.conflict_resolver = ConflictResolver(intersection_center)
+        
+        print("🎯 分布式拍卖引擎初始化完成 - 集成纳什均衡冲突解决")
 
     def update(self, vehicle_states, platoon_manager):
         """
-        主更新函数：管理分布式拍卖过程
-        只对路口处的agents（platoons + 剩余单车）进行竞价
+        主更新函数：管理分布式拍卖过程并解决冲突
         """
         current_time = time.time()
         
         # 1. 识别路口处的agents
         junction_agents = self._identify_junction_agents(vehicle_states, platoon_manager)
         
-        # 2. 定期启动新拍卖（只有路口有车时才启动）
+        # 2. 清理旧的agent状态
+        current_agent_ids = [agent['id'] for agent in junction_agents]
+        self.conflict_resolver.cleanup_old_agents(current_agent_ids)
+        
+        # 3. 定期启动新拍卖（只有路口有车时才启动）
         if current_time - self.last_auction_time >= self.auction_interval:
             if junction_agents:
                 auction_id = self._start_new_auction(junction_agents, current_time)
@@ -41,14 +48,61 @@ class DecentralizedAuctionEngine:
                       f"(车队:{len([a for a in junction_agents if a['type']=='platoon'])}个, "
                       f"单车:{len([a for a in junction_agents if a['type']=='vehicle'])}个)")
         
-        # 3. 处理正在进行的拍卖
+        # 4. 处理正在进行的拍卖
         self._process_active_auctions(current_time)
         
-        # 4. 模拟车车通信
+        # 5. 获取当前优先级排序
+        priority_order = self._get_current_priority_order()
+        
+        # 6. 应用纳什均衡冲突解决（针对前几名获胜者）
+        if priority_order:
+            top_winners = priority_order[:3]  # 检查前3名是否冲突
+            top_winner_agents = [winner['agent'] for winner in top_winners]
+            
+            # 检查并解决冲突
+            conflict_resolution = self.conflict_resolver.check_and_resolve(top_winner_agents)
+            
+            # 更新优先级排序（应用冲突解决结果）
+            priority_order = self._apply_conflict_resolution(priority_order, conflict_resolution)
+        
+        # 7. 模拟车车通信
         self._simulate_v2v_communication()
         
-        # 5. 返回当前优先级排序
-        return self._get_current_priority_order()
+        return priority_order
+
+    def _apply_conflict_resolution(self, priority_order, conflict_resolution):
+        """应用冲突解决结果到优先级排序"""
+        if not conflict_resolution:
+            return priority_order
+        
+        # 创建新的优先级列表
+        resolved_priority = []
+        waiting_agents = []
+        
+        for winner in priority_order:
+            agent_id = winner['agent']['id']
+            action = conflict_resolution.get(agent_id, 'go')
+            
+            if action == 'go':
+                # 保持原排名
+                resolved_priority.append(winner)
+            else:
+                # 移到队列末尾
+                winner_copy = winner.copy()
+                winner_copy['conflict_action'] = 'wait'
+                waiting_agents.append(winner_copy)
+        
+        # 等待的agents排在后面
+        resolved_priority.extend(waiting_agents)
+        
+        # 重新分配排名
+        for i, winner in enumerate(resolved_priority):
+            winner['rank'] = i + 1
+        
+        if waiting_agents:
+            print(f"🎮 冲突解决：{len(waiting_agents)}个agents被要求等待")
+        
+        return resolved_priority
 
     def _identify_junction_agents(self, vehicle_states, platoon_manager):
         """
@@ -80,6 +134,7 @@ class DecentralizedAuctionEngine:
                         'vehicles': platoon.vehicles,
                         'goal_direction': platoon.get_goal_direction(),
                         'leader_location': leader['location'],
+                        'location': leader['location'],  # 添加location字段用于冲突检测
                         'size': platoon.get_size(),
                         'at_junction': any(v['is_junction'] for v in platoon.vehicles)
                     }
@@ -99,11 +154,19 @@ class DecentralizedAuctionEngine:
                         'id': vehicle['id'],
                         'data': vehicle,
                         'location': vehicle['location'],
+                        'goal_direction': self._infer_vehicle_direction(vehicle),
                         'at_junction': vehicle['is_junction']
                     }
                     agents.append(vehicle_agent)
         
         return agents
+
+    def _infer_vehicle_direction(self, vehicle):
+        """推断车辆行驶方向"""
+        # 简化版本：基于目的地推断方向
+        # 实际实现中应该使用更精确的路径分析
+        import random
+        return random.choice(['left', 'straight', 'right'])
 
     def _get_junction_area_vehicles(self, vehicle_states):
         """获取路口区域内及即将进入路口的车辆"""
@@ -357,11 +420,17 @@ class DecentralizedAuctionEngine:
         }
 
     def print_auction_status(self):
-        """打印拍卖状态"""
+        """打印拍卖状态（包含冲突信息）"""
         stats = self.get_auction_stats()
+        conflict_stats = self.conflict_resolver.get_conflict_stats()
         
         if stats['active_auctions'] > 0 or stats['completed_auctions'] > 0:
             print(f"🎯 路口竞价状态: {stats['active_auctions']}进行中 | "
                   f"{stats['completed_auctions']}已完成 | "
                   f"参与者: {stats['platoon_participants']}车队+{stats['vehicle_participants']}单车 | "
                   f"路口内:{stats['in_junction_participants']} 接近:{stats['approaching_participants']}")
+            
+            # 打印冲突状态
+            if conflict_stats['deadlocked_agents'] > 0:
+                print(f"🚨 冲突状态: {conflict_stats['deadlocked_agents']}死锁/{conflict_stats['waiting_agents']}等待 "
+                      f"(阈值:{conflict_stats['deadlock_threshold']}s)")
