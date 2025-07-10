@@ -179,38 +179,38 @@ class TrafficController:
         return controlled_vehicles
 
     def _get_control_params_by_rank(self, rank):
-        """根据拍卖排名获取控制参数"""
-        if rank == 1:  # 第一名：最激进
+        """根据拍卖排名获取控制参数 - 针对路口场景优化"""
+        if rank == 1:  # 第一名：获得通行权
             return {
-                'speed_diff': -70.0,
+                'speed_diff': -80.0,    # 更激进的加速
+                'follow_distance': 0.5,  # 更紧密跟随
+                'ignore_lights': 98.0,   # 几乎忽略信号灯
+                'ignore_signs': 90.0,
+                'ignore_vehicles': 70.0  # 高优先级避让其他车辆
+            }
+        elif rank <= 2:  # 第二名：有条件通行
+            return {
+                'speed_diff': -60.0,
                 'follow_distance': 0.8,
-                'ignore_lights': 95.0,
-                'ignore_signs': 85.0,
-                'ignore_vehicles': 60.0
+                'ignore_lights': 85.0,
+                'ignore_signs': 75.0,
+                'ignore_vehicles': 50.0
             }
-        elif rank <= 3:  # 前三名：较激进
-            return {
-                'speed_diff': -55.0,
-                'follow_distance': 1.0,
-                'ignore_lights': 80.0,
-                'ignore_signs': 70.0,
-                'ignore_vehicles': 45.0
-            }
-        elif rank <= 5:  # 前五名：中等
+        elif rank <= 3:  # 第三名：谨慎通行
             return {
                 'speed_diff': -45.0,
-                'follow_distance': 1.2,
-                'ignore_lights': 60.0,
-                'ignore_signs': 50.0,
-                'ignore_vehicles': 30.0
+                'follow_distance': 1.0,
+                'ignore_lights': 70.0,
+                'ignore_signs': 60.0,
+                'ignore_vehicles': 35.0
             }
-        else:  # 其他：温和
+        else:  # 其他：必须让行
             return {
-                'speed_diff': -35.0,
-                'follow_distance': 1.5,
-                'ignore_lights': 40.0,
-                'ignore_signs': 30.0,
-                'ignore_vehicles': 20.0
+                'speed_diff': -20.0,    # 减速让行
+                'follow_distance': 2.0,  # 保持距离
+                'ignore_lights': 10.0,   # 遵守信号
+                'ignore_signs': 10.0,
+                'ignore_vehicles': 5.0   # 避让其他车辆
             }
 
     def _get_platoon_leader_params(self, rank):
@@ -280,11 +280,12 @@ class TrafficController:
         stats = self.get_control_stats()
         
         if stats['total_controlled_vehicles'] > 0:
-            print(f"🎮 拍卖控制状态: 总控制{stats['total_controlled_vehicles']}辆 | "
+            print(f"🎮 路口控制状态: 总控制{stats['total_controlled_vehicles']}辆 | "
                   f"单车{stats['single_vehicle_controlled']}辆 | "
                   f"车队{stats['total_platoon_controlled']}辆 "
-                  f"(队长{stats['platoon_leader_controlled']}+跟随{stats['platoon_follower_controlled']})")
-    
+                  f"(队长{stats['platoon_leader_controlled']}+跟随{stats['platoon_follower_controlled']}) | "
+                  f"优先通行 vs 让行控制")
+
     def emergency_reset_all_controls(self):
         """紧急重置所有控制"""
         print("🚨 紧急重置所有车辆控制")
