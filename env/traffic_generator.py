@@ -60,7 +60,7 @@ class TrafficGenerator:
                     traffic_manager.distance_to_leading_vehicle(vehicle, 0.8)
                 
                 self.vehicles.append(vehicle)
-                print(f"车辆 {vehicle.id} 已生成并启用高速自动驾驶")
+                # print(f"车辆 {vehicle.id} 已生成并启用高速自动驾驶")
 
     def update_vehicle_labels(self):
         """更新所有车辆的ID标签位置"""

@@ -4,9 +4,10 @@ from .bid_policy import AgentBidPolicy
 from nash.conflict_resolver import ConflictResolver
 
 class DecentralizedAuctionEngine:
-    def __init__(self, intersection_center=(-188.9, -89.7, 0.0), communication_range=50.0):
+    def __init__(self, intersection_center=(-188.9, -89.7, 0.0), communication_range=50.0, state_extractor=None):
         self.intersection_center = intersection_center
         self.communication_range = communication_range
+        self.state_extractor = state_extractor  # 添加state_extractor参数
         
         # 分布式拍卖状态
         self.active_auctions = {}  # {auction_id: auction_data}
@@ -162,11 +163,28 @@ class DecentralizedAuctionEngine:
         return agents
 
     def _infer_vehicle_direction(self, vehicle):
-        """推断车辆行驶方向"""
-        # 简化版本：基于目的地推断方向
-        # 实际实现中应该使用更精确的路径分析
-        import random
-        return random.choice(['left', 'straight', 'right'])
+        """使用路径规划功能获取车辆行驶方向"""
+        if not vehicle.get('destination'):
+            return None  # 没有目的地的车辆无法推断方向
+
+        if not self.state_extractor:
+            print(f"[Warning] StateExtractor未初始化，车辆 {vehicle['id']} 无法获取路径方向")
+            return None
+
+        vehicle_location = vehicle['location']
+        try:
+            # 转换为carla.Location对象
+            import carla
+            carla_location = carla.Location(
+                x=vehicle_location[0],
+                y=vehicle_location[1], 
+                z=vehicle_location[2]
+            )
+            direction = self.state_extractor.get_route_direction(carla_location, vehicle['destination'])
+            return direction
+        except Exception as e:
+            print(f"[Warning] 路径规划方向获取失败，车辆 {vehicle['id']}：{e}")
+            return None
 
     def _get_junction_area_vehicles(self, vehicle_states):
         """获取路口区域内及即将进入路口的车辆"""
