@@ -2,9 +2,10 @@ import math
 import time
 
 class AgentBidPolicy:
-    def __init__(self, agent, intersection_center=(-188.9, -89.7, 0.0)):
+    def __init__(self, agent, intersection_center=(-188.9, -89.7, 0.0), state_extractor=None):
         self.agent = agent
         self.intersection_center = intersection_center
+        self.state_extractor = state_extractor  # 添加state_extractor参数
         
     def compute_bid(self):
         """
@@ -24,13 +25,17 @@ class AgentBidPolicy:
         # 路口状态奖励/惩罚
         junction_factor = self._get_junction_factor()
         
+        # 新增：等待时间奖励
+        wait_time_bonus = self._calculate_wait_time_bonus()
+        
         # 加权计算最终出价
         base_bid = (urgency * 20 +               # 方向紧急性权重
                    position_advantage * 15 +     # 位置优势权重  
                    speed_factor * 10 +           # 速度因子权重
                    safety_factor * 12 +          # 安全因子权重
                    platoon_bonus +               # 车队奖励
-                   junction_factor * 8)          # 路口状态因子
+                   junction_factor * 8 +         # 路口状态因子
+                   wait_time_bonus * 10)              # 等待时间奖励
         
         # 冲突惩罚
         final_bid = base_bid - conflict_penalty
@@ -48,7 +53,7 @@ class AgentBidPolicy:
             distance = self._distance_to_intersection(self.agent['data'])
         
         if at_junction:
-            return 20.0  # 已在路口内，最高优势
+            return 30.0  # 增加从20.0到30.0，进一步提升路口内车辆优势
         elif distance <= 15.0:
             return 15.0 - distance  # 越近优势越大
         elif distance <= 25.0:
@@ -64,7 +69,7 @@ class AgentBidPolicy:
             at_junction = self.agent.get('at_junction', False)
         
         if at_junction:
-            return 15.0  # 在路口内需要尽快完成通行
+            return 25.0  # 增加从15.0到25.0，让路口内车辆更激进
         else:
             return 0.0
 
@@ -150,9 +155,37 @@ class AgentBidPolicy:
 
     def _infer_direction_from_state(self):
         """从车辆状态推断行驶方向"""
-        # 简化版本：随机分配（实际应用中应该基于路径规划）
-        import random
-        return random.choice(['left', 'straight', 'right'])
+        vehicle_data = self.agent['data']
+        
+        # 检查车辆是否有目的地
+        if not vehicle_data.get('destination'):
+            print(f"[Warning] 车辆 {vehicle_data['id']} 没有目的地，无法推断方向")
+            return None
+
+        # 检查state_extractor是否初始化
+        if not self.state_extractor:
+            print(f"[Warning] StateExtractor未初始化，车辆 {vehicle_data['id']} 无法获取路径方向")
+            return None
+
+        vehicle_location = vehicle_data['location']
+        destination = vehicle_data['destination']
+        
+        try:
+            # 转换为carla.Location对象
+            import carla
+            carla_location = carla.Location(
+                x=vehicle_location[0],
+                y=vehicle_location[1], 
+                z=vehicle_location[2]
+            )
+            
+            # 使用state_extractor获取路径方向
+            direction = self.state_extractor.get_route_direction(carla_location, destination)
+            return direction
+            
+        except Exception as e:
+            print(f"[Warning] 路径规划方向获取失败，车辆 {vehicle_data['id']}：{e}")
+            return None
 
     def _is_platoon(self):
         """判断是否为车队"""
@@ -169,3 +202,17 @@ class AgentBidPolicy:
         dx = location[0] - self.intersection_center[0]
         dy = location[1] - self.intersection_center[1]
         return math.sqrt(dx*dx + dy*dy)
+
+    def _calculate_wait_time_bonus(self):
+        """计算等待时间奖励：等待越久，出价越高"""
+        # 从agent数据中获取等待时间
+        wait_time = self.agent.get('wait_time', 0.0)
+        
+        if wait_time <= 2.0:
+            return 0.0  # 等待时间短，无奖励
+        elif wait_time <= 5.0:
+            return (wait_time - 2.0) * 5.0  # 线性增长：最多15分
+        elif wait_time <= 10.0:
+            return 15.0 + (wait_time - 5.0) * 8.0  # 加速增长：最多55分
+        else:
+            return 55.0 + (wait_time - 10.0) * 10.0  # 高速增长：超过10秒后每秒+10分

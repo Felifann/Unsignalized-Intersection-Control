@@ -31,7 +31,7 @@ class ScenarioManager:
         # 显示中心点
         world.debug.draw_point(
             carla.Location(x=center[0], y=center[1], z=center[2]+1.0),
-            size=0.3,
+            size=0.1,
             color=carla.Color(255, 0, 0),
             life_time=99999.0
         )
@@ -56,7 +56,7 @@ class ScenarioManager:
                 persistent_lines=False
             )
 
-    def show_road_lane_ids(self, display_radius=50):
+    def show_road_lane_ids(self, display_radius=40):
         """在交叉口附近显示道路和车道ID"""
         world = self.carla.world
         world_map = world.get_map()

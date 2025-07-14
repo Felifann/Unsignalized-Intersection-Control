@@ -308,8 +308,8 @@ class DecentralizedAuctionEngine:
             
             # 检查是否已经出价
             if agent_id not in auction_data['bids']:
-                # 创建竞价策略并计算出价
-                bid_policy = AgentBidPolicy(agent, self.intersection_center)
+                # 创建竞价策略并计算出价，传入state_extractor
+                bid_policy = AgentBidPolicy(agent, self.intersection_center, self.state_extractor)
                 bid_value = bid_policy.compute_bid()
                 
                 auction_data['bids'][agent_id] = {

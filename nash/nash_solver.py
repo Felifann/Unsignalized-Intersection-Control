@@ -53,15 +53,12 @@ class NashSolver:
         return combinations
 
     def _evaluate_payoff(self, agent, action, combo):
-        # 简化收益评估规则：
-        # go: 快但可能冲突
-        # wait: 安全但耗时
         if action == 'go':
             if self._has_conflict(agent, combo):
-                return -100  # 冲突惩罚
-            return 10  # 安全通行
+                return -50  # 冲突惩罚减少，从-100调整到-50
+            return 20  # 安全通行奖励增加，从10调整到20
         else:
-            return -1  # 等待惩罚
+            return -5  # 等待惩罚减少，从-1调整到-5
 
     def _has_conflict(self, agent, combo):
         """检查该agent的go动作是否与其他agent冲突"""

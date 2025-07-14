@@ -50,6 +50,14 @@ print("=============================")
 scenario.reset_scenario()
 scenario.show_intersection_area()
 
+# 在仿真开始前添加
+from traffic_light_override import force_vehicles_run_lights, freeze_lights_green
+
+# 选择一种方法
+# force_vehicles_run_lights(scenario.carla.world, scenario.carla.traffic_manager)
+# 或者
+freeze_lights_green(scenario.carla.world)
+
 # 主仿真循环
 try:
     step = 0
@@ -88,6 +96,11 @@ try:
             
             print(f"📊 基础信息: 总车辆:{len(vehicle_states)} | 路口内:{len(vehicles_in_junction)} | FPS:{actual_fps:.1f}")
             
+            # 新增：安全控制状态
+            safety_stats = traffic_controller.get_safety_stats()
+            if safety_stats['intersection_pass_vehicles'] > 0:
+                print(f"🚧 路口通过状态: {safety_stats['intersection_pass_vehicles']}辆正在强制通过路口")
+            
             # 1. 车队管理状态
             print(f"\n🚗 车队管理状态:")
             platoon_stats = platoon_manager.get_platoon_stats()
@@ -124,11 +137,11 @@ try:
                         print(f"      #{rank}: {action_emoji}🚗单车{agent['id']} "
                               f"({agent.get('goal_direction', 'unknown')}) 出价:{bid_value:.1f}")
             
-            # 打印拍卖状态
-            auction_engine.print_auction_status()
+            # 只在统一打印时显示拍卖状态，避免重复输出
+            # auction_engine.print_auction_status()  # 注释掉，减少重复信息
 
-            # 打印车队信息
-            platoon_manager.print_platoon_info()
+            # 只在统一打印时显示车队信息，避免重复输出
+            # platoon_manager.print_platoon_info()  # 注释掉，减少重复信息
 
             # for v in vehicles_in_radius[:3]:  # 显示半径内的前10辆车
             #     speed_kmh = (v['velocity'][0]**2 + v['velocity'][1]**2)**0.5 * 3.6
