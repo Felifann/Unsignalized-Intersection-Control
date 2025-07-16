@@ -1,6 +1,8 @@
 import carla
 import math
 import time
+from typing import Dict, List, Set, Tuple, Optional
+from collections import defaultdict
 
 class TrafficController:
     """
@@ -19,6 +21,10 @@ class TrafficController:
         self.intersection_center = SimulationConfig.TARGET_INTERSECTION_CENTER
         self.intersection_radius = SimulationConfig.INTERSECTION_RADIUS
         
+        # 初始化ConflictResolver
+        from nash.conflict_resolver import ConflictResolver
+        self.conflict_resolver = ConflictResolver(self.intersection_center)
+
         # 控制状态记录
         self.controlled_vehicles = {}  # {vehicle_id: control_info}
         self.current_controlled_vehicles = set()
@@ -39,7 +45,14 @@ class TrafficController:
         self.last_control_log_time = {}  # 记录上次日志输出时间
         self.control_log_interval = 5.0  # 日志输出间隔（秒）
     
-        print("🎮 基于拍卖的交通控制器初始化完成 - 集成安全控制")
+        # 新增：车队管理器引用（将在主程序中设置）
+        self.platoon_manager = None
+    
+        print("🎮 基于拍卖的交通控制器初始化完成 - 集成安全控制和冲突解决")
+    
+    def set_platoon_manager(self, platoon_manager):
+        """设置车队管理器引用"""
+        self.platoon_manager = platoon_manager
     
     def update_control(self, platoon_manager, auction_engine=None):
         """
@@ -144,12 +157,7 @@ class TrafficController:
             self.traffic_manager.ignore_lights_percentage(vehicle, 0.0)  # 严格遵守信号
             self.traffic_manager.ignore_signs_percentage(vehicle, 0.0)
             self.traffic_manager.ignore_vehicles_percentage(vehicle, 0.0)  # 严格避让其他车辆
-            
-            # 移除set_path调用，使用其他方法帮助车辆恢复
-            # 设置更保守的行为参数
-            self.traffic_manager.set_desired_speed(vehicle, 10.0)  # 设置较低的目标速度
-            self.traffic_manager.set_global_distance_to_leading_vehicle(5.0)  # 全局增大跟车距离
-            
+
         except Exception as e:
             print(f"[Warning] 紧急恢复控制失败 {vehicle.id}: {e}")
 
@@ -203,7 +211,7 @@ class TrafficController:
             self.traffic_manager.ignore_lights_percentage(vehicle, 60.0)
             self.traffic_manager.ignore_signs_percentage(vehicle, 50.0)
             self.traffic_manager.ignore_vehicles_percentage(vehicle, 30.0)  # 适度忽略其他车辆
-            
+
         except Exception as e:
             print(f"[Warning] 疏导控制失败 {vehicle.id}: {e}")
 
@@ -298,20 +306,52 @@ class TrafficController:
         return conflicting_ids
 
     def _directions_have_conflict(self, dir1, dir2):
-        """判断两个方向是否冲突"""
+        """判断两个方向是否冲突 - 使用ConflictResolver的完整冲突矩阵"""
         if dir1 == dir2:
             return False
-            
-        conflict_rules = {
-            ('left', 'straight'): True,
-            ('left', 'right'): True,
-            ('straight', 'left'): True,
-            ('straight', 'right'): False,
-            ('right', 'left'): True,
-            ('right', 'straight'): False,
-        }
         
-        return conflict_rules.get((dir1, dir2), False)
+        # 转换目标方向到路径代码
+        turn1 = self._convert_direction_to_code(dir1)
+        turn2 = self._convert_direction_to_code(dir2)
+        
+        if not turn1 or not turn2:
+            return False
+        
+        # 对于不知道具体进入方向的情况，检查是否存在任何可能的冲突组合
+        # 如果两个目标方向在任何进入方向组合下都会产生冲突，则认为冲突
+        entry_directions = ['N', 'S', 'E', 'W']
+        conflict_found = False
+        
+        # 检查所有可能的进入方向组合
+        for entry1 in entry_directions:
+            for entry2 in entry_directions:
+                # 跳过相同进入方向（同一车道不会冲突）
+                if entry1 == entry2:
+                    continue
+                    
+                path1 = f"{entry1}_{turn1}"
+                path2 = f"{entry2}_{turn2}"
+                
+                # 使用ConflictResolver的冲突矩阵检查
+                if (path1 in self.conflict_resolver.conflict_matrix and 
+                    path2 in self.conflict_resolver.conflict_matrix[path1] and
+                    self.conflict_resolver.conflict_matrix[path1][path2]):
+                    conflict_found = True
+                    break
+            
+            if conflict_found:
+                break
+        
+        return conflict_found
+
+    def _convert_direction_to_code(self, direction):
+        """将方向转换为代码"""
+        direction_map = {
+            'left': 'L',
+            'straight': 'S', 
+            'right': 'R'
+        }
+        return direction_map.get(direction)
 
     def _apply_single_vehicle_control(self, vehicle_id, rank, bid_value, control_modifier='normal'):
         """为单车agent应用控制 - 增加控制修饰符"""
@@ -319,10 +359,10 @@ class TrafficController:
             carla_vehicle = self.world.get_actor(vehicle_id)
             if not carla_vehicle or not carla_vehicle.is_alive:
                 return False
-            
+
             # 根据排名和修饰符调整控制强度
             control_params = self._get_control_params_by_rank(rank, control_modifier)
-            
+
             # 应用控制参数
             self.traffic_manager.vehicle_percentage_speed_difference(
                 carla_vehicle, control_params['speed_diff']
@@ -339,7 +379,9 @@ class TrafficController:
             self.traffic_manager.ignore_vehicles_percentage(
                 carla_vehicle, control_params['ignore_vehicles']
             )
-            
+            # 移除不存在的set_desired_speed方法
+            # 速度控制已经通过vehicle_percentage_speed_difference实现
+
             # 记录控制状态
             self.controlled_vehicles[vehicle_id] = {
                 'type': 'single_vehicle',
@@ -348,26 +390,24 @@ class TrafficController:
                 'control_params': control_params,
                 'control_modifier': control_modifier
             }
-            
+
             return True
-            
+
         except Exception as e:
             print(f"[Warning] 单车控制失败 {vehicle_id}: {e}")
             return False
-        
-    
 
     def _apply_platoon_agent_control(self, platoon_vehicles, rank, bid_value, direction, control_modifier='normal'):
         """为车队agent应用控制 - 增加控制修饰符参数"""
         controlled_vehicles = set()
-        
+
         try:
             for i, vehicle_state in enumerate(platoon_vehicles):
                 vehicle_id = vehicle_state['id']
                 carla_vehicle = self.world.get_actor(vehicle_id)
                 if not carla_vehicle or not carla_vehicle.is_alive:
                     continue
-                
+
                 # 车队内角色：队长 vs 跟随者
                 if i == 0:  # 队长
                     control_params = self._get_platoon_leader_params(rank, control_modifier)
@@ -375,7 +415,7 @@ class TrafficController:
                 else:  # 跟随者
                     control_params = self._get_platoon_follower_params(rank, control_modifier)
                     role = 'platoon_follower'
-                
+
                 # 应用控制参数
                 self.traffic_manager.vehicle_percentage_speed_difference(
                     carla_vehicle, control_params['speed_diff']
@@ -392,7 +432,9 @@ class TrafficController:
                 self.traffic_manager.ignore_vehicles_percentage(
                     carla_vehicle, control_params['ignore_vehicles']
                 )
-                
+                # 移除不存在的set_desired_speed方法
+                # 速度控制已经通过vehicle_percentage_speed_difference实现
+
                 # 记录控制状态
                 self.controlled_vehicles[vehicle_id] = {
                     'type': role,
@@ -402,12 +444,12 @@ class TrafficController:
                     'control_params': control_params,
                     'control_modifier': control_modifier  # 添加这一行
                 }
-                
+
                 controlled_vehicles.add(vehicle_id)
-                
+
         except Exception as e:
             print(f"[Warning] 车队控制失败: {e}")
-    
+
         return controlled_vehicles
 
     def _get_control_params_by_rank(self, rank, control_modifier='normal'):
@@ -466,27 +508,30 @@ class TrafficController:
         return base_params
 
     def _get_platoon_leader_params(self, rank, control_modifier='normal'):
-        """获取车队队长的控制参数"""
+        """获取车队队长的控制参数 - 增强版"""
         base_params = self._get_control_params_by_rank(rank, control_modifier)
         
-        # 只有在非等待模式下才应用队长的激进参数
+        # 🔥 车队队长获得更激进的参数确保带领整个车队通过
         if control_modifier != 'wait':
-            base_params['speed_diff'] -= 5.0
-            base_params['ignore_vehicles'] = min(100.0, base_params['ignore_vehicles'] + 10.0)
-        
+            base_params['speed_diff'] -= 15.0  # 更激进的速度
+            base_params['ignore_vehicles'] = min(100.0, base_params['ignore_vehicles'] + 20.0)
+            base_params['ignore_lights'] = min(100.0, base_params['ignore_lights'] + 15.0)
+            base_params['follow_distance'] = max(0.8, base_params['follow_distance'] * 0.7)  # 更紧密
+    
         return base_params
 
     def _get_platoon_follower_params(self, rank, control_modifier='normal'):
-        """获取车队跟随者的控制参数 - 更安全的跟车"""
+        """获取车队跟随者的控制参数 - 增强紧密跟随"""
         base_params = self._get_control_params_by_rank(rank, control_modifier)
         
-        # 只有在非等待模式下才应用跟随者的紧密跟随参数
+        # 🔥 车队跟随者必须紧密跟随确保整个车队一起通过
         if control_modifier != 'wait':
-            base_params['follow_distance'] = max(1.5, base_params['follow_distance'] * 0.8)  # 不能太小
-            base_params['ignore_lights'] = min(100.0, base_params['ignore_lights'] + 10.0)
-            base_params['ignore_signs'] = min(100.0, base_params['ignore_signs'] + 10.0)
-            base_params['ignore_vehicles'] = min(30.0, base_params['ignore_vehicles'] + 5.0)  # 限制最大值
-        
+            base_params['follow_distance'] = 0.5  # 🔥 极度紧密跟随
+            base_params['ignore_lights'] = min(100.0, base_params['ignore_lights'] + 20.0)
+            base_params['ignore_signs'] = min(100.0, base_params['ignore_signs'] + 20.0)
+            base_params['ignore_vehicles'] = min(60.0, base_params['ignore_vehicles'] + 15.0)
+            base_params['speed_diff'] -= 10.0  # 保持与队长相近的速度
+    
         return base_params
     
     def _restore_uncontrolled_vehicles(self, current_controlled_vehicles):
@@ -506,7 +551,7 @@ class TrafficController:
                 print(f"[Warning] 恢复车辆 {vehicle_id} 默认行为失败: {e}")
     
     def _restore_default_behavior(self, vehicle):
-        """恢复车辆默认行为 - 防重复版"""
+        """恢复车辆默认行为 - 防重复版 + 车队协调通过"""
         vehicle_id = vehicle.id
         current_time = time.time()
         
@@ -516,22 +561,26 @@ class TrafficController:
             if self._is_vehicle_in_intersection(vehicle_location):
                 # 检查是否已经在强制通过状态
                 if vehicle_id not in self.intersection_pass_vehicles:
-                    # 路口内车辆使用强制通过参数
-                    self._log_intersection_pass(vehicle_id, current_time, "在路口内，使用强制通过参数")
-                    self._apply_intersection_pass_params(vehicle)
+                    # 🔥 新增：检查是否为车队成员，确保车队协调通过
+                    if self._is_vehicle_in_platoon(vehicle_id):
+                        self._log_intersection_pass(vehicle_id, current_time, "车队成员在路口内，使用车队强制通过参数")
+                        self._apply_platoon_intersection_pass_params(vehicle)
+                    else:
+                        self._log_intersection_pass(vehicle_id, current_time, "在路口内，使用强制通过参数")
+                        self._apply_intersection_pass_params(vehicle)
                     self.intersection_pass_vehicles.add(vehicle_id)
             else:
                 # 非路口内车辆恢复正常默认行为
                 if vehicle_id in self.intersection_pass_vehicles:
                     self.intersection_pass_vehicles.discard(vehicle_id)
                     self._log_intersection_pass(vehicle_id, current_time, "离开路口，恢复默认行为")
-            
+        
                 self.traffic_manager.vehicle_percentage_speed_difference(vehicle, self.default_speed_diff)
                 self.traffic_manager.distance_to_leading_vehicle(vehicle, self.default_follow_distance)
                 self.traffic_manager.ignore_lights_percentage(vehicle, 0.0)
                 self.traffic_manager.ignore_signs_percentage(vehicle, 0.0)
                 self.traffic_manager.ignore_vehicles_percentage(vehicle, 0.0)
-                
+
         except Exception as e:
             self._log_intersection_pass(vehicle_id, current_time, f"恢复行为失败: {e}")
             # 失败时使用默认恢复
@@ -544,18 +593,72 @@ class TrafficController:
             except:
                 pass
 
-    def _log_intersection_pass(self, vehicle_id, current_time, message):
-        """有限制的路口通过日志输出"""
-        # 检查是否需要输出日志（限制频率）
-        if vehicle_id not in self.last_control_log_time:
-            self.last_control_log_time[vehicle_id] = 0
-    
-        if current_time - self.last_control_log_time[vehicle_id] >= self.control_log_interval:
-            print(f"🚧 车辆 {vehicle_id} {message}")
-            self.last_control_log_time[vehicle_id] = current_time
+    def _is_vehicle_in_intersection(self, vehicle_location):
+        """检查车辆是否在路口内"""
+        try:
+            # 计算车辆到路口中心的距离
+            distance = self._calculate_distance_to_intersection(vehicle_location)
+            
+            # 如果距离小于路口半径，则认为在路口内
+            return distance <= self.intersection_radius
+        except Exception as e:
+            print(f"[Warning] 检查车辆是否在路口失败: {e}")
+            return False
 
+    def _calculate_distance_to_intersection(self, location):
+        """计算位置到路口中心的距离"""
+        if hasattr(location, 'x'):
+            # CARLA Location对象
+            dx = location.x - self.intersection_center[0]
+            dy = location.y - self.intersection_center[1]
+        else:
+            # 元组或列表
+            dx = location[0] - self.intersection_center[0]
+            dy = location[1] - self.intersection_center[1]
+        
+        return (dx * dx + dy * dy) ** 0.5
+
+    def emergency_reset_all_controls(self):
+        """紧急重置所有控制"""
+        try:
+            print("🚨 执行紧急重置所有车辆控制...")
+            
+            # 重置所有受控车辆
+            for vehicle_id in list(self.controlled_vehicles.keys()):
+                try:
+                    carla_vehicle = self.world.get_actor(vehicle_id)
+                    if carla_vehicle and carla_vehicle.is_alive:
+                        self._restore_default_behavior(carla_vehicle)
+                except:
+                    pass
+            
+            # 清空所有状态
+            self.controlled_vehicles.clear()
+            self.current_controlled_vehicles.clear()
+            self.crashed_vehicles.clear()
+            self.stuck_vehicles.clear()
+            self.emergency_recovery_vehicles.clear()
+            self.intersection_pass_vehicles.clear()
+            self.last_positions.clear()
+            self.last_control_log_time.clear()
+            
+            print("✅ 紧急重置完成")
+            
+        except Exception as e:
+            print(f"[Error] 紧急重置失败: {e}")
+
+    def get_safety_stats(self):
+        """获取安全控制统计信息"""
+        return {
+            'controlled_vehicles': len(self.controlled_vehicles),
+            'crashed_vehicles': len(self.crashed_vehicles),
+            'stuck_vehicles': len(self.stuck_vehicles),
+            'emergency_recovery_vehicles': len(self.emergency_recovery_vehicles),
+            'intersection_pass_vehicles': len(self.intersection_pass_vehicles)
+        }
+    
     def _ensure_intersection_vehicles_complete(self):
-        """确保路口内的受控车辆完成通过"""
+        """确保路口内的受控车辆完成通过 - 增强车队协调"""
         current_time = time.time()
         
         for vehicle_id, control_info in self.controlled_vehicles.items():
@@ -566,8 +669,19 @@ class TrafficController:
                 
                 vehicle_location = carla_vehicle.get_location()
                 if self._is_vehicle_in_intersection(vehicle_location):
-                    # 应用强制通过参数
-                    self._apply_intersection_pass_params(carla_vehicle)
+                    # 🔥 增强：车队成员在路口内使用车队专用参数
+                    if self._is_vehicle_in_platoon(vehicle_id):
+                        self._apply_platoon_intersection_pass_params(carla_vehicle)
+                        # 记录车队强制通过状态
+                        platoon_info = self._get_vehicle_platoon_info(vehicle_id)
+                        if platoon_info:
+                            self._log_intersection_pass(vehicle_id, current_time, 
+                                f"车队{platoon_info['platoon_id']}成员强制通过路口 (位置:{platoon_info['position_in_platoon']})")
+                        else:
+                            self._log_intersection_pass(vehicle_id, current_time, "车队成员强制通过路口")
+                    else:
+                        self._apply_intersection_pass_params(carla_vehicle)
+                        self._log_intersection_pass(vehicle_id, current_time, "单车强制通过路口")
                 else:
                     # 车辆已离开路口，恢复默认行为
                     self._restore_default_behavior(carla_vehicle)
@@ -575,66 +689,80 @@ class TrafficController:
             except Exception as e:
                 print(f"[Warning] 检查路口内车辆失败: {e}")
 
-    def _is_vehicle_in_intersection(self, location):
-        """判断车辆是否在路口区域"""
-        dx = location.x - self.intersection_center[0]
-        dy = location.y - self.intersection_center[1]
-        distance = math.sqrt(dx**2 + dy**2)
-        return distance <= self.intersection_radius
+    def _is_vehicle_in_platoon(self, vehicle_id):
+        """检查车辆是否属于某个车队 - 增强错误处理"""
+        try:
+            if hasattr(self, 'platoon_manager') and self.platoon_manager:
+                # 遍历所有车队检查车辆是否在其中
+                all_platoons = self.platoon_manager.get_all_platoons()
+                for platoon in all_platoons:
+                    if hasattr(platoon, 'vehicles') and platoon.vehicles:
+                        platoon_vehicle_ids = [v['id'] for v in platoon.vehicles]
+                        if vehicle_id in platoon_vehicle_ids:
+                            return True
+            return False
+        except Exception as e:
+            print(f"[Warning] 检查车辆{vehicle_id}是否在车队失败: {e}")
+            return False
+
+    def _get_vehicle_platoon_info(self, vehicle_id):
+        """获取车辆所在车队的信息"""
+        if hasattr(self, 'platoon_manager') and self.platoon_manager:
+            for platoon in self.platoon_manager.get_all_platoons():
+                platoon_vehicle_ids = [v['id'] for v in platoon.vehicles]
+                if vehicle_id in platoon_vehicle_ids:
+                    # 修正：使用正确的车队ID属性名
+                    platoon_id = getattr(platoon, 'platoon_id', getattr(platoon, 'id', f'platoon_{hash(platoon)}'))
+                    return {
+                        'platoon_id': platoon_id,
+                        'platoon_size': len(platoon.vehicles),
+                        'is_leader': platoon.vehicles[0]['id'] == vehicle_id,
+                        'position_in_platoon': platoon_vehicle_ids.index(vehicle_id)
+                    }
+        return None
+
+    def _apply_platoon_intersection_pass_params(self, carla_vehicle):
+        """为路口内车队车辆应用更激进的强制通过参数（所有成员与队长完全一致）"""
+        try:
+            vehicle_id = carla_vehicle.id
+            platoon_info = self._get_vehicle_platoon_info(vehicle_id)
+            
+            if platoon_info:
+                # 所有成员都采用队长参数，确保同步
+                self.traffic_manager.vehicle_percentage_speed_difference(carla_vehicle, -95.0)
+                self.traffic_manager.distance_to_leading_vehicle(carla_vehicle, 0.8)
+                self.traffic_manager.ignore_lights_percentage(carla_vehicle, 100.0)
+                self.traffic_manager.ignore_signs_percentage(carla_vehicle, 100.0)
+                self.traffic_manager.ignore_vehicles_percentage(carla_vehicle, 90.0)
+            else:
+                # 如果获取车队信息失败，使用默认车队参数
+                self.traffic_manager.vehicle_percentage_speed_difference(carla_vehicle, -90.0)
+                self.traffic_manager.distance_to_leading_vehicle(carla_vehicle, 0.2)
+                self.traffic_manager.ignore_lights_percentage(carla_vehicle, 100.0)
+                self.traffic_manager.ignore_signs_percentage(carla_vehicle, 100.0)
+                self.traffic_manager.ignore_vehicles_percentage(carla_vehicle, 95.0)
+                
+        except Exception as e:
+            print(f"[Warning] 应用车队路口强制通过参数失败 {carla_vehicle.id}: {e}")
 
     def _apply_intersection_pass_params(self, carla_vehicle):
-        """为路口内车辆应用强制通过参数"""
+        """为路口内单车应用强制通过参数"""
         try:
-            self.traffic_manager.vehicle_percentage_speed_difference(carla_vehicle, -80.0)
-            self.traffic_manager.distance_to_leading_vehicle(carla_vehicle, 0.3)
+            # 单车在路口内的强制通过参数
+            self.traffic_manager.vehicle_percentage_speed_difference(carla_vehicle, -70.0)
+            self.traffic_manager.distance_to_leading_vehicle(carla_vehicle, 1.0)
             self.traffic_manager.ignore_lights_percentage(carla_vehicle, 100.0)
             self.traffic_manager.ignore_signs_percentage(carla_vehicle, 100.0)
-            self.traffic_manager.ignore_vehicles_percentage(carla_vehicle, 90.0)
+            self.traffic_manager.ignore_vehicles_percentage(carla_vehicle, 80.0)
         except Exception as e:
-            print(f"[Warning] 应用路口强制通过参数失败 {carla_vehicle.id}: {e}")
+            print(f"[Warning] 应用单车路口强制通过参数失败 {carla_vehicle.id}: {e}")
 
-    def emergency_reset_all_controls(self):
-        """紧急重置所有车辆控制 - 增强版"""
-        print("🚨 紧急重置所有车辆控制")
+    def _log_intersection_pass(self, vehicle_id, current_time, message):
+        """记录路口通过日志 - 避免重复输出"""
+        # 限制日志输出频率
+        if vehicle_id not in self.last_control_log_time:
+            self.last_control_log_time[vehicle_id] = 0
         
-        # 1. 重置所有受控车辆
-        for vehicle_id in list(self.controlled_vehicles.keys()):
-            try:
-                carla_vehicle = self.world.get_actor(vehicle_id)
-                if carla_vehicle and carla_vehicle.is_alive:
-                    self._restore_default_behavior(carla_vehicle)
-            except:
-                continue
-        
-        # 2. 重置所有撞车和卡住的车辆
-        all_vehicles = self.world.get_actors().filter('vehicle.*')
-        for vehicle in all_vehicles:
-            if vehicle.is_alive:
-                try:
-                    self._restore_default_behavior(vehicle)
-                except:
-                    continue
-        
-        # 3. 清空所有状态记录
-        self.controlled_vehicles.clear()
-        self.current_controlled_vehicles.clear()
-        self.crashed_vehicles.clear()
-        self.stuck_vehicles.clear()
-        self.emergency_recovery_vehicles.clear()
-        self.last_positions.clear()
-        
-        # 4. 清空新增的状态记录
-        self.intersection_pass_vehicles.clear()
-        self.last_control_log_time.clear()
-        
-        print("✅ 所有车辆已恢复默认行为，状态已重置")
-
-    def get_safety_stats(self):
-        """获取安全统计信息 - 增强版"""
-        return {
-            'crashed_vehicles': len(self.crashed_vehicles),
-            'stuck_vehicles': len(self.stuck_vehicles),
-            'emergency_recovery_vehicles': len(self.emergency_recovery_vehicles),
-            'controlled_vehicles': len(self.current_controlled_vehicles),
-            'intersection_pass_vehicles': len(self.intersection_pass_vehicles)  # 新增
-        }
+        if current_time - self.last_control_log_time[vehicle_id] >= self.control_log_interval:
+            print(f"🚧 [路口控制] 车辆{vehicle_id}: {message}")
+            self.last_control_log_time[vehicle_id] = current_time

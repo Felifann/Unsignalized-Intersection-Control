@@ -1,6 +1,8 @@
 import sys
 import os
 import glob
+import math  # 用于数学计算
+import time  # 用于时间相关操作
 
 
 egg_path = glob.glob(os.path.join("carla", "carla-*.egg"))
@@ -29,7 +31,7 @@ from control import TrafficController
 scenario = ScenarioManager()
 state_extractor = StateExtractor(scenario.carla)
 
-# 初始化车队管理
+# 初始化车队管理 - 传入state_extractor用于导航
 platoon_manager = PlatoonManager(state_extractor)
 
 # 初始化分布式拍卖引擎 - 传入state_extractor
@@ -37,6 +39,9 @@ auction_engine = DecentralizedAuctionEngine(state_extractor=state_extractor)
 
 # 初始化交通控制器
 traffic_controller = TrafficController(scenario.carla, state_extractor)
+
+# 🔥 设置车队管理器引用，用于车队协调控制
+traffic_controller.set_platoon_manager(platoon_manager)
 
 # 显示地图信息
 spawn_points = scenario.carla.world.get_map().get_spawn_points()
@@ -56,7 +61,7 @@ from traffic_light_override import force_vehicles_run_lights, freeze_lights_gree
 # 选择一种方法
 # force_vehicles_run_lights(scenario.carla.world, scenario.carla.traffic_manager)
 # 或者
-freeze_lights_green(scenario.carla.world)
+# freeze_lights_green(scenario.carla.world)
 
 # 主仿真循环
 try:
@@ -83,7 +88,7 @@ try:
         # 统一打印频率：所有状态信息同时输出
         if step % unified_print_interval == 0:
             # 清屏（可选，让输出更清晰）
-            # os.system('cls' if os.name == 'nt' else 'clear')  # 取消注释以启用清屏
+            os.system('cls' if os.name == 'nt' else 'clear')  # 取消注释以启用清屏
             
             print(f"\n{'='*80}")
             print(f"[Step {step}] 无信号灯交叉路口仿真状态报告")

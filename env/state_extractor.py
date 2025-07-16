@@ -326,3 +326,36 @@ class StateExtractor:
         
         # 如果点积为负，说明车辆正在远离交叉口
         return dot_product < 0
+
+    # 在 state_extractor.py 中改进目的地分配
+    def _assign_reasonable_destination(self, vehicle):
+        """为车辆分配合理的目的地"""
+        try:
+            current_location = vehicle.get_location()
+            world_map = self.world.get_map()
+            
+            # 获取当前车辆的waypoint
+            current_waypoint = world_map.get_waypoint(current_location)
+            if not current_waypoint:
+                return None
+                
+            # 基于当前道路选择合理的目的地
+            # 例如：选择距离路口较远但方向合理的spawn点
+            spawn_points = world_map.get_spawn_points()
+            
+            # 过滤掉距离过近的spawn点
+            suitable_destinations = []
+            for spawn_point in spawn_points:
+                distance = current_location.distance(spawn_point.location)
+                if 50.0 < distance < 200.0:  # 合理的目的地距离
+                    suitable_destinations.append(spawn_point.location)
+            
+            if suitable_destinations:
+                import random
+                return random.choice(suitable_destinations)
+            else:
+                return None
+                
+        except Exception as e:
+            print(f"[Warning] 分配目的地失败: {e}")
+            return None

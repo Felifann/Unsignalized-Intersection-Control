@@ -24,7 +24,6 @@ class NashSolver:
 
     def _build_payoff_matrix(self, strategy_space):
         # 对每种策略组合，计算所有 agent 的收益
-        # 收益函数可基于时间成本、碰撞风险、交通效率等
         payoff_matrix = {}
         all_combinations = self._enumerate_strategies(strategy_space)
 
@@ -53,70 +52,326 @@ class NashSolver:
         return combinations
 
     def _evaluate_payoff(self, agent, action, combo):
-        if action == 'go':
-            if self._has_conflict(agent, combo):
-                return -50  # 冲突惩罚减少，从-100调整到-50
-            return 20  # 安全通行奖励增加，从10调整到20
-        else:
-            return -5  # 等待惩罚减少，从-1调整到-5
-
-    def _has_conflict(self, agent, combo):
-        """检查该agent的go动作是否与其他agent冲突"""
-        agent_direction = self._get_agent_direction(agent)
+        """
+        改进的收益评估函数 - 修复逻辑错误
+        """
+        base_payoff = 0
         
-        # 检查与其他选择go的agent是否冲突
+        # 基础行动收益
+        if action == 'go':
+            base_payoff = 25  # 通行基础奖励
+            
+            # 检查是否有路径冲突
+            if self._has_path_conflict(agent, combo):
+                # 使用更细致的冲突惩罚
+                conflict_penalty = self._calculate_conflict_penalty(agent, combo)
+                base_payoff -= conflict_penalty
+                
+        else:  # action == 'wait'
+            base_payoff = -5  # 等待成本
+            
+            # 等待时间惩罚
+            wait_time = agent.get_wait_time()
+            if wait_time > 3.0:
+                base_payoff -= wait_time * 1.5  # 等待越久惩罚越重
+        
+        # 添加位置和紧急度奖励
+        position_bonus = self._calculate_position_bonus(agent, action)
+        urgency_bonus = self._calculate_urgency_bonus(agent, action)
+        
+        return base_payoff + position_bonus + urgency_bonus
+
+    def _has_path_conflict(self, agent, combo):
+        """修复路径冲突检测逻辑"""
+        agent_path = self._get_agent_path(agent)
+        if not agent_path:
+            # 如果无法获取路径，保守地假设有冲突
+            return True
+        
+        # 检查与其他选择go的agent是否有路径冲突
         for other_agent in self.agents:
             if other_agent.get_id() == agent.get_id():
                 continue
             
             other_action = combo[other_agent.get_id()]
             if other_action == 'go':
-                other_direction = self._get_agent_direction(other_agent)
-                if self._directions_conflict(agent_direction, other_direction):
+                other_path = self._get_agent_path(other_agent)
+                if other_path and self._paths_conflict(agent_path, other_path):
                     return True
         
         return False
 
-    def _get_agent_direction(self, agent):
-        """获取agent的行驶方向"""
-        if hasattr(agent, 'goal_direction'):
-            return agent.goal_direction
-        elif isinstance(agent, dict) and 'goal_direction' in agent:
-            return agent['goal_direction']
-        else:
-            # 从agent数据中推断方向
-            return 'straight'  # 默认直行
-
-    def _directions_conflict(self, dir1, dir2):
-        """判断两个方向是否冲突"""
-        # 定义冲突规则
-        conflict_matrix = {
-            ('left', 'straight'): True,
-            ('left', 'right'): True,
-            ('straight', 'left'): True,
-            ('straight', 'right'): False,  # 直行与右转冲突较小
-            ('right', 'left'): True,
-            ('right', 'straight'): False,
-        }
+    def _calculate_conflict_penalty(self, agent, combo):
+        """计算冲突惩罚 - 基于路径类型"""
+        agent_path = self._get_agent_path(agent)
+        if not agent_path:
+            return 20  # 默认冲突惩罚
         
-        # 同方向不冲突
-        if dir1 == dir2:
+        penalty = 0
+        for other_agent in self.agents:
+            if other_agent.get_id() == agent.get_id():
+                continue
+            
+            other_action = combo[other_agent.get_id()]
+            if other_action == 'go':
+                other_path = self._get_agent_path(other_agent)
+                if other_path and self._paths_conflict(agent_path, other_path):
+                    # 基于冲突类型计算不同的惩罚
+                    conflict_severity = self._assess_conflict_severity(agent_path, other_path)
+                    penalty += conflict_severity
+        
+        return penalty
+
+    def _assess_conflict_severity(self, path1, path2):
+        """评估冲突严重程度"""
+        try:
+            dir1, turn1 = path1.split('_')
+            dir2, turn2 = path2.split('_')
+        except ValueError:
+            return 30  # 默认冲突严重度
+        
+        # 对向冲突（较轻）
+        if self._are_opposite_directions(dir1, dir2):
+            if turn1 == 'L' or turn2 == 'L':
+                return 40  # 涉及左转的对向冲突
+            else:
+                return 15  # 其他对向冲突
+        
+        # 相邻方向冲突（较重）
+        elif self._are_adjacent_directions(dir1, dir2):
+            if turn1 == 'L' or turn2 == 'L':
+                return 50  # 涉及左转的相邻冲突
+            elif turn1 == 'S' and turn2 == 'S':
+                return 45  # 直行交叉冲突
+            else:
+                return 25  # 其他相邻冲突
+        
+        return 30  # 默认冲突严重度
+
+    def _calculate_position_bonus(self, agent, action):
+        """修复位置奖励计算"""
+        if action != 'go':
+            return 0
+        
+        # 已在路口内的agent有更高优先级
+        if self._is_agent_in_junction(agent):
+            return 15
+        
+        # 距离路口越近奖励越高
+        distance = self._get_agent_distance_to_intersection(agent)
+        if distance < 10:
+            return max(0, 10 - distance * 0.8)
+        elif distance < 20:
+            return max(0, 5 - (distance - 10) * 0.3)
+        else:
+            return 0
+
+    def _calculate_urgency_bonus(self, agent, action):
+        """修复紧急度奖励计算"""
+        if action != 'go':
+            return 0
+        
+        # 等待时间越长，通行奖励越高
+        wait_time = agent.get_wait_time()
+        if wait_time > 8:
+            return 15
+        elif wait_time > 5:
+            return 10
+        elif wait_time > 2:
+            return 5
+        else:
+            return 0
+
+    def _get_agent_path(self, agent):
+        """获取agent的路径标识 - 修复数据访问逻辑"""
+        try:
+            # 直接获取目标转向方向（已由导航系统提供）
+            goal_direction = self._get_agent_direction(agent)
+            turn_code = self._convert_direction_to_code(goal_direction)
+            
+            # 获取进入方向
+            entry_direction = self._infer_entry_direction(agent)
+            
+            if entry_direction and turn_code:
+                return f"{entry_direction}_{turn_code}"
+            else:
+                return None
+        except Exception as e:
+            print(f"[Warning] 获取agent {agent.get_id()} 路径失败: {e}")
+            return None
+
+    def _convert_direction_to_code(self, direction):
+        """将方向转换为代码"""
+        direction_map = {
+            'left': 'L',
+            'straight': 'S', 
+            'right': 'R'
+        }
+        return direction_map.get(direction)
+
+    def _infer_entry_direction(self, agent):
+        """从agent位置推断进入路口的方向 - 修复数据访问"""
+        try:
+            # 获取agent位置 - 统一数据访问方式
+            location = self._get_agent_location(agent)
+            if not location:
+                return None
+            
+            # 路口中心
+            intersection_center = (-188.9, -89.7, 0.0)
+            dx = location[0] - intersection_center[0]
+            dy = location[1] - intersection_center[1]
+            
+            # 基于相对位置推断进入方向
+            if abs(dx) > abs(dy):
+                if dx > 0:
+                    return 'W'  # 从西侧进入（向东行驶）
+                else:
+                    return 'E'  # 从东侧进入（向西行驶）
+            else:
+                if dy > 0:
+                    return 'S'  # 从南侧进入（向北行驶）
+                else:
+                    return 'N'  # 从北侧进入（向南行驶）
+        except Exception as e:
+            print(f"[Warning] 推断agent {agent.get_id()} 进入方向失败: {e}")
+            return None
+
+    def _get_agent_location(self, agent):
+        """统一的agent位置获取方法"""
+        try:
+            if hasattr(agent, 'data'):
+                if agent.data.get('type') == 'platoon':
+                    if 'vehicles' in agent.data and agent.data['vehicles']:
+                        return agent.data['vehicles'][0].get('location', (0, 0, 0))
+                    else:
+                        return agent.data.get('leader_location', agent.data.get('location', (0, 0, 0)))
+                else:
+                    return agent.data.get('location', (0, 0, 0))
+            else:
+                return (0, 0, 0)
+        except Exception:
+            return (0, 0, 0)
+
+    def _get_agent_distance_to_intersection(self, agent):
+        """计算agent到路口的距离"""
+        location = self._get_agent_location(agent)
+        intersection_center = (-188.9, -89.7, 0.0)
+        dx = location[0] - intersection_center[0]
+        dy = location[1] - intersection_center[1]
+        return (dx*dx + dy*dy)**0.5
+
+    def _paths_conflict(self, path1, path2):
+        """检查两条路径是否冲突 - 使用完整冲突矩阵逻辑"""
+        if path1 == path2:
             return False
         
-        return conflict_matrix.get((dir1, dir2), True)
+        try:
+            dir1, turn1 = path1.split('_')
+            dir2, turn2 = path2.split('_')
+        except ValueError:
+            return True  # 路径格式错误时保守地认为冲突
+        
+        # 对向车道的冲突规则
+        if self._are_opposite_directions(dir1, dir2):
+            return self._check_opposite_conflict(turn1, turn2)
+        
+        # 相邻车道的冲突规则
+        elif self._are_adjacent_directions(dir1, dir2):
+            return self._check_adjacent_conflict(dir1, turn1, dir2, turn2)
+        
+        return False
+
+    def _are_opposite_directions(self, dir1, dir2):
+        """判断是否为对向车道"""
+        opposite_pairs = [('N', 'S'), ('S', 'N'), ('E', 'W'), ('W', 'E')]
+        return (dir1, dir2) in opposite_pairs
+
+    def _are_adjacent_directions(self, dir1, dir2):
+        """判断是否为相邻车道"""
+        adjacent_pairs = [
+            ('N', 'E'), ('E', 'S'), ('S', 'W'), ('W', 'N'),  # 顺时针相邻
+            ('N', 'W'), ('W', 'S'), ('S', 'E'), ('E', 'N')   # 逆时针相邻
+        ]
+        return (dir1, dir2) in adjacent_pairs
+
+    def _check_opposite_conflict(self, turn1, turn2):
+        """检查对向车道的冲突"""
+        if turn1 == 'S' and turn2 == 'S':
+            return False  # 对向直行不冲突
+        if turn1 == 'R' and turn2 == 'R':
+            return False  # 对向右转不冲突
+        if (turn1 == 'S' and turn2 == 'R') or (turn1 == 'R' and turn2 == 'S'):
+            return False  # 直行与右转不冲突
+        if turn1 == 'L' or turn2 == 'L':
+            return True   # 包含左转的情况都冲突
+        return False
+
+    def _check_adjacent_conflict(self, dir1, turn1, dir2, turn2):
+        """检查相邻车道的冲突"""
+        clockwise_pairs = [('N', 'E'), ('E', 'S'), ('S', 'W'), ('W', 'N')]
+        is_clockwise = (dir1, dir2) in clockwise_pairs
+        
+        if is_clockwise:
+            return self._check_clockwise_conflict(turn1, turn2)
+        else:
+            return self._check_clockwise_conflict(turn2, turn1)
+
+    def _check_clockwise_conflict(self, turn_left, turn_right):
+        """检查顺时针相邻车道的冲突"""
+        if turn_left == 'L':
+            return True  # 左侧左转与右侧任何方向冲突
+        if turn_left == 'S' and turn_right == 'L':
+            return True  # 左侧直行与右侧左转冲突
+        if turn_left == 'S' and turn_right == 'S':
+            return True  # 左侧直行与右侧直行冲突
+        if turn_left == 'R' and turn_right == 'L':
+            return True  # 左侧右转与右侧左转冲突
+        return False
+
+    def _is_agent_in_junction(self, agent):
+        """判断agent是否在路口内 - 修复数据访问"""
+        try:
+            if hasattr(agent, 'data'):
+                if agent.data.get('type') == 'platoon':
+                    return agent.data.get('at_junction', False)
+                else:
+                    return agent.data.get('at_junction', False)
+            return False
+        except Exception:
+            return False
+
+    def _get_agent_direction(self, agent):
+        """获取agent的行驶方向（来自导航系统）- 修复数据访问"""
+        try:
+            if hasattr(agent, 'goal_direction'):
+                return agent.goal_direction
+            elif hasattr(agent, 'data') and 'goal_direction' in agent.data:
+                return agent.data['goal_direction']
+            else:
+                return 'straight'  # 默认直行
+        except Exception:
+            return 'straight'
 
     def _compute_nash_equilibrium(self, payoff_matrix, strategy_space):
-        # 可使用简化的"找所有纯策略纳什解"方式：即找出所有稳定组合
+        """计算纳什均衡 - 寻找所有纯策略纳什解"""
+        nash_solutions = []
+        
         for combo_key, payoffs in payoff_matrix.items():
-            # 从frozenset key恢复原始combo字典
             combo = dict(combo_key)
             if self._is_nash(combo, payoff_matrix):
-                return combo  # 返回一个纯策略纳什均衡
-        return None  # 找不到时可 fallback（例如随机决策）
+                nash_solutions.append(combo)
+        
+        if nash_solutions:
+            # 选择社会福利最大的解（所有agent收益之和最大）
+            best_solution = max(nash_solutions, 
+                              key=lambda combo: sum(payoff_matrix[frozenset(combo.items())].values()))
+            return best_solution
+        
+        return None  # 没有找到纯策略纳什均衡
 
     def _is_nash(self, combo, payoff_matrix):
         """检查是否每个 agent 都无意单方面改变策略"""
-        # 确保combo是字典类型
         if isinstance(combo, frozenset):
             combo = dict(combo)
         
@@ -126,26 +381,22 @@ class NashSolver:
                 if alt_action == original_action:
                     continue
                 
-                # 创建替代策略组合
                 alt_combo = combo.copy()
                 alt_combo[agent_id] = alt_action
                 
-                # 使用frozenset作为key
                 alt_key = frozenset(alt_combo.items())
                 orig_key = frozenset(combo.items())
                 
-                # 检查是否存在更优策略
                 if (alt_key in payoff_matrix and orig_key in payoff_matrix and
                     payoff_matrix[alt_key][agent_id] > payoff_matrix[orig_key][agent_id]):
-                    return False  # 存在更优动作，非纳什
+                    return False
         return True
 
     def _map_strategy_to_agents(self, nash_equilibrium, strategy_space):
         """将纳什均衡策略映射回agent动作"""
         if nash_equilibrium is None:
-            # 找不到纳什均衡时的fallback策略
-            print("⚠️ 未找到纳什均衡，使用fallback策略")
-            return self._fallback_strategy()
+            print("⚠️ 未找到纯策略纳什均衡，使用智能fallback策略")
+            return self._intelligent_fallback_strategy()
         
         resolution = {}
         for agent_id, action in nash_equilibrium.items():
@@ -153,24 +404,57 @@ class NashSolver:
         
         return resolution
 
-    def _fallback_strategy(self):
-        """当找不到纳什均衡时的备用策略"""
-        # 简单策略：让优先级最高的agent通行，其他等待
+    def _intelligent_fallback_strategy(self):
+        """智能备用策略 - 基于优先级和路径冲突"""
         if not self.agents:
             return {}
         
-        # 按某种优先级排序（这里简化为按ID排序）
-        sorted_agents = sorted(self.agents, key=lambda a: a.get_id())
+        # 按优先级排序：路口内 > 等待时间长 > 距离近
+        sorted_agents = sorted(self.agents, key=self._agent_priority, reverse=True)
         
         resolution = {}
-        resolution[sorted_agents[0].get_id()] = 'go'  # 第一个agent通行
+        go_agents = []
         
-        for agent in sorted_agents[1:]:
-            resolution[agent.get_id()] = 'wait'  # 其他agent等待
+        for agent in sorted_agents:
+            agent_id = agent.get_id()
+            agent_path = self._get_agent_path(agent)
+            
+            # 检查与已决定通行的agents是否冲突
+            has_conflict = False
+            if agent_path:  # 只有能获取路径的agent才检查冲突
+                for go_agent in go_agents:
+                    go_path = self._get_agent_path(go_agent)
+                    if go_path and self._paths_conflict(agent_path, go_path):
+                        has_conflict = True
+                        break
+            
+            if not has_conflict:
+                resolution[agent_id] = 'go'
+                go_agents.append(agent)
+            else:
+                resolution[agent_id] = 'wait'
         
         return resolution
 
-# 为agent对象添加必要的接口
+    def _agent_priority(self, agent):
+        """计算agent优先级分数"""
+        score = 0
+        
+        # 路口内优先
+        if self._is_agent_in_junction(agent):
+            score += 100
+        
+        # 等待时间长优先
+        wait_time = agent.get_wait_time()
+        score += wait_time * 3
+        
+        # 距离近优先
+        distance = self._get_agent_distance_to_intersection(agent)
+        score += max(0, 30 - distance)
+        
+        return score
+
+# Agent包装器保持不变，但增加新方法
 class AgentWrapper:
     """Agent包装器，提供统一接口"""
     def __init__(self, agent_data):
@@ -184,7 +468,6 @@ class AgentWrapper:
     
     def distance_to_intersection(self):
         location = self.data.get('location', (0, 0, 0))
-        # 使用固定的交叉口坐标
         intersection_center = (-188.9, -89.7, 0.0)
         dx = location[0] - intersection_center[0]
         dy = location[1] - intersection_center[1]

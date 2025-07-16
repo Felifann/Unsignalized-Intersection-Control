@@ -5,13 +5,19 @@ class AgentBidPolicy:
     def __init__(self, agent, intersection_center=(-188.9, -89.7, 0.0), state_extractor=None):
         self.agent = agent
         self.intersection_center = intersection_center
-        self.state_extractor = state_extractor  # 添加state_extractor参数
+        self.state_extractor = state_extractor
         
     def compute_bid(self):
         """
-        路口竞价策略：针对路口通行优化
+        路口竞价策略：针对路口通行优化 - 车队优先版
         返回出价值（越高优先级越高）
         """
+        # 🔥 车队获得巨大的基础优势
+        if self._is_platoon():
+            platoon_base_advantage = 200.0  # 车队基础优势大幅提升
+        else:
+            platoon_base_advantage = 0.0
+    
         # 基础因子
         urgency = self._estimate_urgency()
         position_advantage = self._calculate_position_advantage()
@@ -19,59 +25,73 @@ class AgentBidPolicy:
         safety_factor = self._calculate_safety_factor()
         conflict_penalty = self._calculate_conflict_penalty()
         
-        # 车队优势因子
+        # 车队优势因子 - 大幅加强
         platoon_bonus = self._get_platoon_bonus()
         
         # 路口状态奖励/惩罚
         junction_factor = self._get_junction_factor()
         
-        # 新增：等待时间奖励
+        # 等待时间奖励
         wait_time_bonus = self._calculate_wait_time_bonus()
         
-        # 加权计算最终出价
-        base_bid = (urgency * 20 +               # 方向紧急性权重
-                   position_advantage * 15 +     # 位置优势权重  
-                   speed_factor * 10 +           # 速度因子权重
-                   safety_factor * 12 +          # 安全因子权重
-                   platoon_bonus +               # 车队奖励
-                   junction_factor * 8 +         # 路口状态因子
-                   wait_time_bonus * 10)              # 等待时间奖励
-        
+        # 加权计算最终出价 - 调整权重以突出车队优势
+        base_bid = (platoon_base_advantage +        # 🔥 车队基础优势
+                   urgency * 15 +                   # 方向紧急性权重（降低）
+                   position_advantage * 12 +        # 位置优势权重（降低）
+                   speed_factor * 8 +               # 速度因子权重（降低）
+                   safety_factor * 10 +             # 安全因子权重（降低）
+                   platoon_bonus * 50 +             # 🔥 车队奖励权重大幅提升
+                   junction_factor * 25 +           # 路口状态因子（提升）
+                   wait_time_bonus * 20)            # 等待时间奖励（降低）
+    
         # 冲突惩罚
         final_bid = base_bid - conflict_penalty
-        
+    
         return max(0.0, final_bid)
 
     def _calculate_position_advantage(self):
-        """计算位置优势：已在路口 > 即将进入路口 > 距离较远"""
+        """计算位置优势：车队在路口内获得更高优势"""
         if self._is_platoon():
             leader = self.agent['vehicles'][0]
             at_junction = self.agent.get('at_junction', False)
             distance = self._distance_to_intersection(leader)
+        
+            # 🔥 车队在路口内获得巨大位置优势
+            if at_junction:
+                return 100.0  # 从30.0提升到100.0
+            elif distance <= 10.0:
+                return 50.0 - distance * 2  # 更高的接近奖励
+            elif distance <= 20.0:
+                return 30.0 - (distance - 10.0)
+            else:
+                return 0.0
         else:
             at_junction = self.agent.get('at_junction', False)
             distance = self._distance_to_intersection(self.agent['data'])
         
-        if at_junction:
-            return 30.0  # 增加从20.0到30.0，进一步提升路口内车辆优势
-        elif distance <= 15.0:
-            return 15.0 - distance  # 越近优势越大
-        elif distance <= 25.0:
-            return 10.0 - (distance - 15.0) * 0.5
-        else:
-            return 0.0
+            if at_junction:
+                return 30.0  # 单车路口优势保持不变
+            elif distance <= 15.0:
+                return 15.0 - distance
+            elif distance <= 25.0:
+                return 10.0 - (distance - 15.0) * 0.5
+            else:
+                return 0.0
 
     def _get_junction_factor(self):
-        """路口状态因子：在路口内的车辆有完成通行的紧迫性"""
+        """路口状态因子：车队在路口内的紧迫性更高"""
         if self._is_platoon():
             at_junction = self.agent.get('at_junction', False)
+            if at_junction:
+                return 80.0  # 🔥 车队在路口内获得更高优先级
+            else:
+                return 0.0
         else:
             at_junction = self.agent.get('at_junction', False)
-        
-        if at_junction:
-            return 25.0  # 增加从15.0到25.0，让路口内车辆更激进
-        else:
-            return 0.0
+            if at_junction:
+                return 25.0  # 单车保持原有优先级
+            else:
+                return 0.0
 
     def _calculate_conflict_penalty(self):
         """计算冲突惩罚：左转与直行/右转的冲突"""
@@ -130,42 +150,42 @@ class AgentBidPolicy:
                 return 4.0
 
     def _get_platoon_bonus(self):
-        """车队奖励：鼓励车队协调通行"""
+        """车队奖励：大幅鼓励车队协调通行"""
         if self._is_platoon():
             platoon_size = len(self.agent['vehicles'])
             
-            # 车队协调通行效益
+            # 🔥 大幅提升车队协调通行效益
             if platoon_size == 2:
-                return 10.0
+                return 80.0   # 从10.0提升到80.0
             elif platoon_size == 3:
-                return 15.0
+                return 120.0  # 从15.0提升到120.0
             elif platoon_size >= 4:
-                return 18.0
+                return 150.0  # 从18.0提升到150.0
             else:
                 return 0.0
         return 0.0
 
     def _get_goal_direction(self):
-        """获取目标方向"""
+        """从导航系统获取目标方向"""
         if self._is_platoon():
             return self.agent.get('goal_direction', 'straight')
         else:
-            # 单车需要从状态推断方向
-            return self._infer_direction_from_state()
+            # 单车从导航系统获取方向
+            return self._get_navigation_direction_for_vehicle()
 
-    def _infer_direction_from_state(self):
-        """从车辆状态推断行驶方向"""
+    def _get_navigation_direction_for_vehicle(self):
+        """为单车从导航系统获取行驶方向"""
         vehicle_data = self.agent['data']
         
         # 检查车辆是否有目的地
         if not vehicle_data.get('destination'):
-            print(f"[Warning] 车辆 {vehicle_data['id']} 没有目的地，无法推断方向")
-            return None
+            print(f"[Warning] 车辆 {vehicle_data['id']} 没有目的地，使用默认方向")
+            return 'straight'
 
         # 检查state_extractor是否初始化
         if not self.state_extractor:
-            print(f"[Warning] StateExtractor未初始化，车辆 {vehicle_data['id']} 无法获取路径方向")
-            return None
+            print(f"[Warning] StateExtractor未初始化，车辆 {vehicle_data['id']} 使用默认方向")
+            return 'straight'
 
         vehicle_location = vehicle_data['location']
         destination = vehicle_data['destination']
@@ -181,11 +201,11 @@ class AgentBidPolicy:
             
             # 使用state_extractor获取路径方向
             direction = self.state_extractor.get_route_direction(carla_location, destination)
-            return direction
+            return direction if direction else 'straight'
             
         except Exception as e:
-            print(f"[Warning] 路径规划方向获取失败，车辆 {vehicle_data['id']}：{e}")
-            return None
+            print(f"[Warning] 车辆 {vehicle_data['id']} 导航方向获取失败：{e}，使用默认方向")
+            return 'straight'
 
     def _is_platoon(self):
         """判断是否为车队"""
@@ -205,14 +225,13 @@ class AgentBidPolicy:
 
     def _calculate_wait_time_bonus(self):
         """计算等待时间奖励：等待越久，出价越高"""
-        # 从agent数据中获取等待时间
         wait_time = self.agent.get('wait_time', 0.0)
         
         if wait_time <= 2.0:
-            return 0.0  # 等待时间短，无奖励
+            return 0.0
         elif wait_time <= 5.0:
-            return (wait_time - 2.0) * 5.0  # 线性增长：最多15分
+            return (wait_time - 2.0) * 5.0
         elif wait_time <= 10.0:
-            return 15.0 + (wait_time - 5.0) * 8.0  # 加速增长：最多55分
+            return 15.0 + (wait_time - 5.0) * 8.0
         else:
-            return 55.0 + (wait_time - 10.0) * 10.0  # 高速增长：超过10秒后每秒+10分
+            return 55.0 + (wait_time - 10.0) * 10.0

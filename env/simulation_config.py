@@ -10,7 +10,7 @@ class SimulationConfig:
     
     # ===== 仿真设置 =====
     SYNCHRONOUS_MODE = True
-    FIXED_DELTA_SECONDS = 0.01
+    FIXED_DELTA_SECONDS = 0.1
     
     # ===== 交通生成设置 =====
     MAX_VEHICLES = 500

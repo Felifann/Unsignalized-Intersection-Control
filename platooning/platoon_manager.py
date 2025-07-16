@@ -165,6 +165,7 @@ class PlatoonManager:
         return sorted(group, key=lambda v: self._distance_to_intersection(v))
 
     def get_all_platoons(self):
+        """获取所有车队"""
         return self.platoons
     
     def get_platoon_stats(self):

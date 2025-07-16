@@ -163,13 +163,14 @@ class DecentralizedAuctionEngine:
         return agents
 
     def _infer_vehicle_direction(self, vehicle):
-        """使用路径规划功能获取车辆行驶方向"""
+        """使用导航系统获取车辆行驶方向"""
         if not vehicle.get('destination'):
-            return None  # 没有目的地的车辆无法推断方向
+            print(f"[Warning] 车辆 {vehicle['id']} 没有目的地，使用默认方向")
+            return 'straight'  # 返回默认方向而不是None
 
         if not self.state_extractor:
-            print(f"[Warning] StateExtractor未初始化，车辆 {vehicle['id']} 无法获取路径方向")
-            return None
+            print(f"[Warning] StateExtractor未初始化，车辆 {vehicle['id']} 使用默认方向")
+            return 'straight'  # 返回默认方向而不是None
 
         vehicle_location = vehicle['location']
         try:
@@ -181,10 +182,10 @@ class DecentralizedAuctionEngine:
                 z=vehicle_location[2]
             )
             direction = self.state_extractor.get_route_direction(carla_location, vehicle['destination'])
-            return direction
+            return direction if direction else 'straight'  # 确保总是返回有效方向
         except Exception as e:
-            print(f"[Warning] 路径规划方向获取失败，车辆 {vehicle['id']}：{e}")
-            return None
+            print(f"[Warning] 车辆 {vehicle['id']} 导航方向获取失败：{e}，使用默认方向")
+            return 'straight'  # 返回默认方向
 
     def _get_junction_area_vehicles(self, vehicle_states):
         """获取路口区域内及即将进入路口的车辆"""
