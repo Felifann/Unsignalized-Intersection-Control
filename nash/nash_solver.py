@@ -1,4 +1,5 @@
 import itertools
+from env.simulation_config import SimulationConfig
 
 class NashSolver:
     def __init__(self, agents):
@@ -149,7 +150,7 @@ class NashSolver:
         return 30  # 默认冲突严重度
 
     def _calculate_position_bonus(self, agent, action):
-        """修复位置奖励计算"""
+        """修复位置奖励计算 - 使用正方形检测"""
         if action != 'go':
             return 0
         
@@ -157,14 +158,16 @@ class NashSolver:
         if self._is_agent_in_junction(agent):
             return 15
         
-        # 距离路口越近奖励越高
-        distance = self._get_agent_distance_to_intersection(agent)
-        if distance < 10:
-            return max(0, 10 - distance * 0.8)
-        elif distance < 20:
-            return max(0, 5 - (distance - 10) * 0.3)
-        else:
-            return 0
+        # 在正方形区域内的bonus
+        location = self._get_agent_location(agent)
+        if SimulationConfig.is_in_intersection_area(location):
+            # 距离中心越近奖励越高
+            distance = SimulationConfig.distance_to_intersection_center(location)
+            half_size = SimulationConfig.INTERSECTION_HALF_SIZE
+            normalized_distance = distance / half_size  # 归一化到0-1
+            return max(0, 10 * (1 - normalized_distance))  # 距离越近分数越高
+        
+        return 0
 
     def _calculate_urgency_bonus(self, agent, action):
         """修复紧急度奖励计算"""
@@ -256,10 +259,7 @@ class NashSolver:
     def _get_agent_distance_to_intersection(self, agent):
         """计算agent到路口的距离"""
         location = self._get_agent_location(agent)
-        intersection_center = (-188.9, -89.7, 0.0)
-        dx = location[0] - intersection_center[0]
-        dy = location[1] - intersection_center[1]
-        return (dx*dx + dy*dy)**0.5
+        return SimulationConfig.distance_to_intersection_center(location)
 
     def _paths_conflict(self, path1, path2):
         """检查两条路径是否冲突 - 使用完整冲突矩阵逻辑"""
@@ -468,11 +468,11 @@ class AgentWrapper:
     
     def distance_to_intersection(self):
         location = self.data.get('location', (0, 0, 0))
-        intersection_center = (-188.9, -89.7, 0.0)
-        dx = location[0] - intersection_center[0]
-        dy = location[1] - intersection_center[1]
-        return (dx*dx + dy*dy)**0.5
+        return SimulationConfig.distance_to_intersection_center(location)
     
+    @property
+    def goal_direction(self):
+        return self.data.get('goal_direction', 'straight')
     @property
     def goal_direction(self):
         return self.data.get('goal_direction', 'straight')

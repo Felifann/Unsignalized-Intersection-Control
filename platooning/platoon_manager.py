@@ -1,4 +1,6 @@
 import math
+
+from env.simulation_config import SimulationConfig
 from .platoon_policy import Platoon
 import carla
 
@@ -7,15 +9,15 @@ class PlatoonManager:
         self.state_extractor = state_extractor
         self.platoons = []  # List of Platoon objects
         self.intersection_center = intersection_center
-        self.max_platoon_size = 3  # 可配置的最大车队大小
+        self.max_platoon_size = 4  # 可配置的最大车队大小
         self.min_platoon_size = 2  # 最小车队大小改为2，单车不成队
-        self.max_following_distance = 15.0  # 车队内最大跟车距离（米）
+        self.max_following_distance = 10.0  # 车队内最大跟车距离（米）
 
     def update(self):
         # Step 1: 获取所有车辆状态
         vehicle_states = self.state_extractor.get_vehicle_states()
 
-        # Step 2: 筛选出交叉口 30m 范围内的车辆
+        # Step 2: 筛选出交叉口范围内的车辆
         intersection_vehicles = self._filter_near_intersection(vehicle_states)
 
         # Step 3: 对这些车辆按车道 + 目的方向聚类
@@ -28,9 +30,8 @@ class PlatoonManager:
             self.platoons.extend(platoons_from_group)
 
     def _filter_near_intersection(self, vehicle_states):
-        # 对每辆车计算与交叉口中心点的距离（欧氏距离）
-        # 返回 30 米以内的车辆
-        return [v for v in vehicle_states if self._distance_to_intersection(v) < 30]
+        # 使用正方形检测区域筛选交叉口附近的车辆
+        return [v for v in vehicle_states if SimulationConfig.is_in_intersection_area(v['location'])]
 
     def _group_by_lane_and_goal(self, vehicles):
         """按照车道ID + 目的方向分组，并确保车队内车辆相邻"""
@@ -155,10 +156,8 @@ class PlatoonManager:
             return None  # 估计失败的车辆不参与编队
 
     def _distance_to_intersection(self, vehicle):
-        # 返回车与交叉口中心的距离
-        x, y, z = vehicle['location']
-        center_x, center_y, center_z = self.intersection_center
-        return math.sqrt((x - center_x)**2 + (y - center_y)**2)
+        # 返回车与交叉口中心的距离（保持兼容性）
+        return SimulationConfig.distance_to_intersection_center(vehicle['location'])
 
     def _sort_by_distance(self, group):
         # 按照车辆到路口的距离从近到远排序
@@ -201,15 +200,14 @@ class PlatoonManager:
     def print_platoon_info(self):
         """打印车队详细信息（用于调试）"""
         stats = self.get_platoon_stats()
-        unplatoon_count = self.get_unplatoon_vehicles_count()
+        # unplatoon_count = self.get_unplatoon_vehicles_count()
         
         print(f"\n{'='*60}")
         print(f"🚗 相邻车队管理系统状态报告")
-        print(f"{'='*60}")
         print(f"📊 总体统计:")
         print(f"   - 相邻车队总数: {stats['num_platoons']}")
         print(f"   - 编队车辆数: {stats['vehicles_in_platoons']}")
-        print(f"   - 独行车辆数: {unplatoon_count}")
+        # print(f"   - 独行车辆数: {unplatoon_count}")
         print(f"   - 平均车队大小: {stats['avg_platoon_size']:.1f}")
         print(f"   - 方向分布: {stats['direction_distribution']}")
         print(f"\n🔍 详细车队信息:")
@@ -231,7 +229,7 @@ class PlatoonManager:
                 'straight': '⬆️'
             }
             
-            print(f"\n   🚙 相邻车队 {i+1}: {direction_emoji.get(direction, '❓')} {direction.upper()}")
+            print(f"\n   🚙 车队 {i+1}: {direction_emoji.get(direction, '❓')} {direction.upper()}")
             print(f"      📍 车道: Road {lane_info[0]}/Lane {lane_info[1]}" if lane_info else "      📍 车道: 未知")
             print(f"      👥 成员数: {platoon.get_size()}")
             print(f"      🏃 平均速度: {avg_speed:.1f} km/h")

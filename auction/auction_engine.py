@@ -1,5 +1,7 @@
 import time
 import math
+
+from env.simulation_config import SimulationConfig
 from .bid_policy import AgentBidPolicy
 from nash.conflict_resolver import ConflictResolver
 
@@ -25,11 +27,18 @@ class DecentralizedAuctionEngine:
         # 纳什均衡冲突解决器
         self.conflict_resolver = ConflictResolver(intersection_center)
         
-        print("🎯 分布式拍卖引擎初始化完成 - 集成纳什均衡冲突解决")
+        # 新增：车辆控制强制器
+        self.vehicle_enforcer = None  # 将在主程序中设置
+        
+        print("🎯 分布式拍卖引擎初始化完成 - 集成Nash均衡冲突解决和控制强制")
+
+    def set_vehicle_enforcer(self, vehicle_enforcer):
+        """设置车辆控制强制器"""
+        self.vehicle_enforcer = vehicle_enforcer
 
     def update(self, vehicle_states, platoon_manager):
         """
-        主更新函数：管理分布式拍卖过程并解决冲突
+        主更新函数：管理分布式拍卖过程并强制执行控制
         """
         current_time = time.time()
         
@@ -40,14 +49,11 @@ class DecentralizedAuctionEngine:
         current_agent_ids = [agent['id'] for agent in junction_agents]
         self.conflict_resolver.cleanup_old_agents(current_agent_ids)
         
-        # 3. 定期启动新拍卖（只有路口有车时才启动）
+        # 3. 定期启动新拍卖
         if current_time - self.last_auction_time >= self.auction_interval:
             if junction_agents:
                 auction_id = self._start_new_auction(junction_agents, current_time)
                 self.last_auction_time = current_time
-                print(f"🎯 启动路口竞价 {auction_id}，参与agents: {len(junction_agents)}个 "
-                      f"(车队:{len([a for a in junction_agents if a['type']=='platoon'])}个, "
-                      f"单车:{len([a for a in junction_agents if a['type']=='vehicle'])}个)")
         
         # 4. 处理正在进行的拍卖
         self._process_active_auctions(current_time)
@@ -55,18 +61,23 @@ class DecentralizedAuctionEngine:
         # 5. 获取当前优先级排序
         priority_order = self._get_current_priority_order()
         
-        # 6. 应用纳什均衡冲突解决（针对前几名获胜者）
+        # 6. 应用纳什均衡冲突解决（扩展到所有agents）
+        control_actions = {}
         if priority_order:
-            top_winners = priority_order[:3]  # 检查前3名是否冲突
-            top_winner_agents = [winner['agent'] for winner in top_winners]
+            # 获取所有获胜者agents（不限于前3名）
+            all_winner_agents = [winner['agent'] for winner in priority_order]
             
             # 检查并解决冲突
-            conflict_resolution = self.conflict_resolver.check_and_resolve(top_winner_agents)
+            control_actions = self.conflict_resolver.check_and_resolve(all_winner_agents)
             
-            # 更新优先级排序（应用冲突解决结果）
-            priority_order = self._apply_conflict_resolution(priority_order, conflict_resolution)
+            # 更新优先级排序
+            priority_order = self._apply_conflict_resolution(priority_order, control_actions)
         
-        # 7. 模拟车车通信
+        # 7. 🔥 新增：强制执行控制动作
+        if self.vehicle_enforcer and control_actions:
+            self.vehicle_enforcer.enforce_control_actions(control_actions)
+        
+        # 8. 模拟车车通信
         self._simulate_v2v_communication()
         
         return priority_order
@@ -108,8 +119,7 @@ class DecentralizedAuctionEngine:
     def _identify_junction_agents(self, vehicle_states, platoon_manager):
         """
         识别路口处的agents：
-        1. 只考虑在路口区域内或即将进入路口的车辆和车队
-        2. 按照先车队后单车的优先级组织agents
+        只要车队队长在路口区域就将该车队加入agents
         """
         agents = []
         
@@ -126,29 +136,26 @@ class DecentralizedAuctionEngine:
         
         for platoon in platoon_manager.get_all_platoons():
             leader = platoon.get_leader()
-            if leader and self._is_at_junction_area(leader):
-                # 检查整个车队是否都在路口区域或即将进入
-                if self._is_platoon_at_junction(platoon):
-                    platoon_agent = {
-                        'type': 'platoon',
-                        'id': f"platoon_{leader['id']}",
-                        'vehicles': platoon.vehicles,
-                        'goal_direction': platoon.get_goal_direction(),
-                        'leader_location': leader['location'],
-                        'location': leader['location'],  # 添加location字段用于冲突检测
-                        'size': platoon.get_size(),
-                        'at_junction': any(v['is_junction'] for v in platoon.vehicles)
-                    }
-                    agents.append(platoon_agent)
-                    
-                    # 记录platoon中的所有车辆ID
-                    for vehicle in platoon.vehicles:
-                        platoon_vehicle_ids.add(vehicle['id'])
+            if leader and leader.get('is_junction', False):
+                # 只要队长在路口区域就加入
+                platoon_agent = {
+                    'type': 'platoon',
+                    'id': f"platoon_{leader['id']}",
+                    'vehicles': platoon.vehicles,
+                    'goal_direction': platoon.get_goal_direction(),
+                    'leader_location': leader['location'],
+                    'location': leader['location'],
+                    'size': platoon.get_size(),
+                    'at_junction': any(v['is_junction'] for v in platoon.vehicles)
+                }
+                agents.append(platoon_agent)
+                # 记录platoon中的所有车辆ID
+                for vehicle in platoon.vehicles:
+                    platoon_vehicle_ids.add(vehicle['id'])
         
         # 2. 添加路口处的单个车辆作为agents
         for vehicle in junction_vehicles:
             if vehicle['id'] not in platoon_vehicle_ids:
-                # 只有有明确目的地的单车才参与竞价
                 if self._vehicle_has_destination(vehicle):
                     vehicle_agent = {
                         'type': 'vehicle',
@@ -188,39 +195,23 @@ class DecentralizedAuctionEngine:
             return 'straight'  # 返回默认方向
 
     def _get_junction_area_vehicles(self, vehicle_states):
-        """获取路口区域内及即将进入路口的车辆"""
+        """只获取已在路口内的车辆"""
         junction_vehicles = []
-        
         for vehicle in vehicle_states:
-            # 条件1: 已在路口内
             if vehicle['is_junction']:
                 junction_vehicles.append(vehicle)
-                continue
-            
-            # 条件2: 距离路口很近且朝向路口
-            distance_to_intersection = self._distance_to_intersection(vehicle)
-            if distance_to_intersection <= self.intersection_radius + 10.0:  # 路口半径+10米缓冲区
-                # 检查是否朝向路口行驶
-                if self._is_heading_to_intersection(vehicle):
-                    junction_vehicles.append(vehicle)
-        
         return junction_vehicles
 
+    # def _is_heading_to_intersection(self, vehicle):
+    #     """判断车辆是否朝向路口行驶"""
+    #     # 简化版本：基于车辆有目的地且在检测区域内
+    #     return (vehicle.get('destination') is not None and 
+    #             SimulationConfig.is_in_intersection_area(vehicle['location']))
+
     def _is_at_junction_area(self, vehicle):
-        """判断车辆是否在路口区域"""
+        """判断车辆是否在路口区域（使用正方形检测）"""
         return (vehicle['is_junction'] or 
-                self._distance_to_intersection(vehicle) <= self.intersection_radius + 10.0)
-
-    def _is_platoon_at_junction(self, platoon):
-        """判断车队是否在路口区域（队长在路口区域即可）"""
-        leader = platoon.get_leader()
-        return leader and self._is_at_junction_area(leader)
-
-    def _is_heading_to_intersection(self, vehicle):
-        """判断车辆是否朝向路口行驶"""
-        # 简化版本：基于车辆有目的地且距离路口较近
-        return (vehicle.get('destination') is not None and 
-                self._distance_to_intersection(vehicle) <= 25.0)
+                SimulationConfig.is_in_intersection_area(vehicle['location']))
 
     def _vehicle_has_destination(self, vehicle):
         """检查车辆是否有明确的目的地"""

@@ -37,7 +37,8 @@ class StateExtractor:
         self._destination_cache_timestamp = 0
         self._destination_cache_duration = 5.0  # 目标点缓存时间较长
         
-        self.radius_sq = SimulationConfig.INTERSECTION_RADIUS ** 2
+        # 使用正方形检测区域
+        self.intersection_half_size = SimulationConfig.INTERSECTION_HALF_SIZE
 
     def get_vehicle_states(self, force_update=False):
         """获取车辆状态，支持缓存机制"""
@@ -73,7 +74,6 @@ class StateExtractor:
             if vehicle.is_alive and vehicle.id in vehicle_waypoints
         ]
         
-        target_center = SimulationConfig.TARGET_INTERSECTION_CENTER
         vehicle_states = []
 
         for vehicle in valid_vehicles:
@@ -81,12 +81,11 @@ class StateExtractor:
                 transform = vehicle.get_transform()
                 location = transform.location
                 
-                # 检查车辆是否在目标交叉口半径内
-                dist_sq = (location.x - target_center[0])**2 + (location.y - target_center[1])**2
-                if dist_sq > self.radius_sq:
+                # 检查车辆是否在目标交叉口正方形区域内
+                if not SimulationConfig.is_in_intersection_area(location):
                     continue
                 
-                # 新增：剔除驶离路口的车辆
+                # 剔除驶离路口的车辆
                 if self._is_vehicle_leaving_intersection(vehicle, location, transform):
                     continue
                 
@@ -108,7 +107,7 @@ class StateExtractor:
                     'lane_id': current_waypoint.lane_id,  # 从waypoint获取车道ID
                     'is_junction': current_waypoint.is_junction,
                     'leading_vehicle_dist': leading_vehicle_dist,
-                    'distance_to_center': math.sqrt(dist_sq),
+                    'distance_to_center': self._calculate_distance_to_intersection_center(location),
                     'destination': self._vehicle_destinations.get(vehicle.id),  # 添加目标点信息
                 }
                 vehicle_states.append(state)
@@ -166,7 +165,7 @@ class StateExtractor:
                 return 'straight'
             
             # 分析路线中的转向
-            return self._analyze_route_direction(route, vehicle_location)
+            # return self._analyze_route_direction(route, vehicle_location)
             
         except Exception as e:
             print(f"[Warning] 路线方向分析失败: {e}")
@@ -311,7 +310,7 @@ class StateExtractor:
         }
 
     def _is_vehicle_leaving_intersection(self, vehicle, location, transform):
-        """判断车辆是否正在驶离交叉口"""
+        """判断车辆是否正在驶离交叉口（使用正方形区域）"""
         target_center = SimulationConfig.TARGET_INTERSECTION_CENTER
         
         # 计算车辆到交叉口中心的方向向量
@@ -327,35 +326,7 @@ class StateExtractor:
         # 如果点积为负，说明车辆正在远离交叉口
         return dot_product < 0
 
-    # 在 state_extractor.py 中改进目的地分配
-    def _assign_reasonable_destination(self, vehicle):
-        """为车辆分配合理的目的地"""
-        try:
-            current_location = vehicle.get_location()
-            world_map = self.world.get_map()
-            
-            # 获取当前车辆的waypoint
-            current_waypoint = world_map.get_waypoint(current_location)
-            if not current_waypoint:
-                return None
-                
-            # 基于当前道路选择合理的目的地
-            # 例如：选择距离路口较远但方向合理的spawn点
-            spawn_points = world_map.get_spawn_points()
-            
-            # 过滤掉距离过近的spawn点
-            suitable_destinations = []
-            for spawn_point in spawn_points:
-                distance = current_location.distance(spawn_point.location)
-                if 50.0 < distance < 200.0:  # 合理的目的地距离
-                    suitable_destinations.append(spawn_point.location)
-            
-            if suitable_destinations:
-                import random
-                return random.choice(suitable_destinations)
-            else:
-                return None
-                
-        except Exception as e:
-            print(f"[Warning] 分配目的地失败: {e}")
-            return None
+    def _calculate_distance_to_intersection_center(self, location):
+        """计算到交叉口中心的距离"""
+        return SimulationConfig.distance_to_intersection_center(location)
+

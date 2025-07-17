@@ -1,5 +1,6 @@
 import math
 import time
+from env.simulation_config import SimulationConfig
 
 class AgentBidPolicy:
     def __init__(self, agent, intersection_center=(-188.9, -89.7, 0.0), state_extractor=None):
@@ -50,31 +51,33 @@ class AgentBidPolicy:
         return max(0.0, final_bid)
 
     def _calculate_position_advantage(self):
-        """计算位置优势：车队在路口内获得更高优势"""
+        """计算位置优势：车队在路口内获得更高优势 - 使用正方形检测"""
         if self._is_platoon():
             leader = self.agent['vehicles'][0]
             at_junction = self.agent.get('at_junction', False)
-            distance = self._distance_to_intersection(leader)
-        
+            
             # 🔥 车队在路口内获得巨大位置优势
             if at_junction:
                 return 100.0  # 从30.0提升到100.0
-            elif distance <= 10.0:
-                return 50.0 - distance * 2  # 更高的接近奖励
-            elif distance <= 20.0:
-                return 30.0 - (distance - 10.0)
+            elif SimulationConfig.is_in_intersection_area(leader['location']):
+                # 在正方形区域内，距离中心越近优势越大
+                distance = SimulationConfig.distance_to_intersection_center(leader['location'])
+                half_size = SimulationConfig.INTERSECTION_HALF_SIZE
+                # 归一化距离并计算优势
+                normalized_distance = min(1.0, distance / half_size)
+                return 50.0 * (1 - normalized_distance)  # 距离越近优势越大
             else:
                 return 0.0
         else:
             at_junction = self.agent.get('at_junction', False)
-            distance = self._distance_to_intersection(self.agent['data'])
-        
+            
             if at_junction:
                 return 30.0  # 单车路口优势保持不变
-            elif distance <= 15.0:
-                return 15.0 - distance
-            elif distance <= 25.0:
-                return 10.0 - (distance - 15.0) * 0.5
+            elif SimulationConfig.is_in_intersection_area(self.agent['data']['location']):
+                distance = SimulationConfig.distance_to_intersection_center(self.agent['data']['location'])
+                half_size = SimulationConfig.INTERSECTION_HALF_SIZE
+                normalized_distance = min(1.0, distance / half_size)
+                return 15.0 * (1 - normalized_distance)
             else:
                 return 0.0
 
@@ -216,12 +219,10 @@ class AgentBidPolicy:
         velocity = vehicle_state.get('velocity', (0, 0, 0))
         return math.sqrt(velocity[0]**2 + velocity[1]**2)
 
-    def _distance_to_intersection(self, vehicle_state):
-        """计算到交叉口的距离"""
-        location = vehicle_state.get('location', (0, 0, 0))
-        dx = location[0] - self.intersection_center[0]
-        dy = location[1] - self.intersection_center[1]
-        return math.sqrt(dx*dx + dy*dy)
+    # def _distance_to_intersection(self, vehicle_state):
+    #     """计算到交叉口的距离"""
+    #     location = vehicle_state.get('location', (0, 0, 0))
+    #     return SimulationConfig.distance_to_intersection_center(location)
 
     def _calculate_wait_time_bonus(self):
         """计算等待时间奖励：等待越久，出价越高"""

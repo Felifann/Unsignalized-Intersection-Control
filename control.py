@@ -3,6 +3,7 @@ import math
 import time
 from typing import Dict, List, Set, Tuple, Optional
 from collections import defaultdict
+from env.simulation_config import SimulationConfig
 
 class TrafficController:
     """
@@ -16,10 +17,9 @@ class TrafficController:
         self.world = carla_wrapper.world
         self.traffic_manager = carla_wrapper.client.get_trafficmanager()
         
-        # 添加交叉口中心和半径配置
-        from env.simulation_config import SimulationConfig
+        # 添加交叉口中心和检测区域配置
         self.intersection_center = SimulationConfig.TARGET_INTERSECTION_CENTER
-        self.intersection_radius = SimulationConfig.INTERSECTION_RADIUS
+        self.intersection_half_size = SimulationConfig.INTERSECTION_HALF_SIZE
         
         # 初始化ConflictResolver
         from nash.conflict_resolver import ConflictResolver
@@ -65,7 +65,7 @@ class TrafficController:
         self._detect_and_handle_stuck_vehicles()
         
         # 3. 确保路口内车辆完成通过
-        self._ensure_intersection_vehicles_complete()
+        # self._ensure_intersection_vehicles_complete()
         
         # 4. 获取拍卖优先级排序
         auction_priority = []
@@ -106,44 +106,25 @@ class TrafficController:
                 self._apply_emergency_recovery(vehicle)
                 self.emergency_recovery_vehicles.add(vehicle_id)
             else:
-                # 如果车辆已经恢复，从撞车列表中移除
+                # 如果车辆已经恢复，从撞车列表中移除，并重置碰撞状态
                 if vehicle_id in self.crashed_vehicles:
                     self.crashed_vehicles.discard(vehicle_id)
                     self.emergency_recovery_vehicles.discard(vehicle_id)
                     print(f"✅ 车辆 {vehicle_id} 已恢复正常")
+                    # 重置碰撞状态
+                    if hasattr(self.carla, 'traffic_generator'):
+                        self.carla.traffic_generator.reset_collision_status(vehicle_id)
 
     def _is_vehicle_crashed(self, vehicle):
-        """判断车辆是否撞车"""
+        """判断车辆是否发生碰撞（优先使用CollisionSensor）"""
         try:
-            # 检查1：车辆速度是否异常低且有碰撞历史
-            velocity = vehicle.get_velocity()
-            speed = math.sqrt(velocity.x**2 + velocity.y**2)
-            
-            # 检查2：车辆是否卡在不合理的位置
-            transform = vehicle.get_transform()
-            location = transform.location
-            
-            # 获取车辆的碰撞边界框
-            bounding_box = vehicle.bounding_box
-            
-            # 检查是否与其他车辆重叠
-            for other_vehicle in self.world.get_actors().filter('vehicle.*'):
-                if other_vehicle.id == vehicle.id or not other_vehicle.is_alive:
-                    continue
-                    
-                other_location = other_vehicle.get_transform().location
-                distance = location.distance(other_location)
-                
-                # 如果两车距离过近且速度都很低，可能发生碰撞
-                if distance < 3.0:  # 小于3米
-                    other_velocity = other_vehicle.get_velocity()
-                    other_speed = math.sqrt(other_velocity.x**2 + other_velocity.y**2)
-                    
-                    if speed < 1.0 and other_speed < 1.0:  # 两车都几乎静止
-                        return True
-            
+            # 优先使用 traffic_generator 的碰撞状态
+            if hasattr(self.carla, 'traffic_generator'):
+                tg = self.carla.traffic_generator
+                if tg.get_collision_status(vehicle.id):
+                    print(f"[Collision] 车辆 {vehicle.id} 发生碰撞")
+                    return True
             return False
-            
         except Exception as e:
             print(f"[Warning] 碰撞检测失败 {vehicle.id}: {e}")
             return False
@@ -216,61 +197,173 @@ class TrafficController:
             print(f"[Warning] 疏导控制失败 {vehicle.id}: {e}")
 
     def _apply_auction_based_control(self, auction_priority):
-        """基于拍卖结果应用统一控制 - 增加安全检查"""
+        """基于拍卖结果应用统一控制 - 优化为竞价排队机制"""
         controlled_vehicles = set()
         
         if not auction_priority:
             return controlled_vehicles
         
-        print(f"🎯 基于拍卖结果应用控制，共{len(auction_priority)}个获胜agents")
+        print(f"🎯 基于竞价排序应用控制，共{len(auction_priority)}个参与agents")
         
-        # 分析是否有冲突路径的agents
-        conflicting_agents = self._identify_conflicting_agents(auction_priority)
+        # 1. 分析冲突路径的agent组合
+        conflict_groups = self._identify_conflict_groups(auction_priority)
         
+        # 2. 为每个agent分配控制状态
+        agent_control_status = self._determine_agent_control_status(auction_priority, conflict_groups)
+        
+        # 3. 应用控制参数
         for winner_data in auction_priority:
             agent = winner_data['agent']
             bid_value = winner_data['bid_value']
             rank = winner_data['rank']
-            conflict_action = winner_data.get('conflict_action', 'go')
             
-            # 安全检查：如果涉及撞车或卡住的车辆，跳过控制
+            # 安全检查：跳过有问题的车辆
             if self._agent_has_problematic_vehicles(agent):
                 print(f"⚠️ Agent {agent['id']} 包含问题车辆，跳过控制")
                 continue
             
-            # 如果被冲突解决器要求等待，使用更保守的控制参数
-            if conflict_action == 'wait':
-                control_modifier = 'wait'
-            elif agent['id'] in conflicting_agents and rank > 1:
-                control_modifier = 'cautious'  # 冲突路径的非第一名使用谨慎参数
-            else:
-                control_modifier = 'normal'
+            # 获取该agent的控制状态
+            control_status = agent_control_status.get(agent['id'], 'wait')
             
             try:
                 if agent['type'] == 'vehicle':
                     vehicle_id = agent['id']
-                    if self._apply_single_vehicle_control(vehicle_id, rank, bid_value, control_modifier):
+                    if self._apply_single_vehicle_control(vehicle_id, rank, bid_value, control_status):
                         controlled_vehicles.add(vehicle_id)
-                        action_emoji = "🟢" if conflict_action == 'go' else "🔴"
-                        print(f"   🏆 #{rank}: {action_emoji}🚗单车{vehicle_id} (出价:{bid_value:.1f})")
-                    
+                        status_emoji = "🟢" if control_status == 'go' else "🔴"
+                        print(f"   #{rank}: {status_emoji}🚗单车{vehicle_id} (出价:{bid_value:.1f}) - {control_status}")
+                
                 elif agent['type'] == 'platoon':
                     platoon_vehicles = agent['vehicles']
                     direction = agent['goal_direction']
                     controlled_in_platoon = self._apply_platoon_agent_control(
-                        platoon_vehicles, rank, bid_value, direction, control_modifier
+                        platoon_vehicles, rank, bid_value, direction, control_status
                     )
                     controlled_vehicles.update(controlled_in_platoon)
                     
-                    action_emoji = "🟢" if conflict_action == 'go' else "🔴"
-                    print(f"   🏆 #{rank}: {action_emoji}🚛车队{agent['id']} "
-                          f"({len(platoon_vehicles)}车-{direction}) (出价:{bid_value:.1f})")
-                
+                    status_emoji = "🟢" if control_status == 'go' else "🔴"
+                    print(f"   #{rank}: {status_emoji}🚛车队{agent['id']} "
+                          f"({len(platoon_vehicles)}车-{direction}) (出价:{bid_value:.1f}) - {control_status}")
+            
             except Exception as e:
                 print(f"[Warning] agent {agent['id']} 控制应用失败: {e}")
         
         return controlled_vehicles
 
+    def _identify_conflict_groups(self, auction_priority):
+        """识别冲突路径的agent组合"""
+        conflict_groups = []
+        agents = [w['agent'] for w in auction_priority]
+        
+        # 找出所有有冲突的agent对
+        for i, agent1 in enumerate(agents):
+            for j, agent2 in enumerate(agents[i+1:], i+1):
+                dir1 = agent1.get('goal_direction', 'straight')
+                dir2 = agent2.get('goal_direction', 'straight')
+                
+                if self._directions_have_conflict(dir1, dir2):
+                    # 找到冲突对，检查是否已在某个冲突组中
+                    group_found = False
+                    for group in conflict_groups:
+                        if agent1['id'] in [a['id'] for a in group] or agent2['id'] in [a['id'] for a in group]:
+                            # 加入现有组
+                            if agent1 not in group:
+                                group.append(agent1)
+                            if agent2 not in group:
+                                group.append(agent2)
+                            group_found = True
+                            break
+                    
+                    if not group_found:
+                        # 创建新的冲突组
+                        conflict_groups.append([agent1, agent2])
+        
+        return conflict_groups
+
+    def _determine_agent_control_status(self, auction_priority, conflict_groups):
+        """确定每个agent的控制状态：go/wait"""
+        agent_control_status = {}
+        bid_rank_map = {w['agent']['id']: w for w in auction_priority}
+        
+        # 默认所有agent都可以通行
+        for winner_data in auction_priority:
+            agent_control_status[winner_data['agent']['id']] = 'go'
+        
+        # 处理冲突组：出价低的必须等待
+        for conflict_group in conflict_groups:
+            if len(conflict_group) < 2:
+                continue
+            
+            # 按出价排序冲突组内的agents
+            group_with_bids = []
+            for agent in conflict_group:
+                agent_id = agent['id']
+                if agent_id in bid_rank_map:
+                    group_with_bids.append({
+                        'agent': agent,
+                        'bid_value': bid_rank_map[agent_id]['bid_value'],
+                        'rank': bid_rank_map[agent_id]['rank']
+                    })
+            
+            # 按出价从高到低排序
+            group_with_bids.sort(key=lambda x: x['bid_value'], reverse=True)
+            
+            # 检查当前是否有agent正在通过路口
+            someone_passing = self._check_if_someone_in_group_passing(group_with_bids)
+            
+            if someone_passing:
+                # 如果有人正在通过，其他人都等待
+                for i, item in enumerate(group_with_bids):
+                    if not self._is_agent_passing_intersection(item['agent']):
+                        agent_control_status[item['agent']['id']] = 'wait'
+                        print(f"🔄 冲突组内agent {item['agent']['id']} 等待通过中的agent完成")
+            else:
+                # 没有人在通过，只允许出价最高的通行
+                highest_bidder = group_with_bids[0]
+                agent_control_status[highest_bidder['agent']['id']] = 'go'
+                
+                # 其他人等待
+                for item in group_with_bids[1:]:
+                    agent_control_status[item['agent']['id']] = 'wait'
+                    print(f"🚦 冲突解决：agent {item['agent']['id']} (出价:{item['bid_value']:.1f}) "
+                          f"等待 agent {highest_bidder['agent']['id']} (出价:{highest_bidder['bid_value']:.1f}) 通过")
+        
+        return agent_control_status
+
+    def _check_if_someone_in_group_passing(self, group_with_bids):
+        """检查冲突组内是否有agent正在通过路口"""
+        for item in group_with_bids:
+            if self._is_agent_passing_intersection(item['agent']):
+                return True
+        return False
+
+    def _is_agent_passing_intersection(self, agent):
+        """检查agent是否正在通过路口"""
+        if agent['type'] == 'vehicle':
+            vehicle_id = agent['id']
+            try:
+                carla_vehicle = self.world.get_actor(vehicle_id)
+                if carla_vehicle and carla_vehicle.is_alive:
+                    location = carla_vehicle.get_location()
+                    return self._is_vehicle_in_intersection(location)
+            except:
+                pass
+            return False
+        
+        elif agent['type'] == 'platoon':
+            # 检查车队是否有车辆在路口内
+            for vehicle_state in agent['vehicles']:
+                vehicle_id = vehicle_state['id']
+                try:
+                    carla_vehicle = self.world.get_actor(vehicle_id)
+                    if carla_vehicle and carla_vehicle.is_alive:
+                        location = carla_vehicle.get_location()
+                        if self._is_vehicle_in_intersection(location):
+                            return True
+                except:
+                    pass
+        return False
+    
     def _agent_has_problematic_vehicles(self, agent):
         """检查agent是否包含有问题的车辆"""
         if agent['type'] == 'vehicle':
@@ -379,8 +472,6 @@ class TrafficController:
             self.traffic_manager.ignore_vehicles_percentage(
                 carla_vehicle, control_params['ignore_vehicles']
             )
-            # 移除不存在的set_desired_speed方法
-            # 速度控制已经通过vehicle_percentage_speed_difference实现
 
             # 记录控制状态
             self.controlled_vehicles[vehicle_id] = {
@@ -432,8 +523,6 @@ class TrafficController:
                 self.traffic_manager.ignore_vehicles_percentage(
                     carla_vehicle, control_params['ignore_vehicles']
                 )
-                # 移除不存在的set_desired_speed方法
-                # 速度控制已经通过vehicle_percentage_speed_difference实现
 
                 # 记录控制状态
                 self.controlled_vehicles[vehicle_id] = {
@@ -521,16 +610,18 @@ class TrafficController:
         return base_params
 
     def _get_platoon_follower_params(self, rank, control_modifier='normal'):
-        """获取车队跟随者的控制参数 - 增强紧密跟随"""
+        """获取车队跟随者的控制参数 - 完全跟随队长"""
         base_params = self._get_control_params_by_rank(rank, control_modifier)
         
-        # 🔥 车队跟随者必须紧密跟随确保整个车队一起通过
+        # 🔥 车队跟随者完全跟随队长，保持固定跟随距离
         if control_modifier != 'wait':
-            base_params['follow_distance'] = 0.5  # 🔥 极度紧密跟随
-            base_params['ignore_lights'] = min(100.0, base_params['ignore_lights'] + 20.0)
-            base_params['ignore_signs'] = min(100.0, base_params['ignore_signs'] + 20.0)
-            base_params['ignore_vehicles'] = min(60.0, base_params['ignore_vehicles'] + 15.0)
-            base_params['speed_diff'] -= 10.0  # 保持与队长相近的速度
+            base_params['follow_distance'] = 1.0  # 跟随距离固定为1米
+            base_params['ignore_lights'] = min(100.0, 100)
+            base_params['ignore_signs'] = min(100.0, 100)
+            base_params['ignore_vehicles'] = min(100.0, 100)
+            base_params['speed_diff'] = 0.0  # 跟随者速度与队长保持一致
+    
+        return base_params
     
         return base_params
     
@@ -594,29 +685,17 @@ class TrafficController:
                 pass
 
     def _is_vehicle_in_intersection(self, vehicle_location):
-        """检查车辆是否在路口内"""
+        """检查车辆是否在路口内（使用正方形区域）"""
         try:
-            # 计算车辆到路口中心的距离
-            distance = self._calculate_distance_to_intersection(vehicle_location)
-            
-            # 如果距离小于路口半径，则认为在路口内
-            return distance <= self.intersection_radius
+            # 使用配置文件中的正方形检测方法
+            return SimulationConfig.is_in_intersection_area(vehicle_location)
         except Exception as e:
             print(f"[Warning] 检查车辆是否在路口失败: {e}")
             return False
 
-    def _calculate_distance_to_intersection(self, location):
-        """计算位置到路口中心的距离"""
-        if hasattr(location, 'x'):
-            # CARLA Location对象
-            dx = location.x - self.intersection_center[0]
-            dy = location.y - self.intersection_center[1]
-        else:
-            # 元组或列表
-            dx = location[0] - self.intersection_center[0]
-            dy = location[1] - self.intersection_center[1]
-        
-        return (dx * dx + dy * dy) ** 0.5
+    # def _calculate_distance_to_intersection(self, location):
+    #     """计算位置到路口中心的距离（保持兼容性）"""
+    #     return SimulationConfig.distance_to_intersection_center(location)
 
     def emergency_reset_all_controls(self):
         """紧急重置所有控制"""
@@ -657,93 +736,93 @@ class TrafficController:
             'intersection_pass_vehicles': len(self.intersection_pass_vehicles)
         }
     
-    def _ensure_intersection_vehicles_complete(self):
-        """确保路口内的受控车辆完成通过 - 增强车队协调"""
-        current_time = time.time()
+    # def _ensure_intersection_vehicles_complete(self):
+    #     """确保路口内的受控车辆完成通过 - 增强车队协调"""
+    #     current_time = time.time()
         
-        for vehicle_id, control_info in self.controlled_vehicles.items():
-            try:
-                carla_vehicle = self.world.get_actor(vehicle_id)
-                if not carla_vehicle or not carla_vehicle.is_alive:
-                    continue
+    #     for vehicle_id, control_info in self.controlled_vehicles.items():
+    #         try:
+    #             carla_vehicle = self.world.get_actor(vehicle_id)
+    #             if not carla_vehicle or not carla_vehicle.is_alive:
+    #                 continue
                 
-                vehicle_location = carla_vehicle.get_location()
-                if self._is_vehicle_in_intersection(vehicle_location):
-                    # 🔥 增强：车队成员在路口内使用车队专用参数
-                    if self._is_vehicle_in_platoon(vehicle_id):
-                        self._apply_platoon_intersection_pass_params(carla_vehicle)
-                        # 记录车队强制通过状态
-                        platoon_info = self._get_vehicle_platoon_info(vehicle_id)
-                        if platoon_info:
-                            self._log_intersection_pass(vehicle_id, current_time, 
-                                f"车队{platoon_info['platoon_id']}成员强制通过路口 (位置:{platoon_info['position_in_platoon']})")
-                        else:
-                            self._log_intersection_pass(vehicle_id, current_time, "车队成员强制通过路口")
-                    else:
-                        self._apply_intersection_pass_params(carla_vehicle)
-                        self._log_intersection_pass(vehicle_id, current_time, "单车强制通过路口")
-                else:
-                    # 车辆已离开路口，恢复默认行为
-                    self._restore_default_behavior(carla_vehicle)
+    #             vehicle_location = carla_vehicle.get_location()
+    #             if self._is_vehicle_in_intersection(vehicle_location):
+    #                 # 🔥 增强：车队成员在路口内使用车队专用参数
+    #                 if self._is_vehicle_in_platoon(vehicle_id):
+    #                     self._apply_platoon_intersection_pass_params(carla_vehicle)
+    #                     # 记录车队强制通过状态
+    #                     platoon_info = self._get_vehicle_platoon_info(vehicle_id)
+    #                     if platoon_info:
+    #                         self._log_intersection_pass(vehicle_id, current_time, 
+    #                             f"车队{platoon_info['platoon_id']}成员强制通过路口 (位置:{platoon_info['position_in_platoon']})")
+    #                     else:
+    #                         self._log_intersection_pass(vehicle_id, current_time, "车队成员强制通过路口")
+    #                 else:
+    #                     self._apply_intersection_pass_params(carla_vehicle)
+    #                     self._log_intersection_pass(vehicle_id, current_time, "单车强制通过路口")
+    #             else:
+    #                 # 车辆已离开路口，恢复默认行为
+    #                 self._restore_default_behavior(carla_vehicle)
                         
-            except Exception as e:
-                print(f"[Warning] 检查路口内车辆失败: {e}")
+    #         except Exception as e:
+    #             print(f"[Warning] 检查路口内车辆失败: {e}")
 
-    def _is_vehicle_in_platoon(self, vehicle_id):
-        """检查车辆是否属于某个车队 - 增强错误处理"""
-        try:
-            if hasattr(self, 'platoon_manager') and self.platoon_manager:
-                # 遍历所有车队检查车辆是否在其中
-                all_platoons = self.platoon_manager.get_all_platoons()
-                for platoon in all_platoons:
-                    if hasattr(platoon, 'vehicles') and platoon.vehicles:
-                        platoon_vehicle_ids = [v['id'] for v in platoon.vehicles]
-                        if vehicle_id in platoon_vehicle_ids:
-                            return True
-            return False
-        except Exception as e:
-            print(f"[Warning] 检查车辆{vehicle_id}是否在车队失败: {e}")
-            return False
+    # def _is_vehicle_in_platoon(self, vehicle_id):
+    #     """检查车辆是否属于某个车队 - 增强错误处理"""
+    #     try:
+    #         if hasattr(self, 'platoon_manager') and self.platoon_manager:
+    #             # 遍历所有车队检查车辆是否在其中
+    #             all_platoons = self.platoon_manager.get_all_platoons()
+    #             for platoon in all_platoons:
+    #                 if hasattr(platoon, 'vehicles') and platoon.vehicles:
+    #                     platoon_vehicle_ids = [v['id'] for v in platoon.vehicles]
+    #                     if vehicle_id in platoon_vehicle_ids:
+    #                         return True
+    #         return False
+    #     except Exception as e:
+    #         print(f"[Warning] 检查车辆{vehicle_id}是否在车队失败: {e}")
+    #         return False
 
-    def _get_vehicle_platoon_info(self, vehicle_id):
-        """获取车辆所在车队的信息"""
-        if hasattr(self, 'platoon_manager') and self.platoon_manager:
-            for platoon in self.platoon_manager.get_all_platoons():
-                platoon_vehicle_ids = [v['id'] for v in platoon.vehicles]
-                if vehicle_id in platoon_vehicle_ids:
-                    # 修正：使用正确的车队ID属性名
-                    platoon_id = getattr(platoon, 'platoon_id', getattr(platoon, 'id', f'platoon_{hash(platoon)}'))
-                    return {
-                        'platoon_id': platoon_id,
-                        'platoon_size': len(platoon.vehicles),
-                        'is_leader': platoon.vehicles[0]['id'] == vehicle_id,
-                        'position_in_platoon': platoon_vehicle_ids.index(vehicle_id)
-                    }
-        return None
+    # def _get_vehicle_platoon_info(self, vehicle_id):
+    #     """获取车辆所在车队的信息"""
+    #     if hasattr(self, 'platoon_manager') and self.platoon_manager:
+    #         for platoon in self.platoon_manager.get_all_platoons():
+    #             platoon_vehicle_ids = [v['id'] for v in platoon.vehicles]
+    #             if vehicle_id in platoon_vehicle_ids:
+    #                 # 修正：使用正确的车队ID属性名
+    #                 platoon_id = getattr(platoon, 'platoon_id', getattr(platoon, 'id', f'platoon_{hash(platoon)}'))
+    #                 return {
+    #                     'platoon_id': platoon_id,
+    #                     'platoon_size': len(platoon.vehicles),
+    #                     'is_leader': platoon.vehicles[0]['id'] == vehicle_id,
+    #                     'position_in_platoon': platoon_vehicle_ids.index(vehicle_id)
+    #                 }
+    #     return None
 
-    def _apply_platoon_intersection_pass_params(self, carla_vehicle):
-        """为路口内车队车辆应用更激进的强制通过参数（所有成员与队长完全一致）"""
-        try:
-            vehicle_id = carla_vehicle.id
-            platoon_info = self._get_vehicle_platoon_info(vehicle_id)
+    # def _apply_platoon_intersection_pass_params(self, carla_vehicle):
+    #     """为路口内车队车辆应用更激进的强制通过参数（所有成员与队长完全一致）"""
+    #     try:
+    #         vehicle_id = carla_vehicle.id
+    #         platoon_info = self._get_vehicle_platoon_info(vehicle_id)
             
-            if platoon_info:
-                # 所有成员都采用队长参数，确保同步
-                self.traffic_manager.vehicle_percentage_speed_difference(carla_vehicle, -95.0)
-                self.traffic_manager.distance_to_leading_vehicle(carla_vehicle, 0.8)
-                self.traffic_manager.ignore_lights_percentage(carla_vehicle, 100.0)
-                self.traffic_manager.ignore_signs_percentage(carla_vehicle, 100.0)
-                self.traffic_manager.ignore_vehicles_percentage(carla_vehicle, 90.0)
-            else:
-                # 如果获取车队信息失败，使用默认车队参数
-                self.traffic_manager.vehicle_percentage_speed_difference(carla_vehicle, -90.0)
-                self.traffic_manager.distance_to_leading_vehicle(carla_vehicle, 0.2)
-                self.traffic_manager.ignore_lights_percentage(carla_vehicle, 100.0)
-                self.traffic_manager.ignore_signs_percentage(carla_vehicle, 100.0)
-                self.traffic_manager.ignore_vehicles_percentage(carla_vehicle, 95.0)
+    #         if platoon_info:
+    #             # 所有成员都采用队长参数，确保同步
+    #             self.traffic_manager.vehicle_percentage_speed_difference(carla_vehicle, -95.0)
+    #             self.traffic_manager.distance_to_leading_vehicle(carla_vehicle, 0.8)
+    #             self.traffic_manager.ignore_lights_percentage(carla_vehicle, 100.0)
+    #             self.traffic_manager.ignore_signs_percentage(carla_vehicle, 100.0)
+    #             self.traffic_manager.ignore_vehicles_percentage(carla_vehicle, 90.0)
+    #         else:
+    #             # 如果获取车队信息失败，使用默认车队参数
+    #             self.traffic_manager.vehicle_percentage_speed_difference(carla_vehicle, -90.0)
+    #             self.traffic_manager.distance_to_leading_vehicle(carla_vehicle, 0.2)
+    #             self.traffic_manager.ignore_lights_percentage(carla_vehicle, 100.0)
+    #             self.traffic_manager.ignore_signs_percentage(carla_vehicle, 100.0)
+    #             self.traffic_manager.ignore_vehicles_percentage(carla_vehicle, 95.0)
                 
-        except Exception as e:
-            print(f"[Warning] 应用车队路口强制通过参数失败 {carla_vehicle.id}: {e}")
+    #     except Exception as e:
+    #         print(f"[Warning] 应用车队路口强制通过参数失败 {carla_vehicle.id}: {e}")
 
     def _apply_intersection_pass_params(self, carla_vehicle):
         """为路口内单车应用强制通过参数"""
@@ -766,3 +845,13 @@ class TrafficController:
         if current_time - self.last_control_log_time[vehicle_id] >= self.control_log_interval:
             print(f"🚧 [路口控制] 车辆{vehicle_id}: {message}")
             self.last_control_log_time[vehicle_id] = current_time
+
+    def _is_vehicle_in_platoon(self, vehicle_id, platoon_manager):
+        """
+        判断某车辆是否属于某个车队
+        """
+        for platoon in platoon_manager.get_all_platoons():
+            for vehicle in platoon.vehicles:
+                if vehicle['id'] == vehicle_id:
+                    return True
+        return False

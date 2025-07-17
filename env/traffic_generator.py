@@ -7,7 +7,8 @@ class TrafficGenerator:
     def __init__(self, carla_wrapper, max_vehicles=None):
         self.carla = carla_wrapper
         self.max_vehicles = max_vehicles or SimulationConfig.MAX_VEHICLES
-        self.vehicle_labels = {}  # 存储车辆标签的引用
+        self.vehicle_labels = {}
+        self.collision_sensors = {}  # 新增：存储每辆车的碰撞传感器
 
     def _create_vehicle_label(self, vehicle):
         """为车辆创建ID标签"""
@@ -60,7 +61,32 @@ class TrafficGenerator:
                     traffic_manager.distance_to_leading_vehicle(vehicle, 0.8)
                 
                 self.vehicles.append(vehicle)
-                # print(f"车辆 {vehicle.id} 已生成并启用高速自动驾驶")
+
+                # 新增：为每辆车添加碰撞传感器
+                collision_sensor = self.carla.world.spawn_actor(
+                    self.carla.blueprint_library.find('sensor.other.collision'),
+                    carla.Transform(),
+                    attach_to=vehicle
+                )
+                self.collision_sensors[vehicle.id] = collision_sensor
+                collision_sensor.listen(lambda event, vid=vehicle.id: self._on_collision(event, vid))
+
+    def _on_collision(self, event, vehicle_id):
+        """碰撞事件回调，记录碰撞状态"""
+        if not hasattr(self, 'collision_status'):
+            self.collision_status = {}
+        self.collision_status[vehicle_id] = True
+
+    def reset_collision_status(self, vehicle_id):
+        """重置车辆碰撞状态（可在恢复后调用）"""
+        if hasattr(self, 'collision_status'):
+            self.collision_status[vehicle_id] = False
+
+    def get_collision_status(self, vehicle_id):
+        """获取车辆是否发生碰撞"""
+        if hasattr(self, 'collision_status'):
+            return self.collision_status.get(vehicle_id, False)
+        return False
 
     def update_vehicle_labels(self):
         """更新所有车辆的ID标签位置"""

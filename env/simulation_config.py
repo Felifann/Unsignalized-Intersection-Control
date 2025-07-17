@@ -29,8 +29,9 @@ class SimulationConfig:
     # ===== 目标交叉口设置 =====
     # Town05 的主十字路口中心坐标 (确认为无信号灯路口)
     TARGET_INTERSECTION_CENTER = (-188.9, -89.7, 0.0)
-    # 监控半径（米）
-    INTERSECTION_RADIUS = 40  # 增加到40米，确保能捕获接近的车辆
+    # 改为正方形检测区域 - 边长80米（半边长40米）
+    INTERSECTION_HALF_SIZE = 40.0  # 正方形半边长（米）
+    INTERSECTION_RADIUS = 40.0  # 保持兼容性，等同于半边长
     
     # 新增：明确标识这是无信号灯路口
     INTERSECTION_TYPE = 'unsignalized'  # 'signalized' 或 'unsignalized'
@@ -49,3 +50,35 @@ class SimulationConfig:
         """获取当前地图的俯瞰视角设置"""
         return cls.OVERVIEW_SETTINGS.get(cls.MAP_NAME, 
                                         {'location': (100, 100, 150), 'rotation': (-90, 0, 0)})
+    
+    @classmethod
+    def is_in_intersection_area(cls, location):
+        """检查位置是否在正方形交叉口区域内"""
+        center = cls.TARGET_INTERSECTION_CENTER
+        half_size = cls.INTERSECTION_HALF_SIZE
+        
+        # 检查x和y坐标是否都在正方形范围内
+        if hasattr(location, 'x'):
+            # CARLA Location对象
+            x, y = location.x, location.y
+        else:
+            # 元组或列表
+            x, y = location[0], location[1]
+        
+        return (abs(x - center[0]) <= half_size and 
+                abs(y - center[1]) <= half_size)
+    
+    @classmethod
+    def distance_to_intersection_center(cls, location):
+        """计算到交叉口中心的距离（保持兼容性）"""
+        center = cls.TARGET_INTERSECTION_CENTER
+        if hasattr(location, 'x'):
+            # CARLA Location对象
+            dx = location.x - center[0]
+            dy = location.y - center[1]
+        else:
+            # 元组或列表
+            dx = location[0] - center[0]
+            dy = location[1] - center[1]
+        
+        return (dx * dx + dy * dy) ** 0.5
