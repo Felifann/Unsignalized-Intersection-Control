@@ -30,6 +30,10 @@ class DecentralizedAuctionEngine:
         # 新增：车辆控制强制器
         self.vehicle_enforcer = None  # 将在主程序中设置
         
+        # 新增：通行权保护机制
+        self.agents_in_transit = {}  # {agent_id: {'start_time': time, 'priority_rank': rank}}
+        self.protected_agents = set()  # 正在通过路口且受保护的agent
+        
         print("🎯 分布式拍卖引擎初始化完成 - 集成Nash均衡冲突解决和控制强制")
 
     def set_vehicle_enforcer(self, vehicle_enforcer):
@@ -49,11 +53,10 @@ class DecentralizedAuctionEngine:
         current_agent_ids = [agent['id'] for agent in junction_agents]
         self.conflict_resolver.cleanup_old_agents(current_agent_ids)
         
-        # 3. 定期启动新拍卖
-        if current_time - self.last_auction_time >= self.auction_interval:
-            if junction_agents:
-                auction_id = self._start_new_auction(junction_agents, current_time)
-                self.last_auction_time = current_time
+        # 3. 定期启动新拍卖（仅当没有活跃拍卖时）
+        if junction_agents and not self.active_auctions:
+            auction_id = self._start_new_auction(junction_agents, current_time)
+            self.last_auction_time = current_time
         
         # 4. 处理正在进行的拍卖
         self._process_active_auctions(current_time)
@@ -61,24 +64,27 @@ class DecentralizedAuctionEngine:
         # 5. 获取当前优先级排序
         priority_order = self._get_current_priority_order()
         
-        # 6. 应用纳什均衡冲突解决（扩展到所有agents）
-        control_actions = {}
-        if priority_order:
-            # 获取所有获胜者agents（不限于前3名）
-            all_winner_agents = [winner['agent'] for winner in priority_order]
+        # # 6. 应用纳什均衡冲突解决（扩展到所有agents）
+        # control_actions = {}
+        # if priority_order:
+        #     # 获取所有获胜者agents（不限于前3名）
+        #     all_winner_agents = [winner['agent'] for winner in priority_order]
             
-            # 检查并解决冲突
-            control_actions = self.conflict_resolver.check_and_resolve(all_winner_agents)
+        #     # 检查并解决冲突
+        #     control_actions = self.conflict_resolver.check_and_resolve(all_winner_agents)
             
-            # 更新优先级排序
-            priority_order = self._apply_conflict_resolution(priority_order, control_actions)
+        #     # 更新优先级排序
+        #     priority_order = self._apply_conflict_resolution(priority_order, control_actions)
         
-        # 7. 🔥 新增：强制执行控制动作
-        if self.vehicle_enforcer and control_actions:
-            self.vehicle_enforcer.enforce_control_actions(control_actions)
+        # # 7. 🔥 新增：强制执行控制动作
+        # if self.vehicle_enforcer and control_actions:
+        #     self.vehicle_enforcer.enforce_control_actions(control_actions)
         
         # 8. 模拟车车通信
         self._simulate_v2v_communication()
+        
+        # 新增：清理已完成通过的受保护agent
+        self._cleanup_completed_transit_agents(vehicle_states, platoon_manager)
         
         return priority_order
 
@@ -311,31 +317,124 @@ class DecentralizedAuctionEngine:
                 }
 
     def _evaluate_auction(self, auction_id, auction_data):
-        """评估拍卖并确定获胜者优先级"""
+        """评估拍卖并确定获胜者优先级 - 增加通行权保护"""
         bids = auction_data['bids']
         
         if not bids:
             return []
         
-        # 按出价从高到低排序
+        # 1. 首先识别正在通过路口的agent，给予最高优先级
+        protected_winners = self._get_protected_agents_with_priority(bids)
+        
+        # 2. 对剩余agent按出价排序
+        remaining_bids = {k: v for k, v in bids.items() 
+                         if k not in [w['id'] for w in protected_winners]}
+        
         sorted_bidders = sorted(
-            bids.items(),
+            remaining_bids.items(),
             key=lambda x: x[1]['bid_value'],
             reverse=True
         )
         
-        # 构建获胜者列表
-        winners = []
+        # 3. 构建最终获胜者列表：保护的agent在前，其他按出价排序
+        winners = protected_winners.copy()
+        
         for bidder_id, bid_data in sorted_bidders:
             winner_entry = {
                 'id': bidder_id,
                 'agent': bid_data['agent'],
                 'bid_value': bid_data['bid_value'],
-                'rank': len(winners) + 1
+                'rank': len(winners) + 1,
+                'protected': False
             }
             winners.append(winner_entry)
         
         return winners
+    
+    def _get_protected_agents_with_priority(self, bids):
+        """获取正在通过路口且受保护的agent，给予最高优先级"""
+        protected_winners = []
+        
+        for bidder_id, bid_data in bids.items():
+            agent = bid_data['agent']
+            
+            # 检查agent是否正在通过路口
+            if self._is_agent_in_transit(agent):
+                # 标记为受保护状态
+                self.protected_agents.add(bidder_id)
+                self.agents_in_transit[bidder_id] = {
+                    'start_time': time.time(),
+                    'original_bid': bid_data['bid_value']
+                }
+                
+                protected_winner = {
+                    'id': bidder_id,
+                    'agent': agent,
+                    'bid_value': bid_data['bid_value'] + 1000.0,  # 给予超高优先级
+                    'rank': len(protected_winners) + 1,
+                    'protected': True
+                }
+                protected_winners.append(protected_winner)
+                print(f"🛡️ Agent {bidder_id} 正在通过路口，获得保护优先级")
+        
+        return protected_winners
+    
+    def _is_agent_in_transit(self, agent):
+        """检查agent是否正在通过路口"""
+        if agent['type'] == 'vehicle':
+            vehicle_data = agent['data']
+            return vehicle_data.get('is_junction', False)
+        
+        elif agent['type'] == 'platoon':
+            # 车队中任何一辆车在路口内就认为整个车队在通过
+            for vehicle in agent['vehicles']:
+                if vehicle.get('is_junction', False):
+                    return True
+        
+        return False
+    
+    def _cleanup_completed_transit_agents(self, vehicle_states, platoon_manager):
+        """清理已完成通过路口的受保护agent"""
+        current_time = time.time()
+        completed_agents = []
+        
+        for agent_id in list(self.protected_agents):
+            # 检查agent是否仍在路口内
+            agent_still_in_transit = False
+            
+            # 根据vehicle_states检查
+            for vehicle_state in vehicle_states:
+                vehicle_id = vehicle_state['id']
+                
+                # 检查单车agent
+                if str(vehicle_id) == str(agent_id):
+                    if vehicle_state.get('is_junction', False):
+                        agent_still_in_transit = True
+                        break
+                
+                # 检查车队agent（agent_id格式: "platoon_123"）
+                elif str(agent_id).startswith('platoon_'):
+                    # 从agent_id中提取队长ID
+                    try:
+                        leader_id = str(agent_id).replace('platoon_', '')
+                        if str(vehicle_id) == leader_id:
+                            if vehicle_state.get('is_junction', False):
+                                agent_still_in_transit = True
+                                break
+                    except:
+                        continue
+            
+            # 如果agent不再在路口内，或者保护时间过长（防止卡死）
+            transit_time = current_time - self.agents_in_transit.get(agent_id, {}).get('start_time', current_time)
+            
+            if not agent_still_in_transit or transit_time > 30.0:  # 30秒超时保护
+                completed_agents.append(agent_id)
+                print(f"✅ Agent {agent_id} 完成路口通过，移除保护状态")
+        
+        # 清理完成的agent
+        for agent_id in completed_agents:
+            self.protected_agents.discard(agent_id)
+            self.agents_in_transit.pop(agent_id, None)
 
     def _broadcast_auction_start(self, auction_id, agents):
         """广播拍卖开始消息"""

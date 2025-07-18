@@ -10,7 +10,7 @@ class SimulationConfig:
     
     # ===== 仿真设置 =====
     SYNCHRONOUS_MODE = True
-    FIXED_DELTA_SECONDS = 0.1
+    FIXED_DELTA_SECONDS = 0.2
     
     # ===== 交通生成设置 =====
     MAX_VEHICLES = 500
@@ -44,6 +44,10 @@ class SimulationConfig:
     
     # ===== 打印设置 =====
     PRINT_INTERVAL = 30
+    
+    # ===== 路口容量控制设置 =====
+    MAX_CONCURRENT_AGENTS = 4      # 最多同时通过的agent数
+    INTERSECTION_CAPACITY_ENABLED = True  # 是否启用容量限制
     
     @classmethod
     def get_overview_setting(cls):

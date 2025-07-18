@@ -22,6 +22,8 @@ class CarlaWrapper:
         settings = self.world.get_settings()
         settings.synchronous_mode = SimulationConfig.SYNCHRONOUS_MODE
         settings.fixed_delta_seconds = SimulationConfig.FIXED_DELTA_SECONDS
+        settings.max_substep_delta_time = 0.05  # 例如 0.05 秒
+        settings.max_substeps = 10              # 例如 10 步
         self.world.apply_settings(settings)
         
         # 设置全局俯瞰视角

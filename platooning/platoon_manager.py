@@ -11,7 +11,7 @@ class PlatoonManager:
         self.intersection_center = intersection_center
         self.max_platoon_size = 4  # 可配置的最大车队大小
         self.min_platoon_size = 2  # 最小车队大小改为2，单车不成队
-        self.max_following_distance = 10.0  # 车队内最大跟车距离（米）
+        self.max_following_distance = 30.0  # 车队内最大跟车距离（米）
 
     def update(self):
         # Step 1: 获取所有车辆状态

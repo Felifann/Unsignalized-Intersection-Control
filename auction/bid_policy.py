@@ -1,4 +1,5 @@
 import math
+import random
 import time
 from env.simulation_config import SimulationConfig
 
@@ -9,6 +10,7 @@ class AgentBidPolicy:
         self.state_extractor = state_extractor
         
     def compute_bid(self):
+
         """
         路口竞价策略：针对路口通行优化 - 车队优先版
         返回出价值（越高优先级越高）

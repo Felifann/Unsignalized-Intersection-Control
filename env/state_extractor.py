@@ -25,7 +25,7 @@ class StateExtractor:
         # 新增：状态缓存机制
         self._vehicle_states_cache = []
         self._states_cache_timestamp = 0
-        self._states_cache_duration = 0.05  # 缓存持续时间（秒）
+        self._states_cache_duration = 0.1  # 缓存持续时间（秒）
         
         # 新增：waypoint缓存
         self._waypoint_cache = {}
@@ -165,7 +165,7 @@ class StateExtractor:
                 return 'straight'
             
             # 分析路线中的转向
-            # return self._analyze_route_direction(route, vehicle_location)
+            return self._analyze_route_direction(route, vehicle_location)
             
         except Exception as e:
             print(f"[Warning] 路线方向分析失败: {e}")
