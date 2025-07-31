@@ -31,7 +31,6 @@ class SimulationConfig:
     TARGET_INTERSECTION_CENTER = (-188.9, -89.7, 0.0)
     # 改为正方形检测区域 - 边长80米（半边长40米）
     INTERSECTION_HALF_SIZE = 40.0  # 正方形半边长（米）
-    INTERSECTION_RADIUS = 40.0  # 保持兼容性，等同于半边长
     
     # 新增：明确标识这是无信号灯路口
     INTERSECTION_TYPE = 'unsignalized'  # 'signalized' 或 'unsignalized'

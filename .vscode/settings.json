@@ -1,0 +1,7 @@
+{
+  "python.defaultInterpreterPath": "/cs/student/projects2/seiot/2024/xueyifan/python3.7/bin/python3",
+  "python.terminal.activateEnvironment": false,
+  "python-envs.defaultEnvManager": "ms-python.python:system",
+  "python-envs.pythonProjects": [],
+  "python.languageServer": "Default"
+}
