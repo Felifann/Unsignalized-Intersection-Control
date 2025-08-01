@@ -25,7 +25,7 @@ from env.state_extractor import StateExtractor
 from env.simulation_config import SimulationConfig
 
 # ===== 车队管理模块 =====
-from platooning.platoon_manager import PlatoonManager
+# from platooning.platoon_manager import PlatoonManager
 
 # ===== 拍卖系统模块 =====
 from auction.auction_engine import DecentralizedAuctionEngine
@@ -38,7 +38,7 @@ scenario = ScenarioManager()
 state_extractor = StateExtractor(scenario.carla)
 
 # 初始化车队管理 - 传入state_extractor用于导航
-platoon_manager = PlatoonManager(state_extractor)
+# platoon_manager = PlatoonManager(state_extractor)
 
 # 初始化分布式拍卖引擎 - 传入state_extractor
 auction_engine = DecentralizedAuctionEngine(state_extractor=state_extractor)
@@ -46,8 +46,8 @@ auction_engine = DecentralizedAuctionEngine(state_extractor=state_extractor)
 # 初始化交通控制器
 traffic_controller = TrafficController(scenario.carla, state_extractor)
 
-# 设置引用关系
-traffic_controller.set_platoon_manager(platoon_manager)
+# DISABLED: Platoon manager reference removed
+# traffic_controller.set_platoon_manager(platoon_manager)
 
 # 显示地图信息
 spawn_points = scenario.carla.world.get_map().get_spawn_points()
@@ -76,14 +76,15 @@ try:
         vehicle_states = state_extractor.get_vehicle_states()
         
         if step % unified_update_interval == 0:
+            # DISABLED: Platoon update removed
             # 1. 更新车队分组
-            platoon_manager.update()
+            # platoon_manager.update()
             
-            # 2. 更新拍卖系统
-            auction_winners = auction_engine.update(vehicle_states, platoon_manager)
+            # 2. 更新拍卖系统 (single vehicles only)
+            auction_winners = auction_engine.update(vehicle_states, None)  # Pass None instead of platoon_manager
             
-            # 3. 更新交通控制
-            traffic_controller.update_control(platoon_manager, auction_engine)
+            # 3. 更新交通控制 (single vehicles only)
+            traffic_controller.update_control(None, auction_engine)  # Pass None for platoon_manager
         
         # 统一打印频率：所有状态信息同时输出
         if step % unified_print_interval == 0:
@@ -91,7 +92,7 @@ try:
             os.system('clear')  # Linux: use 'clear' to clear the terminal
             
             print(f"\n{'='*80}")
-            print(f"[Step {step}] 无信号灯交叉路口仿真状态报告")
+            print(f"[Step {step}] 无信号灯交叉路口仿真状态报告 - 单车模式")
             print(f"{'='*80}")
             
             # 基础仿真信息
@@ -101,15 +102,17 @@ try:
             
             print(f"📊 基础信息: FPS:{actual_fps:.1f}, 车辆总数:{len(vehicles_in_radius)}, 路口内:{len(vehicles_in_junction)}")
         
+            # DISABLED: Platoon status reporting removed
             # 1. 车队管理状态
-            platoon_manager.print_platoon_info()
+            # platoon_manager.print_platoon_info()
+            print(f"🚫 车队管理: 已暂时禁用（专注单车行为）")
             
             # 2. 拍卖系统状态
             print(f"\n🎯 拍卖系统状态:")
             auction_stats = auction_engine.get_auction_stats()
             print(f"   活跃竞价: {'是' if auction_stats['active_auction'] else '否'} | "
                   f"已完成: {auction_stats['completed_auctions']} | "
-                  f"参与者: {auction_stats['platoon_participants']}车队+{auction_stats['vehicle_participants']}单车")
+                  f"参与者: {auction_stats['vehicle_participants']}独立车辆")  # Removed platoon count
             
             # 显示当前优先级排序（前5名）
             priority_order = auction_engine.get_current_priority_order()
@@ -123,14 +126,9 @@ try:
                     action_emoji = "🟢" if conflict_action == 'go' else "🔴"
                     protection_emoji = "🛡️" if winner.protected else ""
                     
-                    if participant.type == 'platoon':
-                        size = participant.data.get('size', len(participant.vehicles))
-                        direction = participant.data.get('goal_direction', 'unknown')
-                        print(f"      #{rank}: {action_emoji}{protection_emoji}🚛车队{participant.id} "
-                              f"({size}车-{direction}) 出价:{bid_value:.1f}")
-                    else:
-                        print(f"      #{rank}: {action_emoji}{protection_emoji}🚗单车{participant.id} "
-                              f"出价:{bid_value:.1f}")
+                    # SIMPLIFIED: Only show vehicle info
+                    print(f"      #{rank}: {action_emoji}{protection_emoji}🚗车辆{participant.id} "
+                          f"出价:{bid_value:.1f}")
             
             # 3. 控制器状态
             control_stats = traffic_controller.get_control_stats()
