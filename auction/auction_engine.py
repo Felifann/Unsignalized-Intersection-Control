@@ -132,7 +132,7 @@ class ParticipantIdentifier:
     
     def identify_participants(self, vehicle_states: List[Dict], 
                             platoon_manager=None) -> List[AuctionParticipant]:
-        """识别拍卖参与者 - 单车版本（已禁用车队逻辑）"""
+        """识别拍卖参与者 - 单车版本（排除正在通过路口的车辆）"""
         participants = []
         
         # 获取车道领头者
@@ -140,11 +140,12 @@ class ParticipantIdentifier:
         if not lane_leaders:
             return participants
         
-        # DISABLED: Platoon logic temporarily removed for single-agent focus
-        # 🚫 车队逻辑已暂时禁用，专注于单车行为
-        
         # 添加单独车辆参与者
         for vehicle in lane_leaders:
+            # 更精细的排除逻辑：只排除正在积极通过路口的车辆
+            if self._is_vehicle_actively_passing(vehicle):
+                continue
+            
             if self._vehicle_has_destination(vehicle):
                 participant = AuctionParticipant(
                     id=vehicle['id'],
@@ -155,13 +156,31 @@ class ParticipantIdentifier:
                 )
                 participants.append(participant)
         
-        print(f"🎯 单车拍卖参与者识别完成: {len(participants)}个独立车辆")
+        print(f"🎯 单车拍卖参与者识别完成: {len(participants)}个独立车辆 (排除正在通过路口的车辆)")
         
         return participants
     
-    # DISABLED: Platoon-related methods temporarily removed
-    # def _analyze_platoon_transit_status(self, platoon_vehicles: List[Dict]) -> Dict:
-    # def _get_vehicle_lane(self, vehicle: Dict) -> str:
+    
+    def _is_vehicle_actively_passing(self, vehicle: Dict) -> bool:
+        """检查车辆是否正在积极通过路口（而非仅仅在路口边界等待）"""
+        # 如果车辆不在路口区域，肯定不是在通过
+        if not vehicle.get('is_junction', False):
+            return False
+        
+        # 检查车辆是否有显著的速度（正在移动通过路口）
+        velocity = vehicle.get('velocity', [0, 0, 0])
+        if isinstance(velocity, (list, tuple)) and len(velocity) >= 2:
+            speed = math.sqrt(velocity[0]**2 + velocity[1]**2)
+            # 如果车辆在路口内且速度大于阈值，认为正在通过
+            if speed > 1.0:  # 2 m/s threshold for "actively passing"
+                return True
+        
+        # 否则，即使在路口区域，也可能只是在边界等待
+        return False
+    
+        # DISABLED: Platoon-related methods temporarily removed
+        # def _analyze_platoon_transit_status(self, platoon_vehicles: List[Dict]) -> Dict:
+        # def _get_vehicle_lane(self, vehicle: Dict) -> str:
     
     def _vehicle_has_destination(self, vehicle: Dict) -> bool:
         """Check if vehicle has a valid destination set"""
@@ -229,7 +248,7 @@ class AuctionEvaluator:
                 winner = AuctionWinner(
                     participant=bid.participant,
                     bid=bid,
-                    rank=0,  # Will be reassigned
+                    rank=0,
                     protected=True
                 )
                 protected_winners.append(winner)
@@ -253,7 +272,7 @@ class AuctionEvaluator:
             winner = AuctionWinner(
                 participant=bid.participant,
                 bid=bid,
-                rank=0,  # Will be reassigned
+                rank=0,
                 #protected=False
             )
             winners.append(winner)
