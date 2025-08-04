@@ -92,7 +92,7 @@ try:
             os.system('clear')  # Linux: use 'clear' to clear the terminal
             
             print(f"\n{'='*80}")
-            print(f"[Step {step}] 无信号灯交叉路口仿真状态报告 - 单车模式")
+            print(f"[Step {step}] 无信号灯交叉路口仿真状态报告")
             print(f"{'='*80}")
             
             # 基础仿真信息
@@ -105,14 +105,10 @@ try:
             # DISABLED: Platoon status reporting removed
             # 1. 车队管理状态
             # platoon_manager.print_platoon_info()
-            print(f"🚫 车队管理: 已暂时禁用（专注单车行为）")
-            
+            # print(f"🚫 车队管理: 已暂时禁用（专注单车行为）")
+
             # 2. 拍卖系统状态
             print(f"\n🎯 拍卖系统状态:")
-            auction_stats = auction_engine.get_auction_stats()
-            print(f"   活跃竞价: {'是' if auction_stats['active_auction'] else '否'} | "
-                  f"已完成: {auction_stats['completed_auctions']} | "
-                  f"参与者: {auction_stats['vehicle_participants']}独立车辆")  # Removed platoon count
             
             # 显示当前优先级排序（前5名）
             priority_order = auction_engine.get_current_priority_order()

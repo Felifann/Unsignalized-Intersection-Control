@@ -4,6 +4,13 @@ import time
 from env.simulation_config import SimulationConfig
 
 class AgentBidPolicy:
+    """
+    Bidding policy for intersection auction participants.
+    
+    Handles both individual vehicles and platoons (when enabled) through
+    a unified interface without tight coupling to specific implementations.
+    """
+    
     def __init__(self, agent, intersection_center=(-188.9, -89.7, 0.0), state_extractor=None):
         self.agent = agent
         self.intersection_center = intersection_center
@@ -11,127 +18,174 @@ class AgentBidPolicy:
         
     def compute_bid(self):
         """
-        路口竞价策略：单车版本 - 车队逻辑已禁用
-        返回出价值（越高优先级越高）
+        Compute bid value for intersection access.
+        
+        Returns:
+            float: Bid value (higher = higher priority)
         """
-        # DISABLED: Platoon logic temporarily removed
-        # 🚫 车队逻辑已暂时禁用，所有参与者都作为独立车辆处理
-        
-        # 基础因子
-        urgency = self._estimate_urgency()
-        position_advantage = self._calculate_position_advantage()
-        speed_factor = self._calculate_speed_factor()
-        
-        # 路口状态奖励/惩罚
-        junction_factor = self._get_junction_factor()
-        
-        # 等待时间奖励
+        # Determine agent type and compute appropriate bid
+        if self._is_platoon_agent():
+            return self._compute_platoon_bid()
+        else:
+            return self._compute_vehicle_bid()
+
+    def _is_platoon_agent(self) -> bool:
+        """Check if agent represents a platoon"""
+        return self.agent.get('type') == 'platoon'
+    
+    def _compute_vehicle_bid(self) -> float:
+        """Compute bid for individual vehicle agent"""
+        # Core bidding factors
+        urgency = self._estimate_vehicle_urgency()
+        position_advantage = self._calculate_vehicle_position_advantage()
+        speed_factor = self._calculate_vehicle_speed_factor()
+        junction_factor = self._get_vehicle_junction_factor()
         wait_time_bonus = self._calculate_wait_time_bonus()
         
-        # 加权计算最终出价 - 单车优化权重
-        base_bid = (urgency * 20 +                   # 方向紧急性权重
-                   position_advantage * 15 +         # 位置优势权重
-                   speed_factor * 10 +               # 速度因子权重
-                   junction_factor * 25 +            # 路口状态因子
-                   wait_time_bonus * 15)             # 等待时间奖励
-    
+        # Weighted combination
+        base_bid = (urgency * 20 +
+                   position_advantage * 15 +
+                   speed_factor * 10 +
+                   junction_factor * 25 +
+                   wait_time_bonus * 15)
+        
         return max(0.0, base_bid)
-
-    def _calculate_position_advantage(self):
-        """计算位置优势：路口内 > 接近路口 > 远离路口 - 单车版本"""
-        # DISABLED: Platoon-specific logic removed
-        at_junction = self.agent.get('at_junction', False)
+    
+    def _compute_platoon_bid(self) -> float:
+        """Compute bid for platoon agent (placeholder for future implementation)"""
+        # Placeholder implementation - returns vehicle bid for now
+        # TODO: Implement platoon-specific bidding logic when platoons are enabled
+        
+        # For now, treat as vehicle with platoon bonus
+        vehicle_bid = self._compute_vehicle_bid()
+        platoon_bonus = self._estimate_platoon_bonus()
+        
+        return vehicle_bid + platoon_bonus
+    
+    def _estimate_vehicle_urgency(self) -> float:
+        """Estimate urgency for individual vehicle"""
+        direction = self._get_agent_direction()
+        
+        # Base urgency
+        base_urgency = 10.0
+        
+        # Direction priority
+        direction_bonus = {
+            'straight': 15.0,
+            'left': 10.0,
+            'right': 12.0
+        }.get(direction, 8.0)
+        
+        # Distance factor
+        location = self._get_agent_location()
+        if location:
+            distance = self._distance_to_intersection(location)
+            if distance <= 30.0:
+                distance_urgency = 20.0 - distance * 0.5
+            else:
+                distance_urgency = 5.0
+        else:
+            distance_urgency = 5.0
+        
+        return base_urgency + direction_bonus + distance_urgency
+    
+    def _calculate_vehicle_position_advantage(self) -> float:
+        """Calculate position advantage for individual vehicle"""
+        at_junction = self._is_agent_at_junction()
         
         if at_junction:
-            return 60.0  # 路口内单车高优势
-        else:
-            # 计算距离优势
-            vehicle_location = self._get_vehicle_location()
-            if vehicle_location:
-                distance = SimulationConfig.distance_to_intersection_center(vehicle_location)
-                if distance <= 50.0:
-                    return 30.0 - distance * 0.3
-                else:
-                    return 5.0
-            else:
-                return 5.0  # Fallback if location unavailable
-
-    def _get_vehicle_location(self):
-        """Helper method to get vehicle location from agent dict - 单车版本"""
-        # DISABLED: Platoon location logic removed
-        # Only handle individual vehicles
-        if 'data' in self.agent and 'location' in self.agent['data']:
-            return self.agent['data']['location']
-        elif 'location' in self.agent:
-            return self.agent['location']
+            return 60.0  # High advantage for vehicles in intersection
         
-        return None
-
-    def _get_junction_factor(self):
-        """路口状态因子：考虑距离的紧迫性 - 单车版本"""
-        # DISABLED: Platoon-specific logic removed
-        at_junction = self.agent.get('at_junction', False)
-        if at_junction:
-            return 40.0
-        else:
-            vehicle_location = self._get_vehicle_location()
-            if vehicle_location:
-                distance = SimulationConfig.distance_to_intersection_center(vehicle_location)
-                return max(0.0, 25.0 - distance * 0.25)
+        location = self._get_agent_location()
+        if location:
+            distance = self._distance_to_intersection(location)
+            if distance <= 50.0:
+                return 30.0 - distance * 0.3
             else:
-                return 10.0  # Fallback
-
-    def _calculate_speed_factor(self):
-        """计算速度因子 - 单车版本"""
+                return 5.0
+        
+        return 5.0  # Fallback
+    
+    def _calculate_vehicle_speed_factor(self) -> float:
+        """Calculate speed factor for individual vehicle"""
         try:
-            # DISABLED: Platoon speed logic removed
-            # Get vehicle data properly for single vehicle
             vehicle_data = self._get_vehicle_data()
             if vehicle_data:
                 speed = self._get_current_speed(vehicle_data)
-            else:
-                return 5.0  # Fallback
-            
-            # Reasonable speed gets bonus
-            if 3.0 <= speed <= 10.0:
-                return 10.0
-            elif speed < 3.0:
-                return 5.0
-            else:
-                return 7.0
                 
-        except Exception as e:
-            print(f"[Warning] Speed factor calculation failed: {e}")
+                # Reasonable speed gets bonus
+                if 3.0 <= speed <= 10.0:
+                    return 10.0
+                elif speed < 3.0:
+                    return 5.0
+                else:
+                    return 7.0
+            else:
+                return 5.0
+                
+        except Exception:
             return 5.0  # Default value
-
-    def _get_vehicle_data(self):
-        """Helper method to get vehicle data from agent dict - 单车版本"""
-        # DISABLED: Platoon data logic removed
-        # Only handle individual vehicles
-        if 'data' in self.agent:
-            return self.agent['data']
-        else:
-            # Fallback: treat the agent dict itself as vehicle data
-            return self.agent
-
-    def _get_goal_direction(self):
-        """从导航系统获取目标方向 - 单车版本"""
-        # DISABLED: Platoon direction logic removed
-        # Only handle individual vehicles
-        return self._get_navigation_direction_for_vehicle()
-
-    def _get_navigation_direction_for_vehicle(self):
-        """通过导航系统获取单车方向"""
-        # Check if this is a vehicle participant with data
-        if self.agent['type'] == 'vehicle' and 'data' in self.agent:
-            vehicle_data = self.agent['data']
-        elif self.agent['type'] == 'vehicle':
-            # Fallback: treat the agent dict itself as vehicle data
-            vehicle_data = self.agent
-        else:
-            return None
+    
+    def _get_vehicle_junction_factor(self) -> float:
+        """Get junction factor for individual vehicle"""
+        at_junction = self._is_agent_at_junction()
+        if at_junction:
+            return 40.0
         
-        if not vehicle_data.get('destination'):
+        location = self._get_agent_location()
+        if location:
+            distance = self._distance_to_intersection(location)
+            return max(0.0, 25.0 - distance * 0.25)
+        
+        return 10.0  # Fallback
+    
+    def _calculate_wait_time_bonus(self) -> float:
+        """Calculate waiting time bonus"""
+        wait_time = self.agent.get('wait_time', 0.0)
+        
+        if wait_time <= 2.0:
+            return 0.0
+        elif wait_time <= 5.0:
+            return (wait_time - 2.0) * 5.0
+        elif wait_time <= 10.0:
+            return 15.0 + (wait_time - 5.0) * 8.0
+        else:
+            return 55.0 + (wait_time - 10.0) * 10.0
+    
+    def _estimate_platoon_bonus(self) -> float:
+        """Estimate bonus for platoon agents (placeholder)"""
+        # Placeholder for platoon bonus calculation
+        # TODO: Implement when platoons are enabled
+        return 0.0
+    
+    # Helper methods for agent data extraction
+    def _get_agent_location(self):
+        """Get agent location regardless of type"""
+        if 'location' in self.agent:
+            return self.agent['location']
+        elif 'data' in self.agent and 'location' in self.agent['data']:
+            return self.agent['data']['location']
+        return None
+    
+    def _is_agent_at_junction(self) -> bool:
+        """Check if agent is at junction"""
+        if 'at_junction' in self.agent:
+            return self.agent['at_junction']
+        elif 'data' in self.agent:
+            return self.agent['data'].get('is_junction', False)
+        return False
+    
+    def _get_agent_direction(self) -> Optional[str]:
+        """Get agent direction through navigation system"""
+        if self._is_platoon_agent():
+            return self._get_platoon_direction()
+        else:
+            return self._get_vehicle_direction()
+    
+    def _get_vehicle_direction(self) -> Optional[str]:
+        """Get direction for individual vehicle"""
+        vehicle_data = self._get_vehicle_data()
+        if not vehicle_data or not vehicle_data.get('destination'):
             return None
         
         try:
@@ -145,61 +199,31 @@ class AgentBidPolicy:
             return self.state_extractor.get_route_direction(
                 vehicle_location, vehicle_data['destination']
             )
-        except Exception as e:
-            print(f"[Warning] Navigation direction failed: {e}")
+        except Exception:
             return None
-
-    def _is_platoon(self):
-        """判断是否为车队 - 暂时禁用，总是返回False"""
-        # DISABLED: Always return False since platoons are disabled
-        return False
-
+    
+    def _get_platoon_direction(self) -> Optional[str]:
+        """Get direction for platoon (placeholder)"""
+        # Placeholder for platoon direction logic
+        # TODO: Implement when platoons are enabled
+        return self._get_vehicle_direction()  # Fallback to vehicle logic
+    
+    def _get_vehicle_data(self):
+        """Get vehicle data from agent"""
+        if 'data' in self.agent:
+            return self.agent['data']
+        elif self.agent.get('type') == 'vehicle':
+            return self.agent
+        return None
+    
     def _get_current_speed(self, vehicle_state):
-        """获取当前速度"""
+        """Get current speed from vehicle state"""
         velocity = vehicle_state.get('velocity', (0, 0, 0))
         return math.sqrt(velocity[0]**2 + velocity[1]**2)
-
-    def _calculate_wait_time_bonus(self):
-        """计算等待时间奖励：等待越久，出价越高"""
-        wait_time = self.agent.get('wait_time', 0.0)
-        
-        if wait_time <= 2.0:
-            return 0.0
-        elif wait_time <= 5.0:
-            return (wait_time - 2.0) * 5.0
-        elif wait_time <= 10.0:
-            return 15.0 + (wait_time - 5.0) * 8.0
-        else:
-            return 55.0 + (wait_time - 10.0) * 10.0
-
-    def _estimate_urgency(self):
-        """估算紧急性：基于方向和距离 - 单车版本"""
-        direction = self._get_goal_direction()
-        
-        # 基础紧急性
-        base_urgency = 10.0
-        
-        # 方向奖励
-        direction_bonus = {
-            'straight': 15.0,  # 直行最优先
-            'left': 10.0,      # 左转次优先
-            'right': 12.0      # 右转中等优先
-        }.get(direction, 8.0)
-        
-        # 距离因子
-        vehicle_location = self._get_vehicle_location()
-        if vehicle_location:
-            distance = SimulationConfig.distance_to_intersection_center(vehicle_location)
-            if distance <= 30.0:
-                distance_urgency = 20.0 - distance * 0.5
-            else:
-                distance_urgency = 5.0
-        else:
-            distance_urgency = 5.0
-        
-        return base_urgency + direction_bonus + distance_urgency
-
-    def _get_platoon_bonus(self):
-        """获取车队奖励 - 暂时禁用，总是返回0"""
-        # DISABLED: Always return 0 since platoons are disabled
-        return 0.0
+    
+    def _distance_to_intersection(self, location) -> float:
+        """Calculate distance to intersection center"""
+        return math.sqrt(
+            (location[0] - self.intersection_center[0])**2 + 
+            (location[1] - self.intersection_center[1])**2
+        )

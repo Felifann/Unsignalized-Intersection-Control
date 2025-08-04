@@ -1,160 +1,230 @@
 import math
 import time
-from typing import Dict, List, Set, Optional, Tuple
+from typing import Dict, List, Set, Optional, Tuple, Callable
 from collections import defaultdict
 
-from env.simulation_config import SimulationConfig
 from .platoon_policy import Platoon
-import carla
 
-class PlatoonManager:
-    """Enhanced platoon manager with better state management and auction integration"""
-    
-    def __init__(self, state_extractor, intersection_center=(-188.9, -89.7, 0.0)):
-        self.state_extractor = state_extractor
-        self.intersection_center = intersection_center
-        
-        # Platoon configuration
+class PlatoonConfiguration:
+    """Configuration container for platoon parameters"""
+    def __init__(self):
         self.max_platoon_size = 4
         self.min_platoon_size = 2
-        self.max_following_distance = 25.0  # Increased for better formation
-        self.target_following_distance = 8.0  # Target distance for formation
+        self.max_following_distance = 25.0
+        self.target_following_distance = 8.0
+        self.update_interval = 1.0
+        self.intersection_center = (-188.9, -89.7, 0.0)
+
+class PlatoonManager:
+    """
+    Enhanced platoon manager with modular design and loose coupling.
+    
+    This manager handles platoon formation, maintenance, and dissolution
+    without tight dependencies on external systems. Integration points
+    are provided through callbacks and optional interfaces.
+    """
+    
+    def __init__(self, state_extractor=None, config: Optional[PlatoonConfiguration] = None):
+        """
+        Initialize platoon manager with optional dependencies.
         
-        # State management
+        Args:
+            state_extractor: Optional interface for vehicle state queries
+            config: Optional configuration object
+        """
+        # Configuration
+        self.config = config or PlatoonConfiguration()
+        
+        # External interfaces (optional)
+        self._state_extractor = state_extractor
+        self._vehicle_filter_callback: Optional[Callable] = None
+        self._direction_estimator_callback: Optional[Callable] = None
+        
+        # Core state
         self.platoons: List[Platoon] = []
         self.platoon_history: Dict[str, Platoon] = {}
         self.last_update_time = 0
-        self.update_interval = 1.0  # Update every second
         
-        # Performance tracking
+        # Statistics
         self.formation_stats = {
             'total_formed': 0,
             'total_dissolved': 0,
             'successful_crossings': 0
         }
         
-        print("🚗 Enhanced Platoon Manager initialized")
-
-    def update(self):
-        """Main update method with improved state management"""
+        print("🚗 Modular Platoon Manager initialized")
+    
+    def set_vehicle_filter(self, filter_callback: Callable[[List[Dict]], List[Dict]]):
+        """Set callback for filtering vehicles eligible for platooning"""
+        self._vehicle_filter_callback = filter_callback
+    
+    def set_direction_estimator(self, estimator_callback: Callable[[Dict], Optional[str]]):
+        """Set callback for estimating vehicle direction"""
+        self._direction_estimator_callback = estimator_callback
+    
+    def update(self, vehicle_states: Optional[List[Dict]] = None):
+        """
+        Main update method with rate limiting and optional vehicle states.
+        
+        Args:
+            vehicle_states: Optional vehicle states. If None, will query state_extractor
+        """
         current_time = time.time()
         
         # Rate limiting
-        if current_time - self.last_update_time < self.update_interval:
+        if current_time - self.last_update_time < self.config.update_interval:
             return
         
-        # Get current vehicle states
-        vehicle_states = self.state_extractor.get_vehicle_states()
-        intersection_vehicles = self._filter_near_intersection(vehicle_states)
+        # Get vehicle states
+        if vehicle_states is None:
+            vehicle_states = self._get_vehicle_states()
+        
+        if not vehicle_states:
+            return
+        
+        # Filter eligible vehicles
+        eligible_vehicles = self._filter_eligible_vehicles(vehicle_states)
         
         # Update existing platoons
-        self._update_existing_platoons(intersection_vehicles)
+        self._update_existing_platoons(eligible_vehicles)
         
-        # Form new platoons from available vehicles
-        self._form_new_platoons(intersection_vehicles)
+        # Form new platoons
+        self._attempt_platoon_formation(eligible_vehicles)
         
         # Clean up invalid platoons
         self._cleanup_invalid_platoons()
         
         self.last_update_time = current_time
-
-    def _filter_near_intersection(self, vehicle_states: List[Dict]) -> List[Dict]:
-        """Filter vehicles near intersection with enhanced criteria"""
-        intersection_vehicles = []
+    
+    def _get_vehicle_states(self) -> List[Dict]:
+        """Get vehicle states from state extractor or return empty list"""
+        if self._state_extractor:
+            try:
+                return self._state_extractor.get_vehicle_states()
+            except Exception:
+                return []
+        return []
+    
+    def _filter_eligible_vehicles(self, vehicle_states: List[Dict]) -> List[Dict]:
+        """Filter vehicles eligible for platooning"""
+        if self._vehicle_filter_callback:
+            return self._vehicle_filter_callback(vehicle_states)
         
-        for vehicle in vehicle_states:
-            # Check if vehicle is in intersection area
-            if SimulationConfig.is_in_intersection_area(vehicle['location']):
-                # Only include vehicles with valid destinations for platoon formation
-                if vehicle.get('destination') or vehicle.get('is_junction', False):
-                    intersection_vehicles.append(vehicle)
+        # Default filtering: vehicles near intersection with destinations
+        return [v for v in vehicle_states if self._default_vehicle_filter(v)]
+    
+    def _default_vehicle_filter(self, vehicle: Dict) -> bool:
+        """Default vehicle filtering logic"""
+        # Check if near intersection (simple distance check)
+        location = vehicle.get('location', [0, 0, 0])
+        distance = math.sqrt(
+            (location[0] - self.config.intersection_center[0])**2 + 
+            (location[1] - self.config.intersection_center[1])**2
+        )
         
-        return intersection_vehicles
-
+        # Within reasonable distance and has destination
+        return (distance < 100.0 and 
+                (vehicle.get('destination') or vehicle.get('is_junction', False)))
+    
     def _update_existing_platoons(self, vehicle_states: List[Dict]):
         """Update existing platoons with new vehicle states"""
         vehicle_lookup = {str(v['id']): v for v in vehicle_states}
         
-        for platoon in self.platoons[:]:  # Copy list to allow modification
+        for platoon in self.platoons[:]:
             # Get updated states for platoon vehicles
             updated_vehicles = []
             for vehicle_id in platoon.get_vehicle_ids():
                 if vehicle_id in vehicle_lookup:
                     updated_vehicles.append(vehicle_lookup[vehicle_id])
             
-            # Update platoon state
+            # Update platoon
             if updated_vehicles:
-                platoon.update_state(updated_vehicles)
-                if not platoon.is_valid():
-                    self._dissolve_platoon(platoon, "Invalid after update")
+                if not platoon.update_vehicles(updated_vehicles):
+                    self._dissolve_platoon(platoon, "Failed to update")
             else:
                 self._dissolve_platoon(platoon, "No vehicles found")
-
-    def _form_new_platoons(self, vehicle_states: List[Dict]):
-        """Form new platoons from available vehicles"""
+    
+    def _attempt_platoon_formation(self, vehicle_states: List[Dict]):
+        """Attempt to form new platoons from available vehicles"""
         # Get vehicles not already in platoons
+        available_vehicles = self._get_available_vehicles(vehicle_states)
+        
+        if len(available_vehicles) < self.config.min_platoon_size:
+            return
+        
+        # Group vehicles by compatibility
+        compatible_groups = self._group_compatible_vehicles(available_vehicles)
+        
+        # Form platoons from groups
+        for group in compatible_groups:
+            if len(group) >= self.config.min_platoon_size:
+                new_platoons = self._create_platoons_from_group(group)
+                self.platoons.extend(new_platoons)
+    
+    def _get_available_vehicles(self, vehicle_states: List[Dict]) -> List[Dict]:
+        """Get vehicles not already in platoons"""
         existing_vehicle_ids = set()
         for platoon in self.platoons:
             existing_vehicle_ids.update(platoon.get_vehicle_ids())
         
-        available_vehicles = [
-            v for v in vehicle_states 
-            if str(v['id']) not in existing_vehicle_ids and self._can_form_platoon(v)
-        ]
-        
-        if len(available_vehicles) < self.min_platoon_size:
-            return
-        
-        # Group vehicles by lane and direction
-        groups = self._group_by_lane_and_goal(available_vehicles)
-        
-        # Form platoons from groups
-        for group in groups:
-            if len(group) >= self.min_platoon_size:
-                new_platoons = self._create_platoons_from_group(group)
-                self.platoons.extend(new_platoons)
-
-    def _can_form_platoon(self, vehicle: Dict) -> bool:
+        return [v for v in vehicle_states 
+                if str(v['id']) not in existing_vehicle_ids and 
+                self._can_join_platoon(v)]
+    
+    def _can_join_platoon(self, vehicle: Dict) -> bool:
         """Check if vehicle can participate in platoon formation"""
-        # Must have destination or be in junction
-        if not vehicle.get('destination') and not vehicle.get('is_junction', False):
-            return False
-        
-        # Must have valid direction
-        direction = self._estimate_goal_direction(vehicle)
-        return direction is not None
-
-    def _group_by_lane_and_goal(self, vehicles: List[Dict]) -> List[List[Dict]]:
-        """Group vehicles by lane and goal direction with improved logic"""
-        # Group by lane first
+        return (vehicle.get('destination') or 
+                vehicle.get('is_junction', False))
+    
+    def _group_compatible_vehicles(self, vehicles: List[Dict]) -> List[List[Dict]]:
+        """Group vehicles by compatibility (lane and direction)"""
+        # Group by lane
         lane_groups = defaultdict(list)
         
         for vehicle in vehicles:
-            lane_id = self._get_lane_id(vehicle)
-            direction = self._estimate_goal_direction(vehicle)
+            lane_id = self._get_vehicle_lane_id(vehicle)
+            direction = self._estimate_vehicle_direction(vehicle)
             
             if direction:
                 lane_groups[lane_id].append((vehicle, direction))
         
         # Process each lane group
-        final_groups = []
-        for lane_id, vehicles_with_direction in lane_groups.items():
-            if len(vehicles_with_direction) < self.min_platoon_size:
+        compatible_groups = []
+        for lane_vehicles in lane_groups.values():
+            if len(lane_vehicles) < self.config.min_platoon_size:
                 continue
             
             # Sort by distance to intersection
             sorted_vehicles = sorted(
-                vehicles_with_direction,
+                lane_vehicles,
                 key=lambda x: self._distance_to_intersection(x[0])
             )
             
             # Find adjacent groups with same direction
-            adjacent_groups = self._find_adjacent_groups_with_direction(sorted_vehicles)
-            final_groups.extend(adjacent_groups)
+            groups = self._find_adjacent_compatible_groups(sorted_vehicles)
+            compatible_groups.extend(groups)
         
-        return final_groups
-
-    def _find_adjacent_groups_with_direction(self, sorted_vehicles_with_direction: List[Tuple]) -> List[List[Dict]]:
+        return compatible_groups
+    
+    def _get_vehicle_lane_id(self, vehicle: Dict) -> str:
+        """Get lane identifier for vehicle"""
+        road_id = vehicle.get('road_id', 'unknown')
+        lane_id = vehicle.get('lane_id', 'unknown')
+        return f"{road_id}_{lane_id}"
+    
+    def _estimate_vehicle_direction(self, vehicle: Dict) -> Optional[str]:
+        """Estimate vehicle direction using callback or default logic"""
+        if self._direction_estimator_callback:
+            return self._direction_estimator_callback(vehicle)
+        
+        # Default: try to use destination if available
+        if not vehicle.get('destination'):
+            return None
+        
+        # Simple direction estimation (could be enhanced)
+        return 'straight'  # Default assumption
+    
+    def _find_adjacent_compatible_groups(self, sorted_vehicles_with_direction: List[Tuple]) -> List[List[Dict]]:
         """Find adjacent vehicle groups with same direction"""
         if not sorted_vehicles_with_direction:
             return []
@@ -167,63 +237,63 @@ class PlatoonManager:
             vehicle, direction = sorted_vehicles_with_direction[i]
             prev_vehicle = sorted_vehicles_with_direction[i-1][0]
             
-            # Check direction match
+            # Check direction compatibility
             if direction != current_direction:
-                if len(current_group) >= self.min_platoon_size:
+                if len(current_group) >= self.config.min_platoon_size:
                     groups.append(current_group)
                 current_group = [vehicle]
                 current_direction = direction
                 continue
             
-            # Check adjacency
-            distance = self._calculate_vehicle_distance(prev_vehicle, vehicle)
+            # Check proximity
+            distance = self._vehicle_distance(prev_vehicle, vehicle)
             
-            if distance <= self.max_following_distance:
+            if distance <= self.config.max_following_distance:
                 current_group.append(vehicle)
             else:
-                if len(current_group) >= self.min_platoon_size:
+                if len(current_group) >= self.config.min_platoon_size:
                     groups.append(current_group)
                 current_group = [vehicle]
         
         # Add final group
-        if len(current_group) >= self.min_platoon_size:
+        if len(current_group) >= self.config.min_platoon_size:
             groups.append(current_group)
         
         return groups
-
+    
     def _create_platoons_from_group(self, vehicle_group: List[Dict]) -> List[Platoon]:
         """Create platoons from a vehicle group"""
-        if len(vehicle_group) < self.min_platoon_size:
+        if len(vehicle_group) < self.config.min_platoon_size:
             return []
         
         platoons = []
         
-        # Split large groups into multiple platoons if needed
-        while len(vehicle_group) >= self.min_platoon_size:
-            platoon_size = min(self.max_platoon_size, len(vehicle_group))
+        # Split large groups into multiple platoons
+        while len(vehicle_group) >= self.config.min_platoon_size:
+            platoon_size = min(self.config.max_platoon_size, len(vehicle_group))
             platoon_vehicles = vehicle_group[:platoon_size]
             vehicle_group = vehicle_group[platoon_size:]
             
             # Verify direction consistency
-            directions = [self._estimate_goal_direction(v) for v in platoon_vehicles]
+            directions = [self._estimate_vehicle_direction(v) for v in platoon_vehicles]
             unique_directions = set(filter(None, directions))
             
             if len(unique_directions) == 1:
                 platoon = Platoon(
                     platoon_vehicles, 
-                    self.intersection_center, 
-                    goal_direction=directions[0],
-                    state_extractor=self.state_extractor
+                    self.config.intersection_center, 
+                    goal_direction=directions[0] if directions[0] else None,
+                    state_extractor=self._state_extractor
                 )
                 
                 if platoon.is_valid():
                     platoons.append(platoon)
                     self.formation_stats['total_formed'] += 1
-                    print(f"✅ Formed new platoon: {platoon.platoon_id} "
+                    print(f"✅ Formed platoon: {platoon.platoon_id} "
                           f"({platoon.get_size()} vehicles, {platoon.get_goal_direction()})")
         
         return platoons
-
+    
     def _dissolve_platoon(self, platoon: Platoon, reason: str):
         """Dissolve a platoon and update statistics"""
         if platoon in self.platoons:
@@ -231,48 +301,28 @@ class PlatoonManager:
             self.platoon_history[platoon.platoon_id] = platoon
             self.formation_stats['total_dissolved'] += 1
             print(f"❌ Dissolved platoon {platoon.platoon_id}: {reason}")
-
+    
     def _cleanup_invalid_platoons(self):
         """Remove invalid or expired platoons"""
         for platoon in self.platoons[:]:
             if not platoon.is_valid():
                 self._dissolve_platoon(platoon, "Invalid state")
-
-    def _get_lane_id(self, vehicle: Dict) -> str:
-        """Get lane identifier for vehicle"""
-        road_id = vehicle.get('road_id', 'unknown')
-        lane_id = vehicle.get('lane_id', 'unknown')
-        return f"{road_id}_{lane_id}"
-
-    def _estimate_goal_direction(self, vehicle: Dict) -> Optional[str]:
-        """Estimate vehicle goal direction using navigation system"""
-        if not vehicle.get('destination'):
-            return None
-        
-        try:
-            vehicle_location = carla.Location(
-                x=vehicle['location'][0],
-                y=vehicle['location'][1],
-                z=vehicle['location'][2]
-            )
-            
-            return self.state_extractor.get_route_direction(
-                vehicle_location, vehicle['destination']
-            )
-        except Exception as e:
-            return None
-
+    
     def _distance_to_intersection(self, vehicle: Dict) -> float:
         """Calculate distance from vehicle to intersection center"""
-        return SimulationConfig.distance_to_intersection_center(vehicle['location'])
-
-    def _calculate_vehicle_distance(self, vehicle1: Dict, vehicle2: Dict) -> float:
+        location = vehicle.get('location', [0, 0, 0])
+        return math.sqrt(
+            (location[0] - self.config.intersection_center[0])**2 + 
+            (location[1] - self.config.intersection_center[1])**2
+        )
+    
+    def _vehicle_distance(self, vehicle1: Dict, vehicle2: Dict) -> float:
         """Calculate distance between two vehicles"""
-        loc1 = vehicle1['location']
-        loc2 = vehicle2['location']
+        loc1 = vehicle1.get('location', [0, 0, 0])
+        loc2 = vehicle2.get('location', [0, 0, 0])
         return math.sqrt((loc2[0] - loc1[0])**2 + (loc2[1] - loc1[1])**2)
-
-    # Public interface methods for auction integration
+    
+    # Public interface for external integration
     def get_all_platoons(self) -> List[Platoon]:
         """Get all valid platoons"""
         return [p for p in self.platoons if p.is_valid()]
@@ -290,21 +340,13 @@ class PlatoonManager:
 
     def get_platoon_stats(self) -> Dict:
         """Get comprehensive platoon statistics"""
-        # Initialize performance summary with default values
-        performance_summary = {
-            'avg_cohesion': 0.0,
-            'avg_efficiency': 0.0,
-            'avg_safety': 0.0,
-            'ready_platoons': 0
-        }
-        
         if not self.platoons:
             return {
                 'num_platoons': 0,
                 'vehicles_in_platoons': 0,
                 'avg_platoon_size': 0.0,
                 'direction_distribution': {},
-                'performance_summary': performance_summary,
+                'performance_summary': self._empty_performance_summary(),
                 'formation_stats': self.formation_stats
             }
         
@@ -313,31 +355,11 @@ class PlatoonManager:
         
         # Direction distribution
         direction_dist = defaultdict(int)
-        
-        total_cohesion = 0.0
-        total_efficiency = 0.0
-        total_safety = 0.0
+        performance_summary = self._calculate_performance_summary()
         
         for platoon in self.platoons:
             direction = platoon.get_goal_direction()
             direction_dist[direction] += 1
-            
-            if platoon.is_ready_for_intersection():
-                performance_summary['ready_platoons'] += 1
-            
-            # Get performance metrics
-            perf = platoon.get_performance_summary()
-            if 'cohesion' in perf and perf['cohesion'] != 'N/A':
-                total_cohesion += float(perf['cohesion'])
-            if 'efficiency' in perf and perf['efficiency'] != 'N/A':
-                total_efficiency += float(perf['efficiency'])
-            if 'safety' in perf and perf['safety'] != 'N/A':
-                total_safety += float(perf['safety'])
-        
-        if self.platoons:
-            performance_summary['avg_cohesion'] = total_cohesion / len(self.platoons)
-            performance_summary['avg_efficiency'] = total_efficiency / len(self.platoons)
-            performance_summary['avg_safety'] = total_safety / len(self.platoons)
         
         return {
             'num_platoons': len(self.platoons),
@@ -347,75 +369,69 @@ class PlatoonManager:
             'performance_summary': performance_summary,
             'formation_stats': self.formation_stats
         }
+    
+    def _empty_performance_summary(self) -> Dict:
+        """Return empty performance summary"""
+        return {
+            'avg_cohesion': 0.0,
+            'avg_efficiency': 0.0,
+            'avg_safety': 0.0,
+            'ready_platoons': 0
+        }
+    
+    def _calculate_performance_summary(self) -> Dict:
+        """Calculate performance summary from current platoons"""
+        if not self.platoons:
+            return self._empty_performance_summary()
+        
+        total_cohesion = 0.0
+        total_efficiency = 0.0
+        total_safety = 0.0
+        ready_count = 0
+        
+        for platoon in self.platoons:
+            if platoon.is_ready_for_intersection():
+                ready_count += 1
+            
+            perf = platoon.get_performance_summary()
+            if perf['cohesion'] != 'N/A':
+                total_cohesion += float(perf['cohesion'])
+            if perf['efficiency'] != 'N/A':
+                total_efficiency += float(perf['efficiency'])
+            if perf['safety'] != 'N/A':
+                total_safety += float(perf['safety'])
+        
+        return {
+            'avg_cohesion': total_cohesion / len(self.platoons),
+            'avg_efficiency': total_efficiency / len(self.platoons),
+            'avg_safety': total_safety / len(self.platoons),
+            'ready_platoons': ready_count
+        }
 
     def print_platoon_info(self):
-        """Enhanced platoon information display"""
+        """Display platoon information (for debugging/monitoring)"""
         stats = self.get_platoon_stats()
-        unplatoon_count = self._get_unplatoon_vehicles_count()
         
-        print(f"\n🚗 智能车队管理系统状态")
-        print(f"📊 总体统计:")
-        print(f"   活跃车队: {stats['num_platoons']} | "
-              f"编队车辆: {stats['vehicles_in_platoons']} | "
-              f"独行车辆: {unplatoon_count}")
-        print(f"   平均车队规模: {stats['avg_platoon_size']:.1f} | "
-              f"准备通行: {stats['performance_summary']['ready_platoons']}")
-        print(f"   方向分布: {stats['direction_distribution']}")
+        print(f"\n🚗 Platoon Management System Status")
+        print(f"📊 Overview:")
+        print(f"   Active platoons: {stats['num_platoons']}")
+        print(f"   Vehicles in platoons: {stats['vehicles_in_platoons']}")
+        print(f"   Average platoon size: {stats['avg_platoon_size']:.1f}")
+        print(f"   Ready for intersection: {stats['performance_summary']['ready_platoons']}")
+        
+        if stats['direction_distribution']:
+            print(f"   Direction distribution: {stats['direction_distribution']}")
         
         if stats['formation_stats']['total_formed'] > 0:
-            print(f"   历史统计: 已组建{stats['formation_stats']['total_formed']}队 | "
-                  f"已解散{stats['formation_stats']['total_dissolved']}队")
+            print(f"   Formation history: {stats['formation_stats']['total_formed']} formed, "
+                  f"{stats['formation_stats']['total_dissolved']} dissolved")
         
-        # Performance metrics
-        perf = stats['performance_summary']
-        if perf['avg_cohesion'] > 0:
-            print(f"   性能指标: 团结度{perf['avg_cohesion']:.2f} | "
-                  f"效率{perf['avg_efficiency']:.2f} | "
-                  f"安全{perf['avg_safety']:.2f}")
-        
-        # Individual platoon details
+        # Show individual platoon details (limited)
         if self.platoons:
-            print(f"\n🔍 车队详情:")
-            for i, platoon in enumerate(self.platoons[:5]):  # Show top 5
-                self._print_platoon_details(i + 1, platoon)
-
-    def _print_platoon_details(self, index: int, platoon: Platoon):
-        """Print detailed information for a single platoon"""
-        direction_emoji = {'left': '⬅️', 'right': '➡️', 'straight': '⬆️'}
-        direction = platoon.get_goal_direction()
-        lane_info = platoon.get_lane_info()
-        performance = platoon.get_performance_summary()
-        
-        ready_status = "✅" if platoon.is_ready_for_intersection() else "⏳"
-        junction_status = "🏢" if platoon.has_vehicle_in_intersection() else "🛣️"
-        
-        print(f"   {index}. {direction_emoji.get(direction, '❓')} "
-              f"车队{platoon.platoon_id} ({platoon.get_size()}车-{direction.upper()}) "
-              f"{ready_status}{junction_status}")
-        
-        if lane_info and lane_info[0] is not None:
-            print(f"      📍 车道: R{lane_info[0]}/L{lane_info[1]} | "
-                  f"速度: {performance['avg_speed_kmh']:.1f}km/h")
-        
-        if performance['cohesion'] != 'N/A':
-            print(f"      📊 团结: {performance['cohesion']} | "
-                  f"效率: {performance['efficiency']} | "
-                  f"安全: {performance['safety']}")
-
-    def _get_unplatoon_vehicles_count(self) -> int:
-        """Get count of vehicles not in platoons"""
-        vehicle_states = self.state_extractor.get_vehicle_states()
-        intersection_vehicles = self._filter_near_intersection(vehicle_states)
-        
-        platoon_vehicle_ids = set()
-        for platoon in self.platoons:
-            platoon_vehicle_ids.update(platoon.get_vehicle_ids())
-        
-        unplatoon_count = 0
-        for vehicle in intersection_vehicles:
-            if (str(vehicle['id']) not in platoon_vehicle_ids and 
-                self._can_form_platoon(vehicle)):
-                unplatoon_count += 1
-        
-        return unplatoon_count
+            print(f"\n🔍 Active Platoons:")
+            for i, platoon in enumerate(self.platoons[:3]):  # Show top 3
+                perf = platoon.get_performance_summary()
+                print(f"   {i+1}. {platoon.platoon_id} "
+                      f"({platoon.get_size()} vehicles, {platoon.get_goal_direction()}) "
+                      f"Ready: {platoon.is_ready_for_intersection()}")
 

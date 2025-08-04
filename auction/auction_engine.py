@@ -470,21 +470,6 @@ class DecentralizedAuctionEngine:
         
         return agent_dict
     
-    def _print_auction_results(self, auction_id: str, winners: List[AuctionWinner]):
-        """Print detailed auction results - 单车版本"""
-        if not winners:
-            return
-        
-        print(f"🏆 Auction {auction_id} completed. Priority order:")
-        for winner in winners[:3]:  # Show top 3
-            participant = winner.participant
-            status_emoji = "🏢" if participant.at_junction else "🚦"
-            # protection_emoji = "🛡️" if winner.protected else ""
-            
-            # SIMPLIFIED: Only show vehicle info since platoons are disabled
-            print(f"   #{winner.rank}: {status_emoji}🚗 "#{protection_emoji}
-                  f"Vehicle {participant.id} Bid: {winner.bid.value:.1f}")
-    
     def _broadcast_auction_results(self, auction_id: str, winners: List[AuctionWinner]):
         """Broadcast auction results"""
         self._broadcast_message({

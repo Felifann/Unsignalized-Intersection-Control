@@ -77,7 +77,6 @@ class TrafficController:
                 if self._apply_single_vehicle_control(
                     vehicle_id, 
                     self.controlled_vehicles[vehicle_id]['rank'],
-                    0.0,  # bid_value不重要，因为已经获得控制
                     'go'  # 路口内车辆应该继续通行
                 ):
                     maintained_vehicles.add(vehicle_id)
@@ -136,6 +135,15 @@ class TrafficController:
             except Exception as e:
                 print(f"[Warning] vehicle {participant.id} 控制应用失败: {e}")
     
+        # --- NEW: Ensure all vehicles currently in the junction are controlled ---
+        vehicle_states = self.state_extractor.get_vehicle_states()
+        for vehicle_state in vehicle_states:
+            vehicle_id = str(vehicle_state['id'])
+            if vehicle_state.get('is_junction', False) and vehicle_id not in self.controlled_vehicles:
+                # Assign default 'go' control for vehicles found in the junction but not controlled
+                if self._apply_single_vehicle_control(vehicle_id, rank=0, bid_value=0.0, control_action='go'):
+                    controlled_vehicles.add(vehicle_id)
+
         return controlled_vehicles
 
     def _determine_agent_control_status(self, auction_winners: List) -> Dict[str, str]:
@@ -190,7 +198,7 @@ class TrafficController:
                                     control_action: str = 'go') -> bool:
         """为单车agent应用控制"""
         try:
-            carla_vehicle = self.world.get_actor(vehicle_id)
+            carla_vehicle = self.world.get_actor(int(vehicle_id))  # <-- FIXED HERE
             if not carla_vehicle or not carla_vehicle.is_alive:
                 return False
 
@@ -274,7 +282,7 @@ class TrafficController:
         
         for vehicle_id in vehicles_to_restore:
             try:
-                carla_vehicle = self.world.get_actor(vehicle_id)
+                carla_vehicle = self.world.get_actor(int(vehicle_id))
                 if carla_vehicle and carla_vehicle.is_alive:
                     # 恢复默认控制参数
                     self.traffic_manager.vehicle_percentage_speed_difference(
