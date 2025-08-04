@@ -45,7 +45,7 @@ class SimulationConfig:
     PRINT_INTERVAL = 30
     
     # ===== 路口容量控制设置 =====
-    MAX_CONCURRENT_AGENTS = 4      # 最多同时通过的agent数
+    # MAX_CONCURRENT_AGENTS = 4      # 最多同时通过的agent数
     INTERSECTION_CAPACITY_ENABLED = True  # 是否启用容量限制
     
     @classmethod

@@ -33,7 +33,7 @@ class TrafficController:
         # self.platoon_manager = None
     
         # 新增：路口容量限制
-        self.max_concurrent_agents = 4  # 最多同时通过4个agent
+        # self.max_concurrent_agents = 4  # 最多同时通过4个agent
     
         print("🎮 单车专用交通控制器初始化完成 - 车队逻辑已禁用")
 
@@ -119,23 +119,30 @@ class TrafficController:
 
         # 1. 路口内的agent优先通行
         for winner in agents_in_intersection:
-            if winner.protected:
-                agent_control_status[winner.participant.id] = 'go'
+            # if winner.protected:
+            agent_control_status[winner.participant.id] = 'go'
 
         # 2. 如果路口容量允许，让接近的车道领头者进入
-        available_capacity = self.max_concurrent_agents - current_agents_in_intersection
+        # available_capacity = self.max_concurrent_agents - current_agents_in_intersection
         
-        if available_capacity > 0:
-            allowed_count = 0
+        # if available_capacity > 0:
+        #     allowed_count = 0
             
-            for winner in approaching_agents:
-                if allowed_count >= available_capacity:
-                    break
-                
-                # 允许排名靠前的agent通行
-                if winner.rank <= 4:  # 前4名可以通行
-                    agent_control_status[winner.participant.id] = 'go'
-                    allowed_count += 1
+        #     for winner in approaching_agents:
+        #         if allowed_count >= available_capacity:
+        #             break
+        #
+        #         # 允许所有有空位的agent通行（不再限制rank）
+        #         agent_control_status[winner.participant.id] = 'go'
+        #         allowed_count += 1
+        
+        # if available_capacity > 0:
+        #     for winner in approaching_agents[:available_capacity]:
+        #         agent_control_status[winner.participant.id] = 'go'
+        if approaching_agents:
+            # 方案A: 允许前3名同时通行
+            for winner in approaching_agents[:3]:
+                agent_control_status[winner.participant.id] = 'go'
 
         return agent_control_status
 
@@ -197,10 +204,10 @@ class TrafficController:
             }
         elif action == 'go':
             return {
-                    'speed_diff': 10.0,   # 略微提速
+                    'speed_diff': -30.0,   # 略微提速
                     'follow_distance': 1.0,  # 紧密跟车
                     'ignore_lights': 100.0,  # 忽略信号灯
-                    'ignore_vehicles': 30.0  # 部分忽略其他车辆
+                    'ignore_vehicles': 100.0  # 部分忽略其他车辆
                 }
 
         # 默认参数

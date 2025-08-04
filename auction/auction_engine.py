@@ -43,7 +43,7 @@ class AuctionWinner:
     participant: AuctionParticipant
     bid: Bid
     rank: int
-    protected: bool = False
+    # protected: bool = False
     conflict_action: str = "go"
 
 class Auction:
@@ -197,16 +197,16 @@ class AuctionEvaluator:
             return []
         
         # 1. Identify protected agents (already in transit)
-        protected_winners = self._get_protected_winners(auction.bids)
+        # protected_winners = self._get_protected_winners(auction.bids)
         
         # 2. Sort remaining bidders by bid value
-        remaining_bids = {k: v for k, v in auction.bids.items() 
-                         if k not in [w.participant.id for w in protected_winners]}
+        remaining_bids = {k: v for k, v in auction.bids.items() }
+                         # if k not in [w.participant.id for w in protected_winners]}
         
         regular_winners = self._evaluate_regular_bids(remaining_bids)
         
         # 3. Combine and assign final rankings
-        all_winners = protected_winners + regular_winners
+        all_winners = regular_winners # + protected_winners
         for i, winner in enumerate(all_winners):
             winner.rank = i + 1
         
@@ -254,7 +254,7 @@ class AuctionEvaluator:
                 participant=bid.participant,
                 bid=bid,
                 rank=0,  # Will be reassigned
-                protected=False
+                #protected=False
             )
             winners.append(winner)
         
@@ -460,10 +460,10 @@ class DecentralizedAuctionEngine:
         for winner in winners[:3]:  # Show top 3
             participant = winner.participant
             status_emoji = "🏢" if participant.at_junction else "🚦"
-            protection_emoji = "🛡️" if winner.protected else ""
+            # protection_emoji = "🛡️" if winner.protected else ""
             
             # SIMPLIFIED: Only show vehicle info since platoons are disabled
-            print(f"   #{winner.rank}: {status_emoji}{protection_emoji}🚗 "
+            print(f"   #{winner.rank}: {status_emoji}🚗 "#{protection_emoji}
                   f"Vehicle {participant.id} Bid: {winner.bid.value:.1f}")
     
     def _broadcast_auction_results(self, auction_id: str, winners: List[AuctionWinner]):

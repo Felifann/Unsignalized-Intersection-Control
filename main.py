@@ -124,10 +124,10 @@ try:
                     rank = winner.rank
                     conflict_action = winner.conflict_action
                     action_emoji = "🟢" if conflict_action == 'go' else "🔴"
-                    protection_emoji = "🛡️" if winner.protected else ""
+                    # protection_emoji = "🛡️" if winner.protected else ""
                     
                     # SIMPLIFIED: Only show vehicle info
-                    print(f"      #{rank}: {action_emoji}{protection_emoji}🚗车辆{participant.id} "
+                    print(f"      #{rank}: {action_emoji}🚗车辆{participant.id} "# {protection_emoji}
                           f"出价:{bid_value:.1f}")
             
             # 3. 控制器状态
