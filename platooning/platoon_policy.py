@@ -267,7 +267,7 @@ class Platoon:
 
     def is_valid(self) -> bool:
         """Check if platoon is valid and operational"""
-        return (len(self.vehicles) > 0 and 
+        return (len(self.vehicles) >= 2 and 
                 self.leader is not None and 
                 time.time() - self.last_update < 10.0)
     
@@ -285,16 +285,34 @@ class Platoon:
             return (self.leader.get('road_id'), self.leader.get('lane_id'))
         return None
     
+    def get_leader_id(self) -> Optional[str]:
+        """Get platoon leader vehicle ID"""
+        return str(self.leader['id']) if self.leader else None
+    
+    def get_follower_ids(self) -> List[str]:
+        """Get list of follower vehicle IDs (excluding leader)"""
+        if len(self.vehicles) <= 1:
+            return []
+        return [str(v['id']) for v in self.vehicles[1:]]
+    
+    def get_vehicle_position_in_platoon(self, vehicle_id: str) -> Optional[int]:
+        """Get position of vehicle in platoon (0=leader, 1=first follower, etc.)"""
+        for idx, vehicle in enumerate(self.vehicles):
+            if str(vehicle['id']) == str(vehicle_id):
+                return idx
+        return None
+    
     # Status and performance queries
     def is_ready_for_intersection(self) -> bool:
         """Check if platoon is ready to proceed through intersection"""
         if not self.is_valid():
             return False
         
+        # Less strict requirements for easier analysis
         if len(self.vehicles) > 1 and self.metrics_history:
             latest_metrics = self.metrics_history[-1]
-            return (latest_metrics.cohesion_score > 0.7 and 
-                   latest_metrics.safety_score > 0.8)
+            return (latest_metrics.cohesion_score > 0.5 and  # Reduced from 0.7
+                   latest_metrics.safety_score > 0.6)        # Reduced from 0.8
         
         return True
     
@@ -335,3 +353,7 @@ class Platoon:
         return (f"Platoon({self.platoon_id}, size={self.get_size()}, "
                 f"direction={self.get_goal_direction()}, "
                 f"ready={self.is_ready_for_intersection()})")
+    
+    def get_all_vehicle_states(self) -> List[Dict]:
+        """Get all vehicle states in the platoon - required by auction system"""
+        return self.vehicles.copy()

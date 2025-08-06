@@ -114,7 +114,7 @@ class PlatoonManager:
         return [v for v in vehicle_states if self._default_vehicle_filter(v)]
     
     def _default_vehicle_filter(self, vehicle: Dict) -> bool:
-        """Default vehicle filtering logic"""
+        """Default vehicle filtering logic - 更宽松的过滤条件"""
         # Check if near intersection (simple distance check)
         location = vehicle.get('location', [0, 0, 0])
         distance = math.sqrt(
@@ -122,9 +122,18 @@ class PlatoonManager:
             (location[1] - self.config.intersection_center[1])**2
         )
         
-        # Within reasonable distance and has destination
-        return (distance < 100.0 and 
-                (vehicle.get('destination') or vehicle.get('is_junction', False)))
+        # More relaxed filtering for easier platoon formation
+        near_intersection = distance < 120.0  # 增加距离阈值
+        has_destination_or_moving = (vehicle.get('destination') or 
+                                   vehicle.get('is_junction', False) or
+                                   self._vehicle_speed(vehicle) > 0.5)  # 包含移动中的车辆
+        
+        return near_intersection and has_destination_or_moving
+    
+    def _vehicle_speed(self, vehicle: Dict) -> float:
+        """Helper to calculate vehicle speed"""
+        velocity = vehicle.get('velocity', [0, 0, 0])
+        return math.sqrt(velocity[0]**2 + velocity[1]**2)
     
     def _update_existing_platoons(self, vehicle_states: List[Dict]):
         """Update existing platoons with new vehicle states"""
@@ -213,19 +222,39 @@ class PlatoonManager:
         return f"{road_id}_{lane_id}"
     
     def _estimate_vehicle_direction(self, vehicle: Dict) -> Optional[str]:
-        """Estimate vehicle direction using callback or default logic"""
         if self._direction_estimator_callback:
-            return self._direction_estimator_callback(vehicle)
-        
-        # Default: try to use destination if available
-        if not vehicle.get('destination'):
-            return None
-        
-        # Simple direction estimation (could be enhanced)
-        return 'straight'  # Default assumption
+            direction = self._direction_estimator_callback(vehicle)
+            if direction:
+                return direction
+
+        # Try to use destination if available
+        if vehicle.get('destination') and self._state_extractor:
+            try:
+                import carla
+                vehicle_location = carla.Location(
+                    x=vehicle['location'][0],
+                    y=vehicle['location'][1], 
+                    z=vehicle['location'][2]
+                )
+                direction = self._state_extractor.get_route_direction(
+                    vehicle_location, vehicle['destination']
+                )
+                if direction:
+                    return direction
+            except Exception as e:
+                print(f"[Direction] Failed to get route direction for vehicle {vehicle['id']}: {e}")
+
+        # Fallback: Only use velocity if it's significant, and try to infer direction
+        velocity = vehicle.get('velocity', [0, 0, 0])
+        if len(velocity) >= 2 and (abs(velocity[0]) > 0.1 or abs(velocity[1]) > 0.1):
+            # You may implement a more sophisticated heading-to-direction mapping here
+            return None  # Do not guess, skip if not sure
+
+        print(f"[Direction] No clear direction for vehicle {vehicle['id']}")
+        return None
     
     def _find_adjacent_compatible_groups(self, sorted_vehicles_with_direction: List[Tuple]) -> List[List[Dict]]:
-        """Find adjacent vehicle groups with same direction"""
+        """Find adjacent vehicle groups with same direction - Enhanced validation"""
         if not sorted_vehicles_with_direction:
             return []
         
@@ -237,62 +266,123 @@ class PlatoonManager:
             vehicle, direction = sorted_vehicles_with_direction[i]
             prev_vehicle = sorted_vehicles_with_direction[i-1][0]
             
-            # Check direction compatibility
-            if direction != current_direction:
+            # ENHANCED: Strict direction matching
+            if direction != current_direction or direction is None:
+                # Direction changed or invalid - finalize current group
                 if len(current_group) >= self.config.min_platoon_size:
+                    print(f"🔍 Found compatible group: {len(current_group)} vehicles, direction={current_direction}")
                     groups.append(current_group)
-                current_group = [vehicle]
-                current_direction = direction
+                
+                # Start new group only if direction is valid
+                if direction is not None:
+                    current_group = [vehicle]
+                    current_direction = direction
+                else:
+                    current_group = []
+                    current_direction = None
                 continue
             
-            # Check proximity
+            # Check proximity for same direction vehicles
             distance = self._vehicle_distance(prev_vehicle, vehicle)
             
             if distance <= self.config.max_following_distance:
                 current_group.append(vehicle)
+                print(f"   Added vehicle {vehicle['id']} to group (distance: {distance:.1f}m)")
             else:
+                # Distance too large - finalize current group and start new one
                 if len(current_group) >= self.config.min_platoon_size:
+                    print(f"🔍 Found compatible group: {len(current_group)} vehicles, direction={current_direction}")
                     groups.append(current_group)
                 current_group = [vehicle]
         
-        # Add final group
-        if len(current_group) >= self.config.min_platoon_size:
+        # Add final group if valid
+        if len(current_group) >= self.config.min_platoon_size and current_direction is not None:
+            print(f"🔍 Found final compatible group: {len(current_group)} vehicles, direction={current_direction}")
             groups.append(current_group)
         
         return groups
     
     def _create_platoons_from_group(self, vehicle_group: List[Dict]) -> List[Platoon]:
-        """Create platoons from a vehicle group"""
+        """Create platoons from a vehicle group - Enhanced with stricter validation"""
         if len(vehicle_group) < self.config.min_platoon_size:
+            print(f"❌ Group too small: {len(vehicle_group)} vehicles (need {self.config.min_platoon_size})")
             return []
         
         platoons = []
         
+        # IMPROVED: Sort vehicles by distance to intersection for proper leader selection
+        sorted_vehicles = sorted(
+            vehicle_group,
+            key=lambda v: self._distance_to_intersection(v)
+        )
+        
         # Split large groups into multiple platoons
-        while len(vehicle_group) >= self.config.min_platoon_size:
-            platoon_size = min(self.config.max_platoon_size, len(vehicle_group))
-            platoon_vehicles = vehicle_group[:platoon_size]
-            vehicle_group = vehicle_group[platoon_size:]
+        while len(sorted_vehicles) >= self.config.min_platoon_size:
+            platoon_size = min(self.config.max_platoon_size, len(sorted_vehicles))
+            platoon_vehicles = sorted_vehicles[:platoon_size]
+            sorted_vehicles = sorted_vehicles[platoon_size:]
             
-            # Verify direction consistency
-            directions = [self._estimate_vehicle_direction(v) for v in platoon_vehicles]
-            unique_directions = set(filter(None, directions))
+            # ENHANCED: Stricter direction validation
+            directions = []
+            for v in platoon_vehicles:
+                direction = self._estimate_vehicle_direction(v)
+                if direction:
+                    directions.append(direction)
             
-            if len(unique_directions) == 1:
-                platoon = Platoon(
-                    platoon_vehicles, 
-                    self.config.intersection_center, 
-                    goal_direction=directions[0] if directions[0] else None,
-                    state_extractor=self._state_extractor
-                )
+            # Ensure ALL vehicles have the same direction
+            unique_directions = set(directions)
+            
+            if len(directions) == len(platoon_vehicles) and len(unique_directions) == 1:
+                # All vehicles have same valid direction
+                common_direction = list(unique_directions)[0]
                 
-                if platoon.is_valid():
-                    platoons.append(platoon)
-                    self.formation_stats['total_formed'] += 1
-                    print(f"✅ Formed platoon: {platoon.platoon_id} "
-                          f"({platoon.get_size()} vehicles, {platoon.get_goal_direction()})")
+                # IMPROVED: Additional formation validation
+                if self._validate_platoon_formation(platoon_vehicles):
+                    platoon = Platoon(
+                        platoon_vehicles, 
+                        self.config.intersection_center, 
+                        goal_direction=common_direction,
+                        state_extractor=self._state_extractor
+                    )
+                    
+                    if platoon.is_valid() and platoon.get_size() >= self.config.min_platoon_size:
+                        platoons.append(platoon)
+                        self.formation_stats['total_formed'] += 1
+                        
+                        # DEBUG: Enhanced logging
+                        leader_id = platoon.get_leader_id()
+                        follower_ids = platoon.get_follower_ids()
+                        print(f"✅ Formed valid platoon: {platoon.platoon_id}")
+                        print(f"   Size: {platoon.get_size()} vehicles")
+                        print(f"   Direction: {common_direction}")
+                        print(f"   Leader: {leader_id}")
+                        print(f"   Followers: {follower_ids}")
+                    else:
+                        print(f"❌ Failed validation: size={platoon.get_size()}, valid={platoon.is_valid()}")
+                else:
+                    print(f"❌ Formation validation failed for group")
+            else:
+                print(f"❌ Direction mismatch: {len(directions)}/{len(platoon_vehicles)} have directions, unique={unique_directions}")
+                break  # Stop trying to form platoons from this group
         
         return platoons
+    
+    def _validate_platoon_formation(self, vehicles: List[Dict]) -> bool:
+        """Validate that vehicles can form a proper platoon"""
+        if len(vehicles) < 2:
+            return False
+        
+        # Check that vehicles are reasonably spaced
+        for i in range(len(vehicles) - 1):
+            distance = self._vehicle_distance(vehicles[i], vehicles[i + 1])
+            if distance > self.config.max_following_distance:
+                print(f"❌ Vehicles too far apart: {distance:.1f}m > {self.config.max_following_distance}m")
+                return False
+            if distance < 2.0:  # Too close
+                print(f"❌ Vehicles too close: {distance:.1f}m < 2.0m")
+                return False
+        
+        return True
     
     def _dissolve_platoon(self, platoon: Platoon, reason: str):
         """Dissolve a platoon and update statistics"""

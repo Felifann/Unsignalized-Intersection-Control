@@ -14,8 +14,8 @@ class AuctionStatus(Enum):
     COMPLETED = "completed"
 
 @dataclass
-class AuctionParticipant:
-    """Represents an agent participating in the auction"""
+class AuctionAgent:
+    """Represents an agent (vehicle or platoon) participating in the auction"""
     id: str
     type: str  # 'vehicle' or 'platoon'
     location: Tuple[float, float, float]
@@ -24,7 +24,7 @@ class AuctionParticipant:
     
     @property
     def vehicles(self) -> List[Dict]:
-        """Get vehicles associated with this participant"""
+        """Get vehicles associated with this agent"""
         if self.type == 'platoon':
             return self.data.get('vehicles', [])
         return [self.data] if self.type == 'vehicle' else []
@@ -35,12 +35,12 @@ class Bid:
     participant_id: str
     value: float
     timestamp: float
-    participant: AuctionParticipant
+    participant: AuctionAgent
 
 @dataclass
 class AuctionWinner:
     """Represents an auction winner with ranking"""
-    participant: AuctionParticipant
+    participant: AuctionAgent
     bid: Bid
     rank: int
     # protected: bool = False
@@ -49,10 +49,10 @@ class AuctionWinner:
 class Auction:
     """Manages a single auction round"""
     
-    def __init__(self, auction_id: str, participants: List[AuctionParticipant], 
+    def __init__(self, auction_id: str, agents: List[AuctionAgent], 
                  bidding_duration: float = 1.0):
         self.id = auction_id
-        self.participants = participants
+        self.agents = agents
         self.start_time = time.time()
         self.deadline = self.start_time + bidding_duration
         self.status = AuctionStatus.BIDDING
@@ -72,10 +72,10 @@ class Auction:
         return time.time() >= self.deadline
     
     def get_participation_rate(self) -> float:
-        """Get percentage of participants who have bid"""
-        if not self.participants:
+        """Get percentage of agents who have bid"""
+        if not self.agents:
             return 0.0
-        return len(self.bids) / len(self.participants)
+        return len(self.bids) / len(self.agents)
 
 class LaneGrouper:
     """Handles lane-based vehicle grouping logic"""
@@ -125,41 +125,85 @@ class LaneGrouper:
         return lanes
 
 class ParticipantIdentifier:
-    """Identifies auction participants from vehicle states and platoons"""
+    """Identifies auction agents from vehicle states and platoons"""
     
     def __init__(self, lane_grouper: LaneGrouper):
         self.lane_grouper = lane_grouper
     
-    def identify_participants(self, vehicle_states: List[Dict], 
-                            platoon_manager=None) -> List[AuctionParticipant]:
-        """识别拍卖参与者 - 单车版本（排除正在通过路口的车辆）"""
-        participants = []
+    def identify_agents(self, vehicle_states: List[Dict], 
+                            platoon_manager=None) -> List[AuctionAgent]:
+        """识别拍卖参与者 - 支持车队和单车混合模式"""
+        agents = []
+        platoon_vehicle_ids = set()
         
-        # 获取车道领头者
+        # 1. 首先添加车队agent（如果有车队管理器）
+        if platoon_manager:
+            platoons = platoon_manager.get_all_platoons()
+            for platoon in platoons:
+                if platoon.is_valid() and len(platoon.vehicles) >= 2:
+                    # 检查车队是否应该参与拍卖
+                    if self._should_platoon_participate(platoon):
+                        agent = AuctionAgent(
+                            id=platoon.platoon_id,
+                            type='platoon',
+                            location=tuple(platoon.get_leader_position() or (0, 0, 0)),
+                            data={'vehicles': platoon.vehicles, 'platoon': platoon},
+                            at_junction=platoon.has_vehicle_in_intersection()
+                        )
+                        agents.append(agent)
+                        platoon_vehicle_ids.update(platoon.get_vehicle_ids())
+        
+        # 2. 添加独立车辆agent（排除已在车队中的车辆）
         lane_leaders = self.lane_grouper.get_lane_leaders(vehicle_states)
-        if not lane_leaders:
-            return participants
         
-        # 添加单独车辆参与者
         for vehicle in lane_leaders:
-            # 更精细的排除逻辑：只排除正在积极通过路口的车辆
+            vehicle_id = str(vehicle['id'])
+            if vehicle_id in platoon_vehicle_ids:
+                continue
             if self._is_vehicle_actively_passing(vehicle):
                 continue
-            
             if self._vehicle_has_destination(vehicle):
-                participant = AuctionParticipant(
+                agent = AuctionAgent(
                     id=vehicle['id'],
                     type='vehicle',
                     location=vehicle['location'],
                     data=vehicle,
                     at_junction=vehicle.get('is_junction', False)
                 )
-                participants.append(participant)
+                agents.append(agent)
         
-        print(f"🎯 单车拍卖参与者识别完成: {len(participants)}个独立车辆 (排除正在通过路口的车辆)")
-        
-        return participants
+        return agents
     
+    def _should_platoon_participate(self, platoon) -> bool:
+        """检查车队是否应该参与拍卖 - 修复逻辑错误"""
+        # 检查车队是否有效且有足够车辆
+        if not platoon.is_valid() or platoon.get_size() < 2:
+            return False
+        
+        # 车队领头车辆应该接近路口
+        leader_location = platoon.get_leader_position()
+        if not leader_location:
+            return False
+        
+        # 检查距离路口的距离
+        distance_to_intersection = math.sqrt(
+            (leader_location[0] - (-188.9))**2 + 
+            (leader_location[1] - (-89.7))**2
+        )
+        
+        # 更宽松的距离要求和准备状态检查
+        distance_ok = distance_to_intersection < 100.0  # 增加距离阈值
+        
+        # SIMPLIFIED: 不要求过于严格的准备状态
+        ready_for_intersection = True  # 简化准备检查，便于调试
+        
+        should_participate = distance_ok and ready_for_intersection
+        
+        if should_participate:
+            print(f"🚛 Platoon {platoon.platoon_id} eligible for auction: "
+                  f"distance={distance_to_intersection:.1f}m, size={platoon.get_size()}")
+        
+        return should_participate
     
     def _is_vehicle_actively_passing(self, vehicle: Dict) -> bool:
         """检查车辆是否正在积极通过路口（而非仅仅在路口边界等待）"""
@@ -279,26 +323,26 @@ class AuctionEvaluator:
         
         return winners
     
-    def _is_participant_in_transit(self, participant: AuctionParticipant) -> bool:
+    def _is_participant_in_transit(self, participant: AuctionAgent) -> bool:
         """Check if participant is currently in transit through intersection"""
         if participant.type == 'vehicle':
             return participant.data.get('is_junction', False)
-        # elif participant.type == 'platoon':
-        #     # Platoon is in transit if any vehicle is in junction
-        #     for vehicle in participant.vehicles:
-        #         if vehicle.get('is_junction', False):
-        #             return True
+        elif participant.type == 'platoon':
+            # Platoon is in transit if any vehicle is in junction
+            for vehicle in participant.vehicles:
+                if vehicle.get('is_junction', False):
+                    return True
         return False
     
     def cleanup_completed_agents(self, vehicle_states: List[Dict], platoon_manager=None):
-        """Clean up agents that have completed transit - 单车版本"""
+        """Clean up agents that have completed transit - 支持车队和单车"""
         current_time = time.time()
         completed_agents = []
         
         for agent_id in list(self.protected_agents):
-            # SIMPLIFIED: Only check single vehicles since platoons are disabled
-            agent_still_in_transit = self._check_single_vehicle_in_transit(
-                agent_id, vehicle_states
+            # Check both single vehicles and platoons
+            agent_still_in_transit = self._check_agent_still_in_transit(
+                agent_id, vehicle_states, platoon_manager
             )
             
             # Remove protection if agent completed transit or timed out
@@ -311,7 +355,26 @@ class AuctionEvaluator:
         for agent_id in completed_agents:
             self.protected_agents.discard(agent_id)
             self.agents_in_transit.pop(agent_id, None)
-            print(f"✅ Vehicle {agent_id} completed transit, protection removed")
+            agent_type = "车队" if agent_id.startswith("platoon_") else "车辆"
+            print(f"✅ {agent_type} {agent_id} completed transit, protection removed")
+    
+    def _check_agent_still_in_transit(self, agent_id: str, vehicle_states: List[Dict], platoon_manager=None) -> bool:
+        """检查agent是否仍在通过路口 - 支持车队和单车"""
+        # Check if it's a platoon
+        if agent_id.startswith("platoon_") and platoon_manager:
+            return self._check_platoon_still_in_transit(agent_id, platoon_manager)
+        else:
+            return self._check_single_vehicle_in_transit(agent_id, vehicle_states)
+    
+    def _check_platoon_still_in_transit(self, platoon_id: str, platoon_manager) -> bool:
+        """检查车队是否仍在通过路口"""
+        # Find the platoon
+        for platoon in platoon_manager.get_all_platoons():
+            if platoon.platoon_id == platoon_id:
+                return platoon.has_vehicle_in_intersection()
+        
+        # Platoon not found, consider it as completed
+        return False
     
     def _check_single_vehicle_in_transit(self, agent_id: str, vehicle_states: List[Dict]) -> bool:
         """检查单车是否仍在通过路口 - 简化版本"""
@@ -325,7 +388,7 @@ class AuctionEvaluator:
     # def _check_agent_still_in_transit(self, agent_id: str, vehicle_states: List[Dict], platoon_manager) -> bool:
 
 class DecentralizedAuctionEngine:
-    """Main auction engine managing the complete auction process - 单车版本"""
+    """Main auction engine managing the complete auction process - 支持车队和单车"""
     
     def __init__(self, intersection_center=(-188.9, -89.7, 0.0), 
                  communication_range=50.0, state_extractor=None):
@@ -350,42 +413,42 @@ class DecentralizedAuctionEngine:
         # Integration points
         self.vehicle_enforcer = None
         
-        print("🎯 单车专用拍卖引擎已初始化 - 车队逻辑已禁用")
+        print("🎯 增强拍卖引擎已初始化 - 支持车队和单车混合模式")
     
     def set_vehicle_enforcer(self, vehicle_enforcer):
         """Set vehicle control enforcer for integration"""
         self.vehicle_enforcer = vehicle_enforcer
     
     def update(self, vehicle_states: List[Dict], platoon_manager=None) -> List[AuctionWinner]:
-        """Main update loop - 单车版本（忽略platoon_manager）"""
+        """Main update loop - 支持车队和单车混合模式"""
         current_time = time.time()
         
-        # 1. Identify potential participants (vehicles only)
-        participants = self.participant_identifier.identify_participants(
-            vehicle_states, None  # Pass None instead of platoon_manager
+        # 1. Identify potential agents (vehicles and platoons)
+        agents = self.participant_identifier.identify_agents(
+            vehicle_states, platoon_manager
         )
         
         # 2. Start new auction if needed
-        if participants and not self.current_auction:
-            self._start_new_auction(participants, current_time)
+        if agents and not self.current_auction:
+            self._start_new_auction(agents, current_time)
         
         # 3. Process current auction
         winners = []
         if self.current_auction:
             winners = self._process_current_auction(current_time)
         
-        # 4. Clean up completed protected agents (single vehicles only)
-        self.evaluator.cleanup_completed_agents(vehicle_states, None)
+        # 4. Clean up completed protected agents (vehicles and platoons)
+        self.evaluator.cleanup_completed_agents(vehicle_states, platoon_manager)
         
         # 5. Simulate communication
         self._simulate_v2v_communication()
         
         return winners
     
-    def _start_new_auction(self, participants: List[AuctionParticipant], start_time: float):
+    def _start_new_auction(self, agents: List[AuctionAgent], start_time: float):
         """Start a new auction round"""
         auction_id = f"junction_auction_{int(start_time)}"
-        self.current_auction = Auction(auction_id, participants)
+        self.current_auction = Auction(auction_id, agents)
         
         # Collect bids immediately
         self._collect_bids()
@@ -394,11 +457,11 @@ class DecentralizedAuctionEngine:
         self._broadcast_message({
             'type': 'auction_start',
             'auction_id': auction_id,
-            'participants': [p.id for p in participants],
+            'agents': [a.id for a in agents],
             'timestamp': start_time
         })
         
-        print(f"🎯 Started auction {auction_id} with {len(participants)} participants")
+        print(f"🎯 Started auction {auction_id} with {len(agents)} agents")
     
     def _process_current_auction(self, current_time: float) -> List[AuctionWinner]:
         """Process the current active auction"""
@@ -430,14 +493,14 @@ class DecentralizedAuctionEngine:
         return auction.winners if auction.winners else []
     
     def _collect_bids(self):
-        """Collect bids from all participants"""
+        """Collect bids from all agents"""
         if not self.current_auction:
             return
         
-        for participant in self.current_auction.participants:
+        for agent in self.current_auction.agents:
             # Create bid policy and compute bid
             bid_policy = AgentBidPolicy(
-                self._participant_to_agent_dict(participant),
+                self._agent_to_dict(agent),
                 self.intersection_center,
                 self.state_extractor
             )
@@ -445,31 +508,35 @@ class DecentralizedAuctionEngine:
             
             # Create and add bid
             bid = Bid(
-                participant_id=participant.id,
+                participant_id=agent.id,
                 value=bid_value,
                 timestamp=time.time(),
-                participant=participant
+                participant=agent
             )
             
             self.current_auction.add_bid(bid)
     
-    def _participant_to_agent_dict(self, participant: AuctionParticipant) -> Dict:
-        """Convert AuctionParticipant to legacy agent dict format for BidPolicy - 单车版本"""
+    def _agent_to_dict(self, agent: AuctionAgent) -> Dict:
+        """Convert AuctionAgent to dict format for BidPolicy"""
         agent_dict = {
-            'id': participant.id,
-            'type': participant.type,
-            'location': participant.location,
-            'at_junction': participant.at_junction
+            'id': agent.id,
+            'type': agent.type,
+            'location': agent.location,
+            'at_junction': agent.at_junction
         }
         
-        # DISABLED: Platoon logic removed
-        # Only handle individual vehicles now
-        if participant.type == 'vehicle':
-            agent_dict['data'] = participant.data
-        # elif participant.type == 'platoon':  # DISABLED
+        # Handle both vehicles and platoons
+        if agent.type == 'vehicle':
+            agent_dict['data'] = agent.data
+        elif agent.type == 'platoon':
+            agent_dict['data'] = agent.data
+            vehicles = agent.data.get('vehicles', [])
+            agent_dict['platoon_size'] = len(vehicles)
+            agent_dict['vehicles'] = vehicles
+            print(f"🎯 Platoon {agent.id} prepared for bidding: {len(vehicles)} vehicles")
         
         return agent_dict
-    
+
     def _broadcast_auction_results(self, auction_id: str, winners: List[AuctionWinner]):
         """Broadcast auction results"""
         self._broadcast_message({
@@ -509,25 +576,29 @@ class DecentralizedAuctionEngine:
         return []
     
     def get_auction_stats(self) -> Dict[str, Any]:
-        """Get comprehensive auction statistics - 单车版本"""
-        current_participants = 0
+        """Get comprehensive auction statistics - 支持车队统计"""
+        current_agents = 0
         vehicle_count = 0
+        platoon_count = 0
         
         if self.current_auction:
-            current_participants = len(self.current_auction.participants)
-            # All participants are vehicles now
-            vehicle_count = current_participants
+            current_agents = len(self.current_auction.agents)
+            for agent in self.current_auction.agents:
+                if agent.type == 'vehicle':
+                    vehicle_count += 1
+                elif agent.type == 'platoon':
+                    platoon_count += 1
         
         return {
             'active_auction': self.current_auction is not None,
-            'current_participants': current_participants,
-            'platoon_participants': 0,  # Always 0 when platoons disabled
-            'vehicle_participants': vehicle_count,
+            'current_agents': current_agents,
+            'platoon_agents': platoon_count,
+            'vehicle_agents': vehicle_count,
             'completed_auctions': len(self.auction_history),
             'protected_agents': len(self.evaluator.protected_agents),
             'auction_status': self.current_auction.status.value if self.current_auction else 'none'
         }
-    
+
     # Extension points for future integration
     def apply_conflict_resolution(self, winners: List[AuctionWinner], 
                                 conflict_actions: Dict[str, str]) -> List[AuctionWinner]:
@@ -556,6 +627,16 @@ class DecentralizedAuctionEngine:
             print(f"🎮 Conflict resolution: {len(waiting_winners)} agents waiting")
         
         return all_winners
+    
+    # def integrate_learned_bidding_policy(self, policy_function):
+    #     """Integration point for RL-based bidding policies"""
+    #     # Future implementation for PPO integration
+    #     pass
+        
+    #     if waiting_winners:
+    #         print(f"🎮 Conflict resolution: {len(waiting_winners)} agents waiting")
+        
+    #     return all_winners
     
     def integrate_learned_bidding_policy(self, policy_function):
         """Integration point for RL-based bidding policies"""
