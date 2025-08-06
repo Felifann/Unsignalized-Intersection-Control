@@ -1,4 +1,3 @@
-import carla
 class SimulationConfig:
     # ===== 地图设置 =====
     MAP_NAME = 'Town05'

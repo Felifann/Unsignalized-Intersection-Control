@@ -58,9 +58,9 @@ class PlatoonManager:
         """Set callback for filtering vehicles eligible for platooning"""
         self._vehicle_filter_callback = filter_callback
     
-    def set_direction_estimator(self, estimator_callback: Callable[[Dict], Optional[str]]):
-        """Set callback for estimating vehicle direction"""
-        self._direction_estimator_callback = estimator_callback
+    # def set_direction_estimator(self, estimator_callback: Callable[[Dict], Optional[str]]):
+    #     """Set callback for estimating vehicle direction"""
+    #     self._direction_estimator_callback = estimator_callback
     
     def update(self, vehicle_states: Optional[List[Dict]] = None):
         """
@@ -222,10 +222,10 @@ class PlatoonManager:
         return f"{road_id}_{lane_id}"
     
     def _estimate_vehicle_direction(self, vehicle: Dict) -> Optional[str]:
-        if self._direction_estimator_callback:
-            direction = self._direction_estimator_callback(vehicle)
-            if direction:
-                return direction
+        # if self._direction_estimator_callback:
+        #     direction = self._direction_estimator_callback(vehicle)
+        #     if direction:
+        #         return direction
 
         # Try to use destination if available
         if vehicle.get('destination') and self._state_extractor:

@@ -1,6 +1,5 @@
 import carla
 import random
-import time
 from .simulation_config import SimulationConfig
 
 class CarlaWrapper:

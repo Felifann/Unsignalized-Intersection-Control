@@ -1,4 +1,3 @@
-import math
 import time
 from typing import Dict, List, Set, Any
 from env.simulation_config import SimulationConfig
@@ -174,7 +173,7 @@ class TrafficController:
                     'follow_distance': 2.5,   # Slightly larger gap
                     'ignore_lights': 100.0,
                     'ignore_signs': 100.0,
-                    'ignore_vehicles': 60.0
+                    'ignore_vehicles': 40.0
                 }
                 # Followers: aggressive, close following
                 follower_params = {
@@ -182,7 +181,7 @@ class TrafficController:
                     'follow_distance': 1.0,   # Very tight following
                     'ignore_lights': 100.0,
                     'ignore_signs': 100.0,
-                    'ignore_vehicles': 100.0   # Almost ignore others, focus on leader
+                    'ignore_vehicles': 40.0   # Almost ignore others, focus on leader
                 }
             else:  # wait
                 # All platoon members wait together
@@ -329,7 +328,7 @@ class TrafficController:
                     'follow_distance': 1.2 if not is_leader else 1.5,  # 增加跟车距离
                     'ignore_lights': 100.0,   # 忽略信号灯
                     'ignore_signs': 100.0,    # 忽略标志
-                    'ignore_vehicles': 90.0 if not is_leader else 80.0  # 跟随车更积极
+                    'ignore_vehicles': 40.0
                 }
             else:
                 return {
@@ -337,7 +336,7 @@ class TrafficController:
                     'follow_distance': 1.2,   # 增加跟车距离
                     'ignore_lights': 100.0,   # 忽略信号灯
                     'ignore_signs': 100.0,    # 忽略标志
-                    'ignore_vehicles': 100.0  # 部分忽略其他车辆
+                    'ignore_vehicles': 40.0
                 }
 
         # 默认参数

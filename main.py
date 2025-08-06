@@ -1,7 +1,6 @@
 import sys
 import os
 import glob
-import time
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
 egg_path = []

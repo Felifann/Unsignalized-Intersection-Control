@@ -1,6 +1,5 @@
 import random
 import carla
-from carla import Transform, Location, Rotation
 from .simulation_config import SimulationConfig
 
 class TrafficGenerator:
