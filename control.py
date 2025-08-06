@@ -147,43 +147,15 @@ class TrafficController:
         return controlled_vehicles
 
     def _determine_agent_control_status(self, auction_winners: List) -> Dict[str, str]:
-        """确定agent控制状态 - 单车版本"""
+        """确定agent控制状态 - 简化：按优先级最多允许3辆go，其余wait，不做冲突检测"""
         agent_control_status = {}
-        
-        # 所有参与拍卖的车辆都是接近路口的车辆（已排除路口内车辆）
-        approaching_agents = auction_winners
-        
-        # 默认所有agent都等待
-        for winner in auction_winners:
-            agent_control_status[winner.participant.id] = 'wait'
-
-        # 1. 路口内的agent优先通行
-        # for winner in agents_in_intersection:
-        #     # if winner.protected:
-        #     agent_control_status[winner.participant.id] = 'go'
-
-        # 2. 如果路口容量允许，让接近的车道领头者进入
-        # available_capacity = self.max_concurrent_agents - current_agents_in_intersection
-        
-        # if available_capacity > 0:
-        #     allowed_count = 0
-            
-        #     for winner in approaching_agents:
-        #         if allowed_count >= available_capacity:
-        #             break
-        #
-        #         # 允许所有有空位的agent通行（不再限制rank）
-        #         agent_control_status[winner.participant.id] = 'go'
-        #         allowed_count += 1
-        
-        # if available_capacity > 0:
-        #     for winner in approaching_agents[:available_capacity]:
-        #         agent_control_status[winner.participant.id] = 'go'
-        if approaching_agents:
-            # 允许前3名同时通行
-            for winner in approaching_agents[:3]:
-                agent_control_status[winner.participant.id] = 'go'
-
+        agents = [w.participant for w in auction_winners]
+        max_concurrent_agents = 3  # 或根据需要调整
+        for idx, agent in enumerate(agents):
+            if idx < max_concurrent_agents:
+                agent_control_status[agent.id] = 'go'
+            else:
+                agent_control_status[agent.id] = 'wait'
         return agent_control_status
 
     def _is_agent_in_intersection(self, participant) -> bool:
@@ -198,7 +170,7 @@ class TrafficController:
                                     control_action: str = 'go') -> bool:
         """为单车agent应用控制"""
         try:
-            carla_vehicle = self.world.get_actor(int(vehicle_id))  # <-- FIXED HERE
+            carla_vehicle = self.world.get_actor(int(vehicle_id))
             if not carla_vehicle or not carla_vehicle.is_alive:
                 return False
 
@@ -216,6 +188,9 @@ class TrafficController:
             )
             self.traffic_manager.ignore_lights_percentage(
                 carla_vehicle, control_params['ignore_lights']
+            )
+            self.traffic_manager.ignore_signs_percentage(
+                carla_vehicle, control_params['ignore_signs']
             )
             self.traffic_manager.ignore_vehicles_percentage(
                 carla_vehicle, control_params['ignore_vehicles']
@@ -239,24 +214,27 @@ class TrafficController:
         """根据排名和动作获取控制参数"""
         if action == 'wait':
             return {
-                'speed_diff': -80.0,  # 大幅降速
-                'follow_distance': 3.0,  # 增加跟车距离
-                'ignore_lights': 0.0,   # 遵守信号灯
-                'ignore_vehicles': 0.0  # 遵守其他车辆
+                'speed_diff': -80.0,      # 大幅降速
+                'follow_distance': 3.0,   # 增加跟车距离
+                'ignore_lights': 0.0,     # 遵守信号灯
+                'ignore_signs': 0.0,      # 遵守标志
+                'ignore_vehicles': 0.0    # 遵守其他车辆
             }
         elif action == 'go':
             return {
-                    'speed_diff': 0.0,   # 略微提速
-                    'follow_distance': 1.0,  # 紧密跟车
-                    'ignore_lights': 100.0,  # 忽略信号灯
-                    'ignore_vehicles': 100.0  # 部分忽略其他车辆
-                }
+                'speed_diff': -70.0,      # 略微提速
+                'follow_distance': 1.0,   # 紧密跟车
+                'ignore_lights': 100.0,   # 忽略信号灯
+                'ignore_signs': 100.0,    # 忽略标志
+                'ignore_vehicles': 100.0  # 部分忽略其他车辆
+            }
 
         # 默认参数
         return {
             'speed_diff': self.default_speed_diff,
             'follow_distance': self.default_follow_distance,
             'ignore_lights': 0.0,
+            'ignore_signs': 0.0,
             'ignore_vehicles': 0.0
         }
 

@@ -417,7 +417,7 @@ class DecentralizedAuctionEngine:
             
             # Broadcast results
             self._broadcast_auction_results(auction.id, winners)
-            self._print_auction_results(auction.id, winners)
+            # self._print_auction_results(auction.id, winners)
             
             return winners
         
