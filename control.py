@@ -21,7 +21,9 @@ class TrafficController:
         # 控制参数
         self.default_speed_diff = -40.0  # 默认速度差异
         self.default_follow_distance = 1.5  # 默认跟车距离
-        
+        # self.default_ignore_vehicles = 100.0  # 默认忽略信号灯
+        # self.default_ignore_signs = 100.0  # 默认忽略标志
+
         # 控制状态跟踪
         self.controlled_vehicles: Dict[str, Dict] = {}
         self.current_controlled_vehicles: Set[str] = set()
@@ -173,7 +175,7 @@ class TrafficController:
                     'follow_distance': 2.5,   # Slightly larger gap
                     'ignore_lights': 100.0,
                     'ignore_signs': 100.0,
-                    'ignore_vehicles': 40.0
+                    'ignore_vehicles': 100.0
                 }
                 # Followers: aggressive, close following
                 follower_params = {
@@ -181,7 +183,7 @@ class TrafficController:
                     'follow_distance': 1.0,   # Very tight following
                     'ignore_lights': 100.0,
                     'ignore_signs': 100.0,
-                    'ignore_vehicles': 40.0   # Almost ignore others, focus on leader
+                    'ignore_vehicles': 100.0   # Almost ignore others, focus on leader
                 }
             else:  # wait
                 # All platoon members wait together
@@ -223,10 +225,10 @@ class TrafficController:
             return controlled_vehicles
 
     def _determine_agent_control_status(self, auction_winners: List) -> Dict[str, str]:
-        """确定agent控制状态 - 简化：按优先级最多允许3辆go，其余wait，不做冲突检测"""
+        """确定agent控制状态 - 简化：按优先级最多允许4辆go，其余wait，不做冲突检测"""
         agent_control_status = {}
         agents = [w.participant for w in auction_winners]
-        max_concurrent_agents = 3  # 或根据需要调整
+        max_concurrent_agents = 4  # 或根据需要调整
         for idx, agent in enumerate(agents):
             if idx < max_concurrent_agents:
                 agent_control_status[agent.id] = 'go'
@@ -321,32 +323,32 @@ class TrafficController:
                 'ignore_vehicles': 0.0    # 遵守其他车辆
             }
         elif action == 'go':
-            # Platoon members get more moderate coordination - LESS AGGRESSIVE
-            if is_platoon_member:
-                return {
-                    'speed_diff': -45.0 if is_leader else -50.0,     # 更温和的速度控制
-                    'follow_distance': 1.2 if not is_leader else 1.5,  # 增加跟车距离
-                    'ignore_lights': 100.0,   # 忽略信号灯
-                    'ignore_signs': 100.0,    # 忽略标志
-                    'ignore_vehicles': 40.0
-                }
-            else:
-                return {
-                    'speed_diff': -55.0,      # 更温和的单车控制
-                    'follow_distance': 1.2,   # 增加跟车距离
-                    'ignore_lights': 100.0,   # 忽略信号灯
-                    'ignore_signs': 100.0,    # 忽略标志
-                    'ignore_vehicles': 40.0
+            # # Platoon members get more moderate coordination - LESS AGGRESSIVE
+            # if is_platoon_member:
+            #     return {
+            #         'speed_diff': -45.0 if is_leader else -50.0,     # 更温和的速度控制
+            #         'follow_distance': 1.2 if not is_leader else 1.5,  # 增加跟车距离
+            #         'ignore_lights': 100.0,   # 忽略信号灯
+            #         'ignore_signs': 100.0,    # 忽略标志
+            #         'ignore_vehicles': 40.0
+            #     }
+            # else:
+            return {
+                'speed_diff': -55.0,      # 更温和的单车控制
+                'follow_distance': 1.2,   # 增加跟车距离
+                'ignore_lights': 100.0,   # 忽略信号灯
+                'ignore_signs': 100.0,    # 忽略标志
+                'ignore_vehicles': 100.0
                 }
 
         # 默认参数
-        return {
-            'speed_diff': self.default_speed_diff,
-            'follow_distance': self.default_follow_distance,
-            'ignore_lights': 0.0,
-            'ignore_signs': 0.0,
-            'ignore_vehicles': 0.0
-        }
+        # return {
+        #     'speed_diff': self.default_speed_diff,
+        #     'follow_distance': self.default_follow_distance,
+        #     'ignore_lights': 0.0,
+        #     'ignore_signs': 0.0,
+        #     'ignore_vehicles': 0.0
+        # }
 
     def _restore_uncontrolled_vehicles(self, current_controlled: Set[str]):
         """恢复不再被控制的车辆，包括已离开路口的车辆"""

@@ -222,12 +222,6 @@ class PlatoonManager:
         return f"{road_id}_{lane_id}"
     
     def _estimate_vehicle_direction(self, vehicle: Dict) -> Optional[str]:
-        # if self._direction_estimator_callback:
-        #     direction = self._direction_estimator_callback(vehicle)
-        #     if direction:
-        #         return direction
-
-        # Try to use destination if available
         if vehicle.get('destination') and self._state_extractor:
             try:
                 import carla
@@ -519,7 +513,7 @@ class PlatoonManager:
         # Show individual platoon details (limited)
         if self.platoons:
             print(f"\n🔍 Active Platoons:")
-            for i, platoon in enumerate(self.platoons[:3]):  # Show top 3
+            for i, platoon in enumerate(self.platoons[:4]):  # Show top 4
                 perf = platoon.get_performance_summary()
                 print(f"   {i+1}. {platoon.platoon_id} "
                       f"({platoon.get_size()} vehicles, {platoon.get_goal_direction()}) "

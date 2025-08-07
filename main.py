@@ -104,7 +104,7 @@ try:
             platoons = platoon_manager.get_all_platoons()
             if platoons:
                 print(f"\n🔍 车队协调状态:")
-                for platoon in platoons[:3]:  # Show top 3 platoons
+                for platoon in platoons[:4]:  # Show top 3 platoons
                     leader_id = platoon.get_leader_id()
                     follower_ids = platoon.get_follower_ids()
                     

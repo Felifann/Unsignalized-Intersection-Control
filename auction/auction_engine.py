@@ -542,7 +542,7 @@ class DecentralizedAuctionEngine:
         self._broadcast_message({
             'type': 'auction_results',
             'auction_id': auction_id,
-            'winners': [(w.participant.id, w.bid.value, w.rank) for w in winners[:3]],
+            'winners': [(w.participant.id, w.bid.value, w.rank) for w in winners[:4]],
             'timestamp': time.time()
         })
     
