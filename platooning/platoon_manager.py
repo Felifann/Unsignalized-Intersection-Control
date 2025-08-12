@@ -253,47 +253,46 @@ class PlatoonManager:
             return []
         
         groups = []
-        current_group = [sorted_vehicles_with_direction[0][0]]
-        current_direction = sorted_vehicles_with_direction[0][1]
-        
-        for i in range(1, len(sorted_vehicles_with_direction)):
-            vehicle, direction = sorted_vehicles_with_direction[i]
-            prev_vehicle = sorted_vehicles_with_direction[i-1][0]
-            
-            # ENHANCED: Strict direction matching
-            if direction != current_direction or direction is None:
-                # Direction changed or invalid - finalize current group
-                if len(current_group) >= self.config.min_platoon_size:
-                    print(f"🔍 Found compatible group: {len(current_group)} vehicles, direction={current_direction}")
-                    groups.append(current_group)
-                
-                # Start new group only if direction is valid
-                if direction is not None:
-                    current_group = [vehicle]
-                    current_direction = direction
-                else:
-                    current_group = []
-                    current_direction = None
+        current_group = []
+        current_direction = None
+
+        for i, (vehicle, direction) in enumerate(sorted_vehicles_with_direction):
+            if direction is None:
+                print(f"   Skipping vehicle {vehicle['id']} due to missing direction")
+                continue  # Skip vehicles with no direction
+
+            if current_direction is None:
+                current_direction = direction
+                current_group = [vehicle]
                 continue
-            
-            # Check proximity for same direction vehicles
-            distance = self._vehicle_distance(prev_vehicle, vehicle)
-            
-            if distance <= self.config.max_following_distance:
-                current_group.append(vehicle)
-                print(f"   Added vehicle {vehicle['id']} to group (distance: {distance:.1f}m)")
-            else:
-                # Distance too large - finalize current group and start new one
+
+            prev_vehicle = sorted_vehicles_with_direction[i-1][0] if i > 0 else None
+
+            if direction != current_direction:
                 if len(current_group) >= self.config.min_platoon_size:
                     print(f"🔍 Found compatible group: {len(current_group)} vehicles, direction={current_direction}")
                     groups.append(current_group)
                 current_group = [vehicle]
-        
+                current_direction = direction
+                continue
+
+            # Check proximity for same direction vehicles
+            if prev_vehicle:
+                distance = self._vehicle_distance(prev_vehicle, vehicle)
+                if distance <= self.config.max_following_distance:
+                    current_group.append(vehicle)
+                    print(f"   Added vehicle {vehicle['id']} to group (distance: {distance:.1f}m)")
+                else:
+                    if len(current_group) >= self.config.min_platoon_size:
+                        print(f"🔍 Found compatible group: {len(current_group)} vehicles, direction={current_direction}")
+                        groups.append(current_group)
+                    current_group = [vehicle]
+
         # Add final group if valid
         if len(current_group) >= self.config.min_platoon_size and current_direction is not None:
             print(f"🔍 Found final compatible group: {len(current_group)} vehicles, direction={current_direction}")
             groups.append(current_group)
-        
+
         return groups
     
     def _create_platoons_from_group(self, vehicle_group: List[Dict]) -> List[Platoon]:
@@ -318,10 +317,13 @@ class PlatoonManager:
             
             # ENHANCED: Stricter direction validation
             directions = []
+            missing_direction_ids = []
             for v in platoon_vehicles:
                 direction = self._estimate_vehicle_direction(v)
                 if direction:
                     directions.append(direction)
+                else:
+                    missing_direction_ids.append(v['id'])
             
             # Ensure ALL vehicles have the same direction
             unique_directions = set(directions)
@@ -357,6 +359,8 @@ class PlatoonManager:
                     print(f"❌ Formation validation failed for group")
             else:
                 print(f"❌ Direction mismatch: {len(directions)}/{len(platoon_vehicles)} have directions, unique={unique_directions}")
+                if missing_direction_ids:
+                    print(f"   Vehicles missing direction: {missing_direction_ids}")
                 break  # Stop trying to form platoons from this group
         
         return platoons

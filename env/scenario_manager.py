@@ -11,9 +11,6 @@ class ScenarioManager:
         self.carla = CarlaWrapper(town=map_name)
         self.traffic_gen = TrafficGenerator(self.carla)
 
-        # 初始化时显示道路和车道ID
-        # self.show_road_lane_ids()
-
     def reset_scenario(self):
         self.carla.destroy_all_vehicles()
         self.traffic_gen.generate_traffic()
@@ -60,6 +57,43 @@ class ScenarioManager:
             )
         
         print(f"✅ 已显示正方形检测区域：中心({center[0]:.1f}, {center[1]:.1f})，边长{half_size*2}米")
+
+    def show_intersection_area1(self):
+        """在地图上显示目标交叉口中心点和正方形检测区域"""
+        world = self.carla.world
+        center = SimulationConfig.TARGET_INTERSECTION_CENTER
+        half_size = SimulationConfig.INTERSECTION_HALF_SIZE
+
+        # 显示中心点
+        world.debug.draw_point(
+            carla.Location(x=center[0], y=center[1], z=center[2]+1.0),
+            size=0.1,
+            color=carla.Color(255, 0, 0),
+            life_time=99999.0
+        )
+        
+        # 绘制正方形边界
+        # 计算正方形四个角的坐标
+        corners = [
+            (center[0] - half_size/5, center[1] - half_size/5),  # 左下角
+            (center[0] + half_size/5, center[1] - half_size/5),  # 右下角
+            (center[0] + half_size/5, center[1] + half_size/5),  # 右上角
+            (center[0] - half_size/5, center[1] + half_size/5),  # 左上角
+        ]
+        
+        # 绘制正方形的四条边
+        for i in range(4):
+            start_corner = corners[i]
+            end_corner = corners[(i + 1) % 4]  # 下一个角点（循环到第一个）
+            
+            world.debug.draw_line(
+                carla.Location(x=start_corner[0], y=start_corner[1], z=center[2]+0.5),
+                carla.Location(x=end_corner[0], y=end_corner[1], z=center[2]+0.5),
+                thickness=0.3,
+                color=carla.Color(0, 0, 255),
+                life_time=99999.0,
+                persistent_lines=False
+            )
 
     def show_road_lane_ids(self, display_radius=40):
         """在交叉口附近显示道路和车道ID"""

@@ -52,6 +52,7 @@ print(f"=== 无信号灯交叉路口仿真 (集成拍卖系统) ===")
 # 生成交通流
 scenario.reset_scenario()
 scenario.show_intersection_area()
+scenario.show_intersection_area1()
 
 # 在仿真开始前添加
 from traffic_light_override import force_vehicles_run_lights, freeze_lights_green
@@ -98,7 +99,7 @@ try:
             print(f"📊 基础信息: FPS:{actual_fps:.1f}, 车辆总数:{len(vehicles_in_radius)}, 路口内:{len(vehicles_in_junction)}")
         
             # 1. 车队管理状态
-            platoon_manager.print_platoon_info()
+            # platoon_manager.print_platoon_info()
             
             # ENHANCED: Show detailed platoon coordination status
             platoons = platoon_manager.get_all_platoons()

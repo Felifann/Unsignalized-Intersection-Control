@@ -1,6 +1,8 @@
 import time
+import math
 from typing import Dict, List, Set, Any
 from env.simulation_config import SimulationConfig
+from nash.deadlock_nash_solver import DeadlockNashController, SimpleAgent
 
 class TrafficController:
     """
@@ -27,11 +29,27 @@ class TrafficController:
         # 控制状态跟踪
         self.controlled_vehicles: Dict[str, Dict] = {}
         self.current_controlled_vehicles: Set[str] = set()
-    
-        # REACTIVATED: Platoon manager reference
         self.platoon_manager = None
-    
-        print("🎮 增强交通控制器初始化完成 - 支持车队和单车")
+        
+        # Nash deadlock resolution
+        intersection_bbox = (
+            self.intersection_center[0] - self.intersection_half_size/2,
+            self.intersection_center[0] + self.intersection_half_size/2,
+            self.intersection_center[1] - self.intersection_half_size/2,
+            self.intersection_center[1] + self.intersection_half_size/2
+        )
+        self.nash_controller = DeadlockNashController(
+            intersection_polygon=intersection_bbox,
+            deadlock_time_window=3.0,
+            min_agents_for_deadlock=3,
+            progress_eps=0.5,
+            collision_penalty=1000.0,
+            wait_penalty_allwait=10.0,
+            w_wait_inv=1.0,
+            w_bid=1.0
+        )
+        
+        print("🎮 增强交通控制器初始化完成 - 支持车队、单车和Nash deadlock解决")
 
     def set_platoon_manager(self, platoon_manager):
         """Set platoon manager reference"""
@@ -39,22 +57,24 @@ class TrafficController:
         print("🔗 车队管理器已连接到交通控制器")
 
     def update_control(self, platoon_manager=None, auction_engine=None):
-        """
-        主控制更新函数 - 支持车队和单车混合控制
-        """
-        # Update local platoon manager reference
+        """主控制更新函数 - 增加Nash deadlock resolution"""
         if platoon_manager:
             self.platoon_manager = platoon_manager
         
-        # 1. 维持已在路口内车辆的控制
+        # 1. Check for deadlock and apply Nash resolution
+        nash_actions = self._handle_deadlock_resolution(auction_engine)
+        
+        # 2. Maintain intersection vehicle control
         current_controlled = self._maintain_intersection_vehicle_control()
         
-        # 2. 获取拍卖优先级排序（包含车队和单车）
+        # 3. Apply auction-based control with Nash override
         auction_winners = auction_engine.get_current_priority_order()
         
         # 3. 基于拍卖结果应用控制 (supports platoons and vehicles)
         if auction_winners:
-            auction_controlled = self._apply_auction_based_control(auction_winners, platoon_manager)
+            auction_controlled = self._apply_auction_based_control(
+                auction_winners, platoon_manager, nash_override=nash_actions
+            )
             current_controlled.update(auction_controlled)
         
         # 4. 恢复不再被控制的车辆
@@ -62,6 +82,107 @@ class TrafficController:
         
         # 5. 更新当前控制状态
         self.current_controlled_vehicles = current_controlled
+
+    def _handle_deadlock_resolution(self, auction_engine) -> Dict[str, str]:
+        """Handle deadlock detection and Nash resolution"""
+        try:
+            # Convert auction agents to Nash agents
+            nash_agents = self._convert_to_nash_agents(auction_engine)
+            if not nash_agents:
+                return {}
+            
+            # Apply Nash deadlock resolution
+            nash_actions = self.nash_controller.handle_deadlock(nash_agents, time.time())
+            
+            if nash_actions:
+                print(f"🎯 Nash resolution applied: {nash_actions}")
+            
+            return nash_actions
+            
+        except Exception as e:
+            print(f"[Warning] Nash deadlock resolution failed: {e}")
+            return {}
+
+    def _convert_to_nash_agents(self, auction_engine) -> List[SimpleAgent]:
+        """Convert auction system agents to Nash SimpleAgent format"""
+        nash_agents = []
+        
+        try:
+            # Get current auction winners/participants
+            auction_winners = auction_engine.get_current_priority_order()
+            if not auction_winners:
+                return []
+            
+            vehicle_states = self.state_extractor.get_vehicle_states()
+            vehicle_lookup = {str(v['id']): v for v in vehicle_states}
+            
+            for winner in auction_winners:
+                participant = winner.participant
+                
+                if participant.type == 'vehicle':
+                    vehicle_id = str(participant.id)
+                    if vehicle_id in vehicle_lookup:
+                        v_state = vehicle_lookup[vehicle_id]
+                        nash_agent = self._create_nash_agent_from_vehicle(
+                            v_state, winner.bid.value
+                        )
+                        if nash_agent:
+                            nash_agents.append(nash_agent)
+                            
+                elif participant.type == 'platoon':
+                    # Handle platoon - create agent for leader
+                    vehicles = participant.data.get('vehicles', [])
+                    if vehicles:
+                        leader_id = str(vehicles[0]['id'])
+                        if leader_id in vehicle_lookup:
+                            v_state = vehicle_lookup[leader_id]
+                            nash_agent = self._create_nash_agent_from_vehicle(
+                                v_state, winner.bid.value, is_platoon_leader=True
+                            )
+                            if nash_agent:
+                                nash_agents.append(nash_agent)
+            
+            return nash_agents
+            
+        except Exception as e:
+            print(f"[Warning] Converting to Nash agents failed: {e}")
+            return []
+
+    def _create_nash_agent_from_vehicle(self, vehicle_state: Dict, bid_value: float, 
+                                      is_platoon_leader: bool = False) -> SimpleAgent:
+        """Create Nash SimpleAgent from vehicle state"""
+        try:
+            location = vehicle_state['location']
+            velocity = vehicle_state.get('velocity', [0, 0, 0])
+            speed = math.sqrt(velocity[0]**2 + velocity[1]**2) if velocity else 0.0
+            
+            # Estimate wait time from speed (simple heuristic)
+            wait_time = max(0.1, 5.0 - speed)  # Lower speed = longer wait
+            
+            # Create simple intended path (straight line for now)
+            current_pos = (location[0], location[1])
+            heading = vehicle_state.get('rotation', [0, 0, 0])[2]  # yaw in degrees
+            heading_rad = math.radians(heading)
+            
+            # Project path forward through intersection
+            path_length = 20.0  # meters
+            end_x = current_pos[0] + path_length * math.cos(heading_rad)
+            end_y = current_pos[1] + path_length * math.sin(heading_rad)
+            intended_path = [current_pos, (end_x, end_y)]
+            
+            return SimpleAgent(
+                id=str(vehicle_state['id']),
+                position=current_pos,
+                speed=speed,
+                heading=heading_rad,
+                intended_path=intended_path,
+                bid=bid_value,
+                wait_time=wait_time
+            )
+            
+        except Exception as e:
+            print(f"[Warning] Creating Nash agent failed for vehicle {vehicle_state.get('id')}: {e}")
+            return None
 
     def _maintain_intersection_vehicle_control(self) -> Set[str]:
         """维持路口内车辆的控制"""
@@ -86,73 +207,54 @@ class TrafficController:
         
         return maintained_vehicles
 
-    def _apply_auction_based_control(self, auction_winners: List, platoon_manager=None) -> Set[str]:
-        """基于拍卖结果应用统一控制 - 支持车队和单车"""
+    def _apply_auction_based_control(self, auction_winners: List, platoon_manager=None, 
+                                   nash_override: Dict[str, str] = None) -> Set[str]:
+        """Apply control with Nash override support"""
         controlled_vehicles = set()
         
         if not auction_winners:
             return controlled_vehicles
         
-        platoon_count = len([w for w in auction_winners if w.participant.type == 'platoon'])
-        vehicle_count = len([w for w in auction_winners if w.participant.type == 'vehicle'])
-        print(f"🎯 基于竞价排序应用混合控制: {platoon_count}个车队, {vehicle_count}个单车")
-        
-        # 确定agent控制状态
+        # Determine control status with Nash override
         agent_control_status = self._determine_agent_control_status(auction_winners)
         
-        # Apply 'go' controls first, then 'wait' controls
+        # Apply Nash overrides if available
+        if nash_override:
+            for winner in auction_winners:
+                participant = winner.participant
+                if participant.type == 'vehicle':
+                    if participant.id in nash_override:
+                        agent_control_status[participant.id] = nash_override[participant.id]
+                elif participant.type == 'platoon':
+                    # Apply to leader, then propagate to followers
+                    vehicles = participant.data.get('vehicles', [])
+                    if vehicles:
+                        leader_id = str(vehicles[0]['id'])
+                        if leader_id in nash_override:
+                            agent_control_status[participant.id] = nash_override[leader_id]
+
+        # Apply controls as before
         go_winners = [w for w in auction_winners if agent_control_status.get(w.participant.id) == 'go']
         wait_winners = [w for w in auction_winners if agent_control_status.get(w.participant.id) == 'wait']
         
-        # Process 'go' agents first
-        for winner in go_winners:
-            participant = winner.participant
-            bid_value = winner.bid.value
-            rank = winner.rank
-            control_action = 'go'
-            
-            agent_type = "车队" if participant.type == 'platoon' else "车辆"
-            print(f"🎮 {agent_type} {participant.id}: rank={rank}, action={control_action}")
-            
-            try:
-                if participant.type == 'vehicle':
-                    vehicle_id = participant.id
-                    if self._apply_single_vehicle_control(vehicle_id, rank, bid_value, control_action):
-                        controlled_vehicles.add(vehicle_id)
-                elif participant.type == 'platoon':
-                    platoon_vehicles = self._apply_platoon_control(participant, rank, bid_value, control_action)
-                    controlled_vehicles.update(platoon_vehicles)
-            except Exception as e:
-                print(f"[Warning] {agent_type} {participant.id} 控制应用失败: {e}")
-        
-        # Then process 'wait' agents
-        for winner in wait_winners:
-            participant = winner.participant
-            bid_value = winner.bid.value
-            rank = winner.rank
-            control_action = 'wait'
-            
-            agent_type = "车队" if participant.type == 'platoon' else "车辆"
-            print(f"🎮 {agent_type} {participant.id}: rank={rank}, action={control_action}")
-            
-            try:
-                if participant.type == 'vehicle':
-                    vehicle_id = participant.id
-                    if self._apply_single_vehicle_control(vehicle_id, rank, bid_value, control_action):
-                        controlled_vehicles.add(vehicle_id)
-                elif participant.type == 'platoon':
-                    platoon_vehicles = self._apply_platoon_control(participant, rank, bid_value, control_action)
-                    controlled_vehicles.update(platoon_vehicles)
-            except Exception as e:
-                print(f"[Warning] {agent_type} {participant.id} 控制应用失败: {e}")
-    
-        # Ensure all vehicles currently in the junction are controlled
-        vehicle_states = self.state_extractor.get_vehicle_states()
-        for vehicle_state in vehicle_states:
-            vehicle_id = str(vehicle_state['id'])
-            if vehicle_state.get('is_junction', False) and vehicle_id not in self.controlled_vehicles:
-                if self._apply_single_vehicle_control(vehicle_id, rank=0, bid_value=0.0, control_action='go'):
-                    controlled_vehicles.add(vehicle_id)
+        # Process 'go' agents first, then 'wait' agents
+        for winner_list in [go_winners, wait_winners]:
+            for winner in winner_list:
+                participant = winner.participant
+                bid_value = winner.bid.value
+                rank = winner.rank
+                control_action = agent_control_status.get(participant.id, 'go')
+                
+                try:
+                    if participant.type == 'vehicle':
+                        vehicle_id = participant.id
+                        if self._apply_single_vehicle_control(vehicle_id, rank, bid_value, control_action):
+                            controlled_vehicles.add(vehicle_id)
+                    elif participant.type == 'platoon':
+                        platoon_vehicles = self._apply_platoon_control(participant, rank, bid_value, control_action)
+                        controlled_vehicles.update(platoon_vehicles)
+                except Exception as e:
+                    print(f"[Warning] Control application failed for {participant.id}: {e}")
 
         return controlled_vehicles
 
@@ -175,15 +277,15 @@ class TrafficController:
                     'follow_distance': 2.5,   # Slightly larger gap
                     'ignore_lights': 100.0,
                     'ignore_signs': 100.0,
-                    'ignore_vehicles': 100.0
+                    'ignore_vehicles': 50.0
                 }
                 # Followers: aggressive, close following
                 follower_params = {
-                    'speed_diff': -35.0,      # More speed reduction, keeps close
+                    'speed_diff': -55.0,      # More speed reduction, keeps close
                     'follow_distance': 1.0,   # Very tight following
                     'ignore_lights': 100.0,
                     'ignore_signs': 100.0,
-                    'ignore_vehicles': 100.0   # Almost ignore others, focus on leader
+                    'ignore_vehicles': 50.0   # Almost ignore others, focus on leader
                 }
             else:  # wait
                 # All platoon members wait together
@@ -338,7 +440,7 @@ class TrafficController:
                 'follow_distance': 1.2,   # 增加跟车距离
                 'ignore_lights': 100.0,   # 忽略信号灯
                 'ignore_signs': 100.0,    # 忽略标志
-                'ignore_vehicles': 100.0
+                'ignore_vehicles': 50.0
                 }
 
         # 默认参数

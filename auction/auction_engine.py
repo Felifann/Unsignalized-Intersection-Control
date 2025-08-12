@@ -413,17 +413,25 @@ class DecentralizedAuctionEngine:
         # Integration points
         self.vehicle_enforcer = None
         
-        print("🎯 增强拍卖引擎已初始化 - 支持车队和单车混合模式")
-    
+        # Nash integration
+        self.nash_controller = None
+        
+        print("🎯 增强拍卖引擎已初始化 - 支持车队、单车和Nash deadlock解决")
+
     def set_vehicle_enforcer(self, vehicle_enforcer):
         """Set vehicle control enforcer for integration"""
         self.vehicle_enforcer = vehicle_enforcer
     
+    def set_nash_controller(self, nash_controller):
+        """Set Nash controller for deadlock resolution"""
+        self.nash_controller = nash_controller
+        print("🔗 Nash deadlock controller已连接到拍卖引擎")
+
     def update(self, vehicle_states: List[Dict], platoon_manager=None) -> List[AuctionWinner]:
-        """Main update loop - 支持车队和单车混合模式"""
+        """Main update loop with Nash deadlock support"""
         current_time = time.time()
         
-        # 1. Identify potential agents (vehicles and platoons)
+        # 1. Identify potential agents
         agents = self.participant_identifier.identify_agents(
             vehicle_states, platoon_manager
         )
@@ -437,10 +445,16 @@ class DecentralizedAuctionEngine:
         if self.current_auction:
             winners = self._process_current_auction(current_time)
         
-        # 4. Clean up completed protected agents (vehicles and platoons)
+        # 4. Apply Nash deadlock resolution if needed
+        if winners and self.nash_controller:
+            nash_actions = self._apply_nash_resolution(winners, current_time)
+            if nash_actions:
+                winners = self.apply_conflict_resolution(winners, nash_actions)
+        
+        # 5. Clean up completed agents
         self.evaluator.cleanup_completed_agents(vehicle_states, platoon_manager)
         
-        # 5. Simulate communication
+        # 6. Simulate communication
         self._simulate_v2v_communication()
         
         return winners
@@ -628,17 +642,126 @@ class DecentralizedAuctionEngine:
         
         return all_winners
     
-    # def integrate_learned_bidding_policy(self, policy_function):
-    #     """Integration point for RL-based bidding policies"""
-    #     # Future implementation for PPO integration
-    #     pass
-        
-    #     if waiting_winners:
-    #         print(f"🎮 Conflict resolution: {len(waiting_winners)} agents waiting")
-        
-    #     return all_winners
-    
     def integrate_learned_bidding_policy(self, policy_function):
         """Integration point for RL-based bidding policies"""
         # Future implementation for PPO integration
         pass
+    
+    def _apply_nash_resolution(self, winners: List[AuctionWinner], current_time: float) -> Dict[str, str]:
+        """Apply Nash deadlock resolution to current winners"""
+        try:
+            if not self.nash_controller:
+                return {}
+            
+            # Convert winners to Nash agents
+            nash_agents = self._convert_winners_to_nash_agents(winners)
+            if not nash_agents:
+                return {}
+            
+            # Apply Nash deadlock handling
+            return self.nash_controller.handle_deadlock(nash_agents, current_time)
+            
+        except Exception as e:
+            print(f"[Warning] Nash resolution in auction engine failed: {e}")
+            return {}
+
+    def _convert_winners_to_nash_agents(self, winners: List[AuctionWinner]) -> List:
+        """Convert auction winners to Nash agents format"""
+        nash_agents = []
+        
+        try:
+            from nash.deadlock_nash_solver import SimpleAgent
+            
+            for winner in winners:
+                participant = winner.participant
+                
+                if participant.type == 'vehicle':
+                    nash_agent = self._create_nash_agent_from_participant(participant, winner.bid.value)
+                    if nash_agent:
+                        nash_agents.append(nash_agent)
+                        
+                elif participant.type == 'platoon':
+                    # Use platoon leader as representative
+                    vehicles = participant.data.get('vehicles', [])
+                    if vehicles:
+                        leader_data = vehicles[0]
+                        nash_agent = self._create_nash_agent_from_vehicle_data(
+                            leader_data, winner.bid.value, participant.id
+                        )
+                        if nash_agent:
+                            nash_agents.append(nash_agent)
+            
+            return nash_agents
+            
+        except Exception as e:
+            print(f"[Warning] Converting winners to Nash agents failed: {e}")
+            return []
+
+    def _create_nash_agent_from_participant(self, participant: AuctionAgent, bid_value: float):
+        """Create Nash agent from auction participant"""
+        try:
+            from nash.deadlock_nash_solver import SimpleAgent
+            
+            location = participant.location
+            velocity = participant.data.get('velocity', [0, 0, 0])
+            speed = math.sqrt(velocity[0]**2 + velocity[1]**2) if velocity else 0.0
+            
+            wait_time = max(0.1, 5.0 - speed)
+            
+            # Simple path estimation
+            current_pos = (location[0], location[1])
+            heading = participant.data.get('rotation', [0, 0, 0])[2]
+            heading_rad = math.radians(heading)
+            
+            path_length = 20.0
+            end_x = current_pos[0] + path_length * math.cos(heading_rad)
+            end_y = current_pos[1] + path_length * math.sin(heading_rad)
+            intended_path = [current_pos, (end_x, end_y)]
+            
+            return SimpleAgent(
+                id=str(participant.id),
+                position=current_pos,
+                speed=speed,
+                heading=heading_rad,
+                intended_path=intended_path,
+                bid=bid_value,
+                wait_time=wait_time
+            )
+            
+        except Exception as e:
+            print(f"[Warning] Creating Nash agent from participant failed: {e}")
+            return None
+
+    def _create_nash_agent_from_vehicle_data(self, vehicle_data: Dict, bid_value: float, agent_id: str = None):
+        """Create Nash agent from vehicle data"""
+        try:
+            from nash.deadlock_nash_solver import SimpleAgent
+            
+            location = vehicle_data['location']
+            velocity = vehicle_data.get('velocity', [0, 0, 0])
+            speed = math.sqrt(velocity[0]**2 + velocity[1]**2) if velocity else 0.0
+            
+            wait_time = max(0.1, 5.0 - speed)
+            
+            current_pos = (location[0], location[1])
+            heading = vehicle_data.get('rotation', [0, 0, 0])[2]
+            heading_rad = math.radians(heading)
+            
+            path_length = 20.0
+            end_x = current_pos[0] + path_length * math.cos(heading_rad)
+            end_y = current_pos[1] + path_length * math.sin(heading_rad)
+            intended_path = [current_pos, (end_x, end_y)]
+            
+            return SimpleAgent(
+                id=agent_id or str(vehicle_data['id']),
+                position=current_pos,
+                speed=speed,
+                heading=heading_rad,
+                intended_path=intended_path,
+                bid=bid_value,
+                wait_time=wait_time
+            )
+            
+        except Exception as e:
+            print(f"[Warning] Creating Nash agent from vehicle data failed: {e}")
+            return None
