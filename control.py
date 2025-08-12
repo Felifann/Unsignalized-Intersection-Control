@@ -84,18 +84,24 @@ class TrafficController:
         self.current_controlled_vehicles = current_controlled
 
     def _handle_deadlock_resolution(self, auction_engine) -> Dict[str, str]:
-        """Handle deadlock detection and Nash resolution"""
+        """Handle deadlock detection and Nash resolution with system pause"""
         try:
             # Convert auction agents to Nash agents
             nash_agents = self._convert_to_nash_agents(auction_engine)
             if not nash_agents:
                 return {}
             
-            # Apply Nash deadlock resolution
+            # Apply Nash deadlock resolution (now with system pause)
             nash_actions = self.nash_controller.handle_deadlock(nash_agents, time.time())
             
             if nash_actions:
-                print(f"🎯 Nash resolution applied: {nash_actions}")
+                # Check if system is paused due to deadlock
+                if self.nash_controller.deadlock_state.is_active:
+                    print(f"🔒 SYSTEM PAUSED - Deadlock resolution in progress")
+                    print(f"   Active participants: {self.nash_controller.deadlock_state.participants}")
+                    print(f"   Current group: {self.nash_controller.deadlock_state.current_group_index + 1}/{len(self.nash_controller.deadlock_state.resolution_order)}")
+                else:
+                    print(f"🎯 Nash resolution applied: {nash_actions}")
             
             return nash_actions
             
@@ -209,24 +215,53 @@ class TrafficController:
 
     def _apply_auction_based_control(self, auction_winners: List, platoon_manager=None, 
                                    nash_override: Dict[str, str] = None) -> Set[str]:
-        """Apply control with Nash override support"""
+        """Apply control with Nash system pause override"""
         controlled_vehicles = set()
         
         if not auction_winners:
             return controlled_vehicles
         
-        # Determine control status with Nash override
-        agent_control_status = self._determine_agent_control_status(auction_winners)
+        # Check if system is paused due to deadlock
+        system_paused = (nash_override and 
+                        self.nash_controller.deadlock_state.is_active)
         
-        # Apply Nash overrides if available
-        if nash_override:
+        if system_paused:
+            print(f"🔒 Applying system pause - only deadlock participants controlled")
+            # During system pause, only apply controls specified in nash_override
             for winner in auction_winners:
                 participant = winner.participant
                 if participant.type == 'vehicle':
-                    if participant.id in nash_override:
-                        agent_control_status[participant.id] = nash_override[participant.id]
+                    vehicle_id = str(participant.id)
+                    if vehicle_id in nash_override:
+                        control_action = nash_override[vehicle_id]
+                        if self._apply_single_vehicle_control(vehicle_id, winner.rank, 
+                                                            winner.bid.value, control_action):
+                            controlled_vehicles.add(vehicle_id)
                 elif participant.type == 'platoon':
-                    # Apply to leader, then propagate to followers
+                    vehicles = participant.data.get('vehicles', [])
+                    if vehicles:
+                        leader_id = str(vehicles[0]['id'])
+                        if leader_id in nash_override:
+                            control_action = nash_override[leader_id]
+                            platoon_vehicles = self._apply_platoon_control(
+                                participant, winner.rank, winner.bid.value, control_action
+                            )
+                            controlled_vehicles.update(platoon_vehicles)
+            
+            return controlled_vehicles
+        
+        # Normal operation (no system pause)
+        agent_control_status = self._determine_agent_control_status(auction_winners)
+        
+        # Apply Nash overrides if available (but not system pause)
+        if nash_override:
+            print(f"🚦 Applying Nash control: {nash_override}")
+            for winner in auction_winners:
+                participant = winner.participant
+                if participant.type == 'vehicle':
+                    if str(participant.id) in nash_override:
+                        agent_control_status[participant.id] = nash_override[str(participant.id)]
+                elif participant.type == 'platoon':
                     vehicles = participant.data.get('vehicles', [])
                     if vehicles:
                         leader_id = str(vehicles[0]['id'])
@@ -502,7 +537,7 @@ class TrafficController:
         return distance_to_center > exit_threshold
 
     def get_control_stats(self) -> Dict[str, Any]:
-        """获取控制器统计信息 - 增强版包含车队信息"""
+        """Get control statistics including deadlock state"""
         go_vehicles = 0
         waiting_vehicles = 0
         platoon_members = 0
@@ -519,11 +554,19 @@ class TrafficController:
                 if control_info.get('is_leader', False):
                     leaders += 1
         
+        # Add deadlock state information
+        deadlock_info = {
+            'deadlock_active': self.nash_controller.deadlock_state.is_active,
+            'deadlock_participants': len(self.nash_controller.deadlock_state.participants),
+            'system_paused': self.nash_controller.deadlock_state.is_active
+        }
+        
         return {
             'total_controlled': len(self.controlled_vehicles),
             'go_vehicles': go_vehicles,
             'waiting_vehicles': waiting_vehicles,
             'platoon_members': platoon_members,
             'platoon_leaders': leaders,
-            'active_controls': list(self.controlled_vehicles.keys())
+            'active_controls': list(self.controlled_vehicles.keys()),
+            'deadlock_state': deadlock_info
         }

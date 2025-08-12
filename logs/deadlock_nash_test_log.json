@@ -1,0 +1,19 @@
+{
+  "config": {
+    "town": "Town05",
+    "n_players": 3,
+    "spawn_distance": 30.0,
+    "intersection_center": [
+      -188.93275451660156,
+      -89.66813659667969,
+      75.02772521972656
+    ]
+  },
+  "results": {
+    "deadlock_detected": false,
+    "deadlock_detected_time": null,
+    "deadlock_resolved": false,
+    "total_simulation_time": 10.008639097213745
+  },
+  "events": []
+}
