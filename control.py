@@ -1,6 +1,6 @@
 import time
 import math
-from typing import Dict, List, Set, Any
+from typing import Dict, List, Set, Any, Tuple
 from env.simulation_config import SimulationConfig
 from nash.deadlock_nash_solver import DeadlockNashController, SimpleAgent
 
@@ -213,9 +213,16 @@ class TrafficController:
         
         return maintained_vehicles
 
+    def _get_control_action_by_rank(self, rank: int) -> str:
+        """根据排名获取控制动作 - fallback仅用于Nash deadlock解决"""
+        if rank <= 4:
+            return 'go'  # 最高优先级，直接通行
+        else:
+            return 'wait'  # 其他优先级都等待，不使用fallback
+
     def _apply_auction_based_control(self, auction_winners: List, platoon_manager=None, 
                                    nash_override: Dict[str, str] = None) -> Set[str]:
-        """Apply control with Nash system pause override"""
+        """Apply control with Nash system pause override and fallback support"""
         controlled_vehicles = set()
         
         if not auction_winners:
@@ -227,6 +234,8 @@ class TrafficController:
         
         if system_paused:
             print(f"🔒 Applying system pause - only deadlock participants controlled")
+            print(f"🎮 Nash actions: {nash_override}")
+            
             # During system pause, only apply controls specified in nash_override
             for winner in auction_winners:
                 participant = winner.participant
@@ -234,6 +243,7 @@ class TrafficController:
                     vehicle_id = str(participant.id)
                     if vehicle_id in nash_override:
                         control_action = nash_override[vehicle_id]
+                        print(f"   🚗 Vehicle {vehicle_id}: {control_action} (Nash)")
                         if self._apply_single_vehicle_control(vehicle_id, winner.rank, 
                                                             winner.bid.value, control_action):
                             controlled_vehicles.add(vehicle_id)
@@ -243,6 +253,7 @@ class TrafficController:
                         leader_id = str(vehicles[0]['id'])
                         if leader_id in nash_override:
                             control_action = nash_override[leader_id]
+                            print(f"   🚛 Platoon {participant.id} (leader {leader_id}): {control_action} (Nash)")
                             platoon_vehicles = self._apply_platoon_control(
                                 participant, winner.rank, winner.bid.value, control_action
                             )
@@ -250,242 +261,102 @@ class TrafficController:
             
             return controlled_vehicles
         
-        # Normal operation (no system pause)
-        agent_control_status = self._determine_agent_control_status(auction_winners)
-        
-        # Apply Nash overrides if available (but not system pause)
-        if nash_override:
-            print(f"🚦 Applying Nash control: {nash_override}")
-            for winner in auction_winners:
-                participant = winner.participant
+        # Normal operation (no system pause) - NO FALLBACK in normal auction
+        print(f"🚦 Normal auction control (no deadlock)")
+        for winner in auction_winners:
+            participant = winner.participant
+            
+            # Determine control action (go/wait only in normal operation)
+            control_action = self._get_control_action_by_rank(winner.rank)
+            
+            # Apply Nash overrides only if they're not fallback (safety check)
+            if nash_override:
                 if participant.type == 'vehicle':
-                    if str(participant.id) in nash_override:
-                        agent_control_status[participant.id] = nash_override[str(participant.id)]
+                    vehicle_id = str(participant.id)
+                    if vehicle_id in nash_override:
+                        nash_action = nash_override[vehicle_id]
+                        if nash_action in ['go', 'wait']:  # Only allow go/wait overrides in normal mode
+                            control_action = nash_action
+                            print(f"   🎯 Nash override for vehicle {vehicle_id}: {control_action}")
                 elif participant.type == 'platoon':
                     vehicles = participant.data.get('vehicles', [])
                     if vehicles:
                         leader_id = str(vehicles[0]['id'])
                         if leader_id in nash_override:
-                            agent_control_status[participant.id] = nash_override[leader_id]
-
-        # Apply controls as before
-        go_winners = [w for w in auction_winners if agent_control_status.get(w.participant.id) == 'go']
-        wait_winners = [w for w in auction_winners if agent_control_status.get(w.participant.id) == 'wait']
+                            nash_action = nash_override[leader_id]
+                            if nash_action in ['go', 'wait']:  # Only allow go/wait overrides in normal mode
+                                control_action = nash_action
+                                print(f"   🎯 Nash override for platoon {participant.id}: {control_action}")
+            
+            # Apply control
+            if participant.type == 'vehicle':
+                vehicle_id = str(participant.id)
+                print(f"   🚗 Vehicle {vehicle_id}: {control_action}")
+                if self._apply_single_vehicle_control(vehicle_id, winner.rank, 
+                                                    winner.bid.value, control_action):
+                    controlled_vehicles.add(vehicle_id)
+                    
+            elif participant.type == 'platoon':
+                vehicles = participant.data.get('vehicles', [])
+                if vehicles:
+                    leader_id = str(vehicles[0]['id'])
+                    print(f"   🚛 Platoon {participant.id} (leader {leader_id}): {control_action}")
+                    platoon_vehicles = self._apply_platoon_control(
+                        participant, winner.rank, winner.bid.value, control_action
+                    )
+                    controlled_vehicles.update(platoon_vehicles)
         
-        # Process 'go' agents first, then 'wait' agents
-        for winner_list in [go_winners, wait_winners]:
-            for winner in winner_list:
-                participant = winner.participant
-                bid_value = winner.bid.value
-                rank = winner.rank
-                control_action = agent_control_status.get(participant.id, 'go')
-                
-                try:
-                    if participant.type == 'vehicle':
-                        vehicle_id = participant.id
-                        if self._apply_single_vehicle_control(vehicle_id, rank, bid_value, control_action):
-                            controlled_vehicles.add(vehicle_id)
-                    elif participant.type == 'platoon':
-                        platoon_vehicles = self._apply_platoon_control(participant, rank, bid_value, control_action)
-                        controlled_vehicles.update(platoon_vehicles)
-                except Exception as e:
-                    print(f"[Warning] Control application failed for {participant.id}: {e}")
-
         return controlled_vehicles
 
-    def _apply_platoon_control(self, participant, rank: int, bid_value: float, 
-                         control_action: str = 'go') -> Set[str]:
-        """为车队agent应用统一控制，使成员同步行动"""
-        controlled_vehicles = set()
-        try:
-            vehicles = participant.data.get('vehicles', [])
-            if not vehicles:
-                return controlled_vehicles
-
-            print(f"🚛 控制车队 {participant.id}: {len(vehicles)}辆车, 动作={control_action}")
-
-            # --- IMPROVED: Better coordinated platoon parameters ---
-            if control_action == 'go':
-                # Leader: smooth, less aggressive
-                leader_params = {
-                    'speed_diff': -20.0,      # Less speed reduction, smoother
-                    'follow_distance': 2.5,   # Slightly larger gap
-                    'ignore_lights': 100.0,
-                    'ignore_signs': 100.0,
-                    'ignore_vehicles': 50.0
-                }
-                # Followers: aggressive, close following
-                follower_params = {
-                    'speed_diff': -55.0,      # More speed reduction, keeps close
-                    'follow_distance': 1.0,   # Very tight following
-                    'ignore_lights': 100.0,
-                    'ignore_signs': 100.0,
-                    'ignore_vehicles': 50.0   # Almost ignore others, focus on leader
-                }
-            else:  # wait
-                # All platoon members wait together
-                wait_params = {
-                    'speed_diff': -70.0,
-                    'follow_distance': 2.0,
-                    'ignore_lights': 0.0,
-                    'ignore_signs': 0.0,
-                    'ignore_vehicles': 0.0
-                }
-                leader_params = follower_params = wait_params
-
-            # Apply control to each vehicle with role-specific parameters
-            for idx, vehicle_data in enumerate(vehicles):
-                vehicle_id = str(vehicle_data['id'])
-                is_leader = (idx == 0)
-                
-                # Use appropriate parameters based on role
-                params = leader_params if is_leader else follower_params
-                
-                if self._apply_single_vehicle_control(
-                    vehicle_id,
-                    rank,
-                    bid_value,
-                    control_action,
-                    is_platoon_member=True,
-                    is_leader=is_leader,
-                    custom_params=params
-                ):
-                    controlled_vehicles.add(vehicle_id)
-                    print(f"   ✅ {'Leader' if is_leader else 'Follower'} {vehicle_id} 控制应用成功")
-                else:
-                    print(f"   ❌ {'Leader' if is_leader else 'Follower'} {vehicle_id} 控制失败")
-
-            return controlled_vehicles
-
-        except Exception as e:
-            print(f"[Warning] 车队控制失败 {participant.id}: {e}")
-            return controlled_vehicles
-
     def _determine_agent_control_status(self, auction_winners: List) -> Dict[str, str]:
-        """确定agent控制状态 - 简化：按优先级最多允许4辆go，其余wait，不做冲突检测"""
-        agent_control_status = {}
-        agents = [w.participant for w in auction_winners]
-        max_concurrent_agents = 4  # 或根据需要调整
-        for idx, agent in enumerate(agents):
-            if idx < max_concurrent_agents:
-                agent_control_status[agent.id] = 'go'
-            else:
-                agent_control_status[agent.id] = 'wait'
-        return agent_control_status
-
-    def _is_agent_in_intersection(self, participant) -> bool:
-        """检查agent是否在路口内 - 单车版本"""
-        # SIMPLIFIED: Only handle single vehicles
-        if participant.type == 'vehicle':
-            return participant.data.get('is_junction', False)
-        # DISABLED: Platoon logic removed
-        return False
-
-    def _apply_single_vehicle_control(self, vehicle_id: str, rank: int, bid_value: float, 
-                                    control_action: str = 'go', is_platoon_member: bool = False,
-                                    is_leader: bool = False, custom_params: dict = None) -> bool:
-        """为单车agent应用控制 - 支持自定义参数用于车队同步"""
-        try:
-            carla_vehicle = self.world.get_actor(int(vehicle_id))
-            if not carla_vehicle or not carla_vehicle.is_alive:
-                return False
-
-            # Use custom_params if provided (for platoon sync), else default logic
-            if custom_params is not None:
-                control_params = custom_params
-            else:
-                control_params = self._get_control_params_by_rank_and_action(
-                    rank, control_action, is_platoon_member, is_leader
-                )
-
-            self.traffic_manager.set_hybrid_physics_mode(False)
-
-            # ENHANCED: Apply platoon-specific settings with valid CARLA methods only
-            if is_platoon_member:
-                # Additional platoon coordination settings
-                if is_leader:
-                    # Leader: Steady, predictable movement
-                    self.traffic_manager.auto_lane_change(carla_vehicle, False)
-                    self.traffic_manager.collision_detection(carla_vehicle, carla_vehicle, True)
-                else:
-                    # Follower: Focus on following the leader/predecessor
-                    self.traffic_manager.auto_lane_change(carla_vehicle, False)
-                    self.traffic_manager.collision_detection(carla_vehicle, carla_vehicle, True)
-                    # Use aggressive following behavior for tight formation
-                    # This is achieved through the follow_distance parameter below
-
-            # Apply standard traffic manager settings
-            self.traffic_manager.vehicle_percentage_speed_difference(
-                carla_vehicle, control_params['speed_diff']
-            )
-            self.traffic_manager.distance_to_leading_vehicle(
-                carla_vehicle, control_params['follow_distance']
-            )
-            self.traffic_manager.ignore_lights_percentage(
-                carla_vehicle, control_params['ignore_lights']
-            )
-            self.traffic_manager.ignore_signs_percentage(
-                carla_vehicle, control_params['ignore_signs']
-            )
-            self.traffic_manager.ignore_vehicles_percentage(
-                carla_vehicle, control_params['ignore_vehicles']
-            )
-
-            # Store control information
-            self.controlled_vehicles[vehicle_id] = {
-                'rank': rank,
-                'action': control_action,
-                'params': control_params,
-                'control_time': time.time(),
-                'is_platoon_member': is_platoon_member,
-                'is_leader': is_leader
-            }
-
-            return True
-
-        except Exception as e:
-            print(f"[Warning] 单车控制失败 {vehicle_id}: {e}")
-            return False
+        """根据拍卖排名和当前状态确定代理控制状态"""
+        control_status = {}
+        
+        for winner in auction_winners:
+            participant = winner.participant
+            
+            if participant.type == 'vehicle':
+                vehicle_id = str(participant.id)
+                # 基于排名和当前动作确定控制状态
+                control_status[vehicle_id] = self._get_control_action_by_rank(winner.rank)
+                
+            elif participant.type == 'platoon':
+                vehicles = participant.data.get('vehicles', [])
+                if vehicles:
+                    leader_id = str(vehicles[0]['id'])
+                    # 基于排名和当前动作确定控制状态 (使用车队首领的排名)
+                    control_status[participant.id] = self._get_control_action_by_rank(winner.rank)
+        
+        return control_status
 
     def _get_control_params_by_rank_and_action(self, rank: int, action: str, 
-                                             is_platoon_member: bool = False,
-                                             is_leader: bool = False) -> Dict[str, float]:
-        """根据排名、动作和车队状态获取控制参数 - 调整为更温和的参数"""
+                                         is_platoon_member: bool = False,
+                                         is_leader: bool = False) -> Dict[str, float]:
+        """根据排名、动作和车队状态获取控制参数 - 支持fallback动作"""
         if action == 'wait':
             return {
-                'speed_diff': -60.0,      # 减少降速强度 (从-80.0)
-                'follow_distance': 2.5 if not is_platoon_member else 2.0,   # 车队成员更紧密
-                'ignore_lights': 0.0,     # 遵守信号灯
-                'ignore_signs': 0.0,      # 遵守标志
-                'ignore_vehicles': 0.0    # 遵守其他车辆
+                'speed_diff': -70.0,      # Strong speed reduction for waiting
+                'follow_distance': 2.5 if not is_platoon_member else 2.0,
+                'ignore_lights': 0.0,     
+                'ignore_signs': 0.0,      
+                'ignore_vehicles': 0.0    
+            }
+        elif action == 'fallback':  # NEW: Fallback action for deadlock resolution
+            return {
+                'speed_diff': -80.0,      # Very strong speed reduction
+                'follow_distance': 6.0,   # Large following distance to create space
+                'ignore_lights': 100.0,   # Ignore lights to allow reverse movement
+                'ignore_signs': 100.0,    # Ignore signs to allow reverse movement
+                'ignore_vehicles': 80.0   # Mostly ignore vehicles behind (for backing up)
             }
         elif action == 'go':
-            # # Platoon members get more moderate coordination - LESS AGGRESSIVE
-            # if is_platoon_member:
-            #     return {
-            #         'speed_diff': -45.0 if is_leader else -50.0,     # 更温和的速度控制
-            #         'follow_distance': 1.2 if not is_leader else 1.5,  # 增加跟车距离
-            #         'ignore_lights': 100.0,   # 忽略信号灯
-            #         'ignore_signs': 100.0,    # 忽略标志
-            #         'ignore_vehicles': 40.0
-            #     }
-            # else:
             return {
-                'speed_diff': -55.0,      # 更温和的单车控制
-                'follow_distance': 1.2,   # 增加跟车距离
-                'ignore_lights': 100.0,   # 忽略信号灯
-                'ignore_signs': 100.0,    # 忽略标志
+                'speed_diff': -55.0,      
+                'follow_distance': 1.2,   
+                'ignore_lights': 100.0,   
+                'ignore_signs': 100.0,    
                 'ignore_vehicles': 50.0
                 }
-
-        # 默认参数
-        # return {
-        #     'speed_diff': self.default_speed_diff,
-        #     'follow_distance': self.default_follow_distance,
-        #     'ignore_lights': 0.0,
-        #     'ignore_signs': 0.0,
-        #     'ignore_vehicles': 0.0
-        # }
 
     def _restore_uncontrolled_vehicles(self, current_controlled: Set[str]):
         """恢复不再被控制的车辆，包括已离开路口的车辆"""
@@ -570,3 +441,180 @@ class TrafficController:
             'active_controls': list(self.controlled_vehicles.keys()),
             'deadlock_state': deadlock_info
         }
+
+    def _apply_single_vehicle_control(self, vehicle_id: str, rank: int, bid_value: float, 
+                                    action: str) -> bool:
+        """Apply control to a single vehicle"""
+        try:
+            carla_vehicle = self.world.get_actor(int(vehicle_id))
+            if not carla_vehicle or not carla_vehicle.is_alive:
+                return False
+            
+            # Get control parameters based on action
+            params = self._get_control_params_by_rank_and_action(rank, action)
+            
+            # Apply traffic manager settings
+            self.traffic_manager.vehicle_percentage_speed_difference(
+                carla_vehicle, params['speed_diff']
+            )
+            self.traffic_manager.distance_to_leading_vehicle(
+                carla_vehicle, params['follow_distance']
+            )
+            self.traffic_manager.ignore_lights_percentage(
+                carla_vehicle, params['ignore_lights']
+            )
+            self.traffic_manager.ignore_signs_percentage(
+                carla_vehicle, params['ignore_signs']
+            )
+            self.traffic_manager.ignore_vehicles_percentage(
+                carla_vehicle, params['ignore_vehicles']
+            )
+            
+            # Handle fallback action (reverse movement)
+            if action == 'fallback':
+                self._apply_fallback_movement(carla_vehicle, vehicle_id)
+            
+            # Record control state
+            self.controlled_vehicles[vehicle_id] = {
+                'rank': rank,
+                'bid_value': bid_value,
+                'action': action,
+                'params': params,
+                'is_platoon_member': False,
+                'is_leader': False,
+                'timestamp': time.time()
+            }
+            
+            return True
+            
+        except Exception as e:
+            print(f"[Warning] 应用车辆控制失败 {vehicle_id}: {e}")
+            return False
+
+    def _apply_platoon_control(self, participant, rank: int, bid_value: float, 
+                             action: str) -> Set[str]:
+        """Apply control to all vehicles in a platoon"""
+        controlled_vehicles = set()
+        
+        try:
+            vehicles = participant.data.get('vehicles', [])
+            if not vehicles:
+                return controlled_vehicles
+            
+            for i, vehicle_data in enumerate(vehicles):
+                vehicle_id = str(vehicle_data['id'])
+                is_leader = (i == 0)
+                
+                # Apply control to each vehicle in platoon
+                if self._apply_single_platoon_vehicle_control(
+                    vehicle_id, rank, bid_value, action, is_leader
+                ):
+                    controlled_vehicles.add(vehicle_id)
+            
+            return controlled_vehicles
+            
+        except Exception as e:
+            print(f"[Warning] 应用车队控制失败 {participant.id}: {e}")
+            return controlled_vehicles
+
+    def _apply_single_platoon_vehicle_control(self, vehicle_id: str, rank: int, 
+                                            bid_value: float, action: str, 
+                                            is_leader: bool) -> bool:
+        """Apply control to a single vehicle within a platoon"""
+        try:
+            carla_vehicle = self.world.get_actor(int(vehicle_id))
+            if not carla_vehicle or not carla_vehicle.is_alive:
+                return False
+            
+            # Get control parameters for platoon member
+            params = self._get_control_params_by_rank_and_action(
+                rank, action, is_platoon_member=True, is_leader=is_leader
+            )
+            
+            # Apply traffic manager settings
+            self.traffic_manager.vehicle_percentage_speed_difference(
+                carla_vehicle, params['speed_diff']
+            )
+            self.traffic_manager.distance_to_leading_vehicle(
+                carla_vehicle, params['follow_distance']
+            )
+            self.traffic_manager.ignore_lights_percentage(
+                carla_vehicle, params['ignore_lights']
+            )
+            self.traffic_manager.ignore_signs_percentage(
+                carla_vehicle, params['ignore_signs']
+            )
+            self.traffic_manager.ignore_vehicles_percentage(
+                carla_vehicle, params['ignore_vehicles']
+            )
+            
+            # Handle fallback action for platoon vehicles
+            if action == 'fallback':
+                self._apply_fallback_movement(carla_vehicle, vehicle_id)
+            
+            # Record control state
+            self.controlled_vehicles[vehicle_id] = {
+                'rank': rank,
+                'bid_value': bid_value,
+                'action': action,
+                'params': params,
+                'is_platoon_member': True,
+                'is_leader': is_leader,
+                'timestamp': time.time()
+            }
+            
+            return True
+            
+        except Exception as e:
+            print(f"[Warning] 应用车队车辆控制失败 {vehicle_id}: {e}")
+            return False
+
+    def _apply_fallback_movement(self, carla_vehicle, vehicle_id: str):
+        """Apply fallback movement (reverse) to a vehicle during deadlock resolution"""
+        try:
+            print(f"🔙 Applying fallback control to vehicle {vehicle_id}")
+            
+            # Get current vehicle state
+            vehicle_transform = carla_vehicle.get_transform()
+            current_location = vehicle_transform.location
+            current_rotation = vehicle_transform.rotation
+            
+            # Calculate reverse direction (180 degrees from current heading)
+            reverse_yaw = (current_rotation.yaw + 180) % 360
+            reverse_rotation = carla_vehicle.get_world().get_blueprint_library().find('static.prop.streetbarrier').get_attribute('size')
+            
+            # Apply reverse movement by setting a waypoint behind the vehicle
+            import carla
+            reverse_direction = carla.Rotation(
+                pitch=current_rotation.pitch,
+                yaw=reverse_yaw,
+                roll=current_rotation.roll
+            )
+            
+            # Move vehicle backward by 5 meters
+            import math
+            reverse_distance = 5.0
+            reverse_x = current_location.x - reverse_distance * math.cos(math.radians(reverse_yaw))
+            reverse_y = current_location.y - reverse_distance * math.sin(math.radians(reverse_yaw))
+            
+            reverse_location = carla.Location(
+                x=reverse_x,
+                y=reverse_y,
+                z=current_location.z
+            )
+            
+            # Set destination for traffic manager to reverse location
+            if self.traffic_manager:
+                # Force vehicle to move backward using traffic manager
+                self.traffic_manager.set_desired_speed(carla_vehicle, 5.0)  # Slow reverse speed
+                # Note: Traffic manager doesn't directly support reverse, 
+                # so we use very aggressive ignore settings to allow backing up
+                self.traffic_manager.ignore_vehicles_percentage(carla_vehicle, 90.0)
+                self.traffic_manager.ignore_lights_percentage(carla_vehicle, 100.0)
+                self.traffic_manager.ignore_signs_percentage(carla_vehicle, 100.0)
+            
+            print(f"📍 Moving vehicle {vehicle_id} backward")
+            
+        except Exception as e:
+            print(f"[Warning] Failed to apply fallback movement to {vehicle_id}: {e}")
+

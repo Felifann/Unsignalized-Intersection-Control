@@ -74,7 +74,7 @@ class AgentBidPolicy:
         platoon_size = len(vehicles)
         
         # Size bonus (larger platoons get higher priority)
-        size_bonus = platoon_size * 10.0
+        size_bonus = platoon_size * 500.0
         
         # Cohesion bonus (check if platoon is well-formed)
         cohesion_bonus = self._calculate_platoon_cohesion_bonus(vehicles)

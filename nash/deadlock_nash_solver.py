@@ -69,18 +69,18 @@ class DeadlockNashController:
     def _in_intersection(self, pos: Tuple[float,float]) -> bool:
         """Check if position is inside intersection"""
         # Use the intersection polygon passed to constructor
-        if isinstance(self.intersection_polygon, tuple) and len(self.intersection_polygon) == 4:
-            x_min, x_max, y_min, y_max = self.intersection_polygon
-            x, y = pos
-            return x_min <= x <= x_max and y_min <= y <= y_max
-        else:
-            # Fallback to SimulationConfig
-            center = SimulationConfig.TARGET_INTERSECTION_CENTER
-            center_x, center_y = center[0], center[1]
-            half_side = 8.0  # 16m side, so half is 8m
-            x, y = pos
-            return (center_x - half_side <= x <= center_x + half_side and
-                    center_y - half_side <= y <= center_y + half_side)
+        # if isinstance(self.intersection_polygon, tuple) and len(self.intersection_polygon) == 4:
+        #     x_min, x_max, y_min, y_max = self.intersection_polygon
+        #     x, y = pos
+        #     return x_min <= x <= x_max and y_min <= y <= y_max
+        # else:
+        #     Fallback to SimulationConfig
+        center = SimulationConfig.TARGET_INTERSECTION_CENTER
+        center_x, center_y = center[0], center[1]
+        half_side = 8.0  # 16m side, so half is 8m
+        x, y = pos
+        return (center_x - half_side <= x <= center_x + half_side and
+                center_y - half_side <= y <= center_y + half_side)
 
     def update_vehicle_history(self, agent: SimpleAgent, current_time: float):
         """Update vehicle position history for deadlock detection"""
@@ -532,6 +532,7 @@ class DeadlockNashController:
         
         # If deadlock is active, manage the resolution process
         if self.deadlock_state.is_active:
+            print(f"🔒 DEADLOCK ACTIVE - Managing resolution (Group {self.deadlock_state.current_group_index + 1}/{len(self.deadlock_state.resolution_order)})")
             return self._manage_active_deadlock(agents, current_time)
         
         # Check for new deadlock
@@ -541,10 +542,13 @@ class DeadlockNashController:
         
         # Apply cooldown to prevent rapid Nash re-computation
         if current_time - self.last_nash_resolution_time < self.nash_resolution_cooldown:
+            print(f"🕐 DEADLOCK COOLDOWN - Waiting {self.nash_resolution_cooldown - (current_time - self.last_nash_resolution_time):.1f}s")
             return {}
             
-        print(f"🚨 DEADLOCK DETECTED - PAUSING SYSTEM")
+        print(f"🚨 NEW DEADLOCK DETECTED - PAUSING SYSTEM")
         print(f"   Participants: {[a.id for a in deadlocked_agents]}")
+        print(f"   Positions: {[(a.id, f'({a.position[0]:.1f}, {a.position[1]:.1f})') for a in deadlocked_agents]}")
+        print(f"   Speeds: {[(a.id, f'{a.speed:.2f}m/s') for a in deadlocked_agents]}")
         
         # Initialize deadlock state and create resolution order
         self._initialize_deadlock_resolution(deadlocked_agents, current_time)
@@ -618,49 +622,90 @@ class DeadlockNashController:
         return True
 
     def _execute_deadlock_resolution_step(self, agents: List[SimpleAgent], current_time: float) -> Dict[str,str]:
-        """Execute current step of deadlock resolution"""
+        """Execute current step of deadlock resolution with fallback for wait agents"""
         if not self.deadlock_state.resolution_order:
             return {}
         
-        # Check if we should advance to next group
-        group_elapsed = current_time - self.deadlock_state.group_start_time
-        
         # Get current group
         if self.deadlock_state.current_group_index >= len(self.deadlock_state.resolution_order):
-            # All groups processed, wait for remaining agents to clear
             return self._wait_for_intersection_clearance(agents)
         
         current_group = self.deadlock_state.resolution_order[self.deadlock_state.current_group_index]
         
-        # Check if current group has mostly cleared the intersection
+        # Check if current group has COMPLETELY cleared the intersection
         current_group_in_intersection = [
             agent_id for agent_id in current_group 
             if any(a.id == agent_id and self._in_intersection(a.position) for a in agents)
         ]
         
-        # Advance to next group if conditions are met
+        # IMMEDIATE SWITCHING: Advance as soon as current group clears intersection
+        group_elapsed = current_time - self.deadlock_state.group_start_time
         should_advance = (
-            (group_elapsed >= self.group_passing_duration and 
-             len(current_group_in_intersection) <= len(current_group) // 2) or
-            (group_elapsed >= self.group_passing_duration * 2)
+            len(current_group_in_intersection) == 0 or  # All cleared immediately
+            group_elapsed >= 2.0  # Safety timeout (reduced from 4.0)
         )
         
         if should_advance and self.deadlock_state.current_group_index < len(self.deadlock_state.resolution_order) - 1:
             self.deadlock_state.current_group_index += 1
             self.deadlock_state.group_start_time = current_time
             current_group = self.deadlock_state.resolution_order[self.deadlock_state.current_group_index]
-            print(f"🚦 Deadlock resolution: Advancing to group {self.deadlock_state.current_group_index + 1}")
+            print(f"🚦 Deadlock resolution: IMMEDIATELY advancing to group {self.deadlock_state.current_group_index + 1}")
         
-        # Generate actions for current group
+        # Generate actions for current group with fallback logic
         actions = {}
+        go_agents = []
+        wait_agents = []
+        
         for agent in agents:
             if agent.id in self.deadlock_state.participants:
                 if agent.id in current_group:
                     actions[agent.id] = 'go'
+                    go_agents.append(agent.id)
                 else:
-                    actions[agent.id] = 'wait'
+                    # Check if wait agent needs to fall back
+                    needs_fallback = self._agent_needs_fallback(agent, agents, current_group)
+                    if needs_fallback:
+                        actions[agent.id] = 'fallback'
+                        print(f"🔙 Agent {agent.id} falling back to clear path")
+                    else:
+                        actions[agent.id] = 'wait'
+                wait_agents.append(agent.id)
+        
+        print(f"🎮 Group {self.deadlock_state.current_group_index + 1} actions:")
+        print(f"   GO: {go_agents}")
+        print(f"   WAIT/FALLBACK: {wait_agents}")
+        print(f"   Still in intersection: {current_group_in_intersection}")
         
         return actions
+
+    def _agent_needs_fallback(self, wait_agent: SimpleAgent, all_agents: List[SimpleAgent], 
+                         current_go_group: List[str]) -> bool:
+        """Determine if a waiting agent needs to fall back to clear the path"""
+        # Find agents in current go group
+        go_agents = [a for a in all_agents if a.id in current_go_group]
+        
+        if not go_agents:
+            return False
+        
+        # Check if wait agent is blocking any go agent
+        for go_agent in go_agents:
+            # Calculate distance between wait agent and go agent
+            distance = math.hypot(
+                wait_agent.position[0] - go_agent.position[0],
+                wait_agent.position[1] - go_agent.position[1]
+            )
+            
+            # If they're close (within blocking distance), wait agent should fall back
+            if distance < 8.0:  # 8 meters blocking threshold
+                print(f"🚧 Agent {wait_agent.id} blocking {go_agent.id} (distance: {distance:.1f}m)")
+                return True
+        
+        # Check if wait agent is in intersection and could block the path
+        if self._in_intersection(wait_agent.position):
+            print(f"🚧 Agent {wait_agent.id} in intersection - needs fallback")
+            return True
+        
+        return False
 
     def _wait_for_intersection_clearance(self, agents: List[SimpleAgent]) -> Dict[str,str]:
         """Wait for all participants to clear intersection after resolution"""
