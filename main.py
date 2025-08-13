@@ -29,6 +29,9 @@ from auction.auction_engine import DecentralizedAuctionEngine
 # ===== 交通控制模块 =====
 from control import TrafficController
 
+# ===== Nash deadlock solver =====
+from nash.deadlock_nash_solver import DeadlockNashSolver
+
 # 初始化环境模块
 scenario = ScenarioManager()
 state_extractor = StateExtractor(scenario.carla)
@@ -39,11 +42,21 @@ platoon_manager = PlatoonManager(state_extractor)
 # 初始化分布式拍卖引擎 - 传入state_extractor
 auction_engine = DecentralizedAuctionEngine(state_extractor=state_extractor)
 
+# 初始化Nash deadlock solver
+nash_solver = DeadlockNashSolver(
+    max_exact=15,
+    conflict_time_window=2.0,
+    intersection_center=(-188.9, -89.7, 0.0)
+)
+
 # 初始化交通控制器
 traffic_controller = TrafficController(scenario.carla, state_extractor)
 
 # REACTIVATED: Set platoon manager reference
 traffic_controller.set_platoon_manager(platoon_manager)
+
+# Connect Nash solver to auction engine
+auction_engine.set_nash_controller(nash_solver)
 
 # 显示地图信息
 spawn_points = scenario.carla.world.get_map().get_spawn_points()

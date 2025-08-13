@@ -447,9 +447,11 @@ class DecentralizedAuctionEngine:
         
         # 4. Apply Nash deadlock resolution if needed
         if winners and self.nash_controller:
-            nash_actions = self._apply_nash_resolution(winners, current_time)
-            if nash_actions:
-                winners = self.apply_conflict_resolution(winners, nash_actions)
+            # Convert vehicle_states list to dict format expected by Nash solver
+            vehicle_states_dict = {str(v['id']): v for v in vehicle_states}
+            nash_winners = self.nash_controller.resolve(winners, vehicle_states_dict, platoon_manager)
+            if nash_winners:
+                winners = nash_winners
         
         # 5. Clean up completed agents
         self.evaluator.cleanup_completed_agents(vehicle_states, platoon_manager)

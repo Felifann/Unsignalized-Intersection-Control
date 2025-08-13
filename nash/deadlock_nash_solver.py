@@ -1,771 +1,714 @@
-# auction/deadlock_nash.py
+# deadlocknashsolver.py （替换为此实现；若工程里类名/入口不同，请做同名替换）
+from dataclasses import dataclass
+from typing import List, Dict, Tuple, Set, Optional
+import math
 import itertools
 import time
-from typing import List, Dict, Tuple, Optional
-from dataclasses import dataclass, field
-import math
-from env.simulation_config import SimulationConfig
+from collections import defaultdict
 
-@dataclass
-class SimpleAgent:
-    id: str
-    position: Tuple[float, float]         # (x,y)
-    speed: float                          # m/s
-    heading: float                        # rad
-    intended_path: List[Tuple[float,float]]  # coarse polyline through intersection
-    bid: float
-    wait_time: float                      # seconds
-    last_positions: List[Tuple[float,float]] = field(default_factory=list)
+# 假定这些类型在项目中已有定义；保持引用名不变
+# from auction.types import AuctionAgent, AuctionWinner, Bid
+# 或根据你的工程实际 import：
+try:
+    from auction.auction_engine import AuctionWinner  # 若已有该类
+except:
+    @dataclass
+    class AuctionWinner:
+        participant: object
+        bid: float
+        rank: int
+        conflict_action: str  # 'go' or 'wait'
 
-@dataclass
-class NashPassingOrder:
-    """Represents a sequential passing order determined by Nash equilibrium"""
-    sequence: List[List[str]]  # List of groups, each group can go simultaneously
-    current_group_index: int = 0
-    group_start_time: float = 0.0
-    min_group_duration: float = 3.0  # Minimum time each group gets to pass
+# ---- 工具函数：可用就用，缺啥就用本地近似 ----
 
-@dataclass
-class DeadlockState:
-    """Represents the current deadlock state"""
-    is_active: bool = False
-    participants: List[str] = field(default_factory=list)
-    detection_time: float = 0.0
-    resolution_order: List[List[str]] = field(default_factory=list)
-    current_group_index: int = 0
-    group_start_time: float = 0.0
+def _euclidean_2d(a: Tuple[float, float, float], b: Tuple[float, float, float]) -> float:
+    return math.hypot(a[0]-b[0], a[1]-b[1])
 
-class DeadlockNashController:
+def _eta_to_conflict_center(agent_state: Dict, center: Tuple[float, float, float]) -> float:
+    """
+    近似ETA：到路口中心的距离 / max(speed, eps)。
+    agent_state 需包含 'location' (x,y,z) 和 'speed' (m/s)。
+    若缺失，返回 +inf。
+    """
+    loc = agent_state.get('location')
+    v = max(agent_state.get('speed', 0.0), 0.1)
+    if not loc:
+        return float('inf')
+    d = _euclidean_2d(loc, center)
+    return d / v
+
+def _turn_conflict(turn_i: str, turn_j: str) -> bool:
+    """
+    简易转向冲突矩阵：直行与对向直行/左转可能冲突；左转与对向直行/右侧直行等冲突；右转较少冲突但在窄口可能冲突。
+    可按需要细化/替换为更准确的拓扑判断。
+    """
+    # 统一为 {'left','right','straight'}，未知当作 'straight'
+    si = (turn_i or 'straight').lower()
+    sj = (turn_j or 'straight').lower()
+    if si == 'right' and sj == 'right':
+        return False
+    if si == sj == 'straight':
+        return True
+    if 'left' in (si, sj) and 'straight' in (si, sj):
+        return True
+    if si == 'left' and sj == 'left':
+        return True  # 同向对斜也可能在中心区冲突
+    # 右转与直行/左转在部分几何下也会冲突，这里保守处理
+    if 'right' in (si, sj):
+        return True
+    return False
+
+class DeadlockNashSolver:
+    """
+    Enhanced MWIS-based deadlock solver with improved conflict detection and path analysis
+    """
     def __init__(self,
-                 intersection_polygon,   
-                 deadlock_time_window: float = 2.0,
-                 min_agents_for_deadlock: int = 2,
-                 progress_eps: float = 1.0,   
-                 collision_penalty: float = 1000.0,
-                 wait_penalty_allwait: float = 10.0,
-                 w_wait_inv: float = 1.0,
-                 w_bid: float = 1.0,
-                 mutual_blocking_distance: float = 4.0,
-                 group_passing_duration: float = 4.0):
-        self.intersection_polygon = intersection_polygon
-        self.deadlock_time_window = deadlock_time_window
-        self.min_agents = min_agents_for_deadlock
-        self.progress_eps = progress_eps
-        self.collision_penalty = collision_penalty
-        self.wait_penalty_allwait = wait_penalty_allwait
-        self.w_wait_inv = w_wait_inv
-        self.w_bid = w_bid
-        self.mutual_blocking_distance = mutual_blocking_distance
-        self.group_passing_duration = group_passing_duration
+                 max_exact: int = 15,
+                 conflict_time_window: float = 3.0,
+                 intersection_center: Tuple[float, float, float] = (-188.9, -89.7, 0.0),
+                 intersection_radius: float = 25.0,
+                 min_safe_distance: float = 5.0,
+                 speed_prediction_horizon: float = 5.0):
+        self.max_exact = max_exact
+        self.dt_conflict = conflict_time_window
+        self.center = intersection_center
+        self.intersection_radius = intersection_radius
+        self.min_safe_distance = min_safe_distance
+        self.prediction_horizon = speed_prediction_horizon
         
-        # Store history and current passing order
-        self.history = {}
-        # Replace current_passing_order with deadlock_state
-        self.deadlock_state = DeadlockState()
-        self.last_nash_resolution_time = 0.0
-        self.nash_resolution_cooldown = 2.0  # Minimum time between Nash resolutions
+        # Enhanced conflict detection parameters
+        self.path_intersection_threshold = 3.0  # meters
+        self.velocity_similarity_threshold = 0.3  # for detecting following behavior
+        
+        # Performance tracking
+        self.stats = {
+            'total_resolutions': 0,
+            'conflicts_detected': 0,
+            'mwis_exact_calls': 0,
+            'mwis_greedy_calls': 0,
+            'avg_resolution_time': 0.0
+        }
 
-    # ---------- Utility Functions ----------
-    def _in_intersection(self, pos: Tuple[float,float]) -> bool:
-        """Check if position is inside intersection"""
-        # Use the intersection polygon passed to constructor
-        # if isinstance(self.intersection_polygon, tuple) and len(self.intersection_polygon) == 4:
-        #     x_min, x_max, y_min, y_max = self.intersection_polygon
-        #     x, y = pos
-        #     return x_min <= x <= x_max and y_min <= y <= y_max
-        # else:
-        #     Fallback to SimulationConfig
-        center = SimulationConfig.TARGET_INTERSECTION_CENTER
-        center_x, center_y = center[0], center[1]
-        half_side = 8.0  # 16m side, so half is 8m
-        x, y = pos
-        return (center_x - half_side <= x <= center_x + half_side and
-                center_y - half_side <= y <= center_y + half_side)
+    # === 外部调用的主入口（签名尽量与旧版一致） ===
+    def resolve(self,
+                candidates: List,
+                vehicle_states: Dict[str, Dict],
+                platoon_manager=None,
+                *args, **kwargs) -> List[AuctionWinner]:
+        """Enhanced resolve with performance tracking and better conflict analysis"""
+        start_time = time.time()
+        
+        if not candidates:
+            return []
 
-    def update_vehicle_history(self, agent: SimpleAgent, current_time: float):
-        """Update vehicle position history for deadlock detection"""
-        h = self.history.setdefault(agent.id, [])
-        h.append((current_time, agent.position))
-        # keep only window
-        cutoff = current_time - self.deadlock_time_window
-        self.history[agent.id] = [(t,p) for (t,p) in h if t >= cutoff]
+        # 1) Enhanced conflict graph construction
+        adj, conflict_analysis = self._build_enhanced_conflict_graph(
+            candidates, vehicle_states, platoon_manager
+        )
 
-    def _progress_in_window(self, agent_id: str) -> float:
-        """Calculate progress distance in time window"""
-        h = self.history.get(agent_id, [])
-        if len(h) < 2:
+        # 2) Adaptive MWIS algorithm selection
+        weights = [self._get_bid(c) for c in candidates]
+        selected_idx = self._solve_mwis_adaptive(weights, adj, conflict_analysis)
+
+        # 3) Enhanced winner assembly with conflict actions
+        winners = self._assemble_winners_with_actions(
+            candidates, selected_idx, weights, conflict_analysis
+        )
+        
+        # 4) Update performance statistics
+        resolution_time = time.time() - start_time
+        self._update_stats(resolution_time, len(adj), conflict_analysis)
+        
+        return winners
+
+    # === 构图：判断任意两候选是否冲突 ===
+    def _build_enhanced_conflict_graph(self, candidates: List, vehicle_states: Dict[str, Dict], 
+                                     platoon_manager=None) -> Tuple[List[Set[int]], Dict]:
+        """Enhanced conflict graph with geometric path analysis and time predictions"""
+        n = len(candidates)
+        adj: List[Set[int]] = [set() for _ in range(n)]
+        conflict_analysis = {
+            'spatial_conflicts': 0,
+            'temporal_conflicts': 0,
+            'platoon_conflicts': 0,
+            'path_intersections': 0
+        }
+        
+        # Enhanced metadata extraction
+        meta = []
+        for c in candidates:
+            agent = self._get_agent(c)
+            state = self._lookup_state(agent, vehicle_states, platoon_manager)
+            
+            # Enhanced turn inference with path prediction
+            turn = self._infer_turn_enhanced(agent, state, vehicle_states)
+            eta = self._calculate_enhanced_eta(state, agent)
+            path = self._predict_vehicle_path(state, agent)
+            
+            meta.append({
+                'agent': agent,
+                'state': state,
+                'turn': turn,
+                'eta': eta,
+                'predicted_path': path,
+                'is_platoon': agent.type == 'platoon' if hasattr(agent, 'type') else False
+            })
+
+        # Enhanced conflict detection
+        for i, j in itertools.combinations(range(n), 2):
+            conflict_type = self._detect_enhanced_conflict(meta[i], meta[j])
+            if conflict_type:
+                adj[i].add(j)
+                adj[j].add(i)
+                conflict_analysis[conflict_type] += 1
+        
+        return adj, conflict_analysis
+
+    def _infer_turn_enhanced(self, agent, state: Dict, vehicle_states: Dict) -> str:
+        """Enhanced turn inference using velocity vectors and waypoint analysis"""
+        # 1) Existing turn inference
+        turn = self._infer_turn(agent, state)
+        if turn != 'straight':
+            return turn
+        
+        # 2) Enhanced inference using velocity direction
+        if state and 'velocity' in state and 'location' in state:
+            velocity = state['velocity']
+            location = state['location']
+            
+            # Calculate velocity-based heading
+            if abs(velocity[0]) > 0.5 or abs(velocity[1]) > 0.5:
+                velocity_heading = math.atan2(velocity[1], velocity[0])
+                
+                # Calculate direction to intersection center
+                to_center_x = self.center[0] - location[0]
+                to_center_y = self.center[1] - location[1]
+                center_heading = math.atan2(to_center_y, to_center_x)
+                
+                # Calculate relative angle
+                angle_diff = self._normalize_angle(velocity_heading - center_heading)
+                
+                if angle_diff > math.pi/4:  # 45 degrees
+                    return 'left'
+                elif angle_diff < -math.pi/4:
+                    return 'right'
+        
+        return 'straight'
+
+    def _normalize_angle(self, angle: float) -> float:
+        """Normalize angle to [-π, π]"""
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle
+
+    def _assemble_winners_with_actions(self, candidates: List, selected_idx: List[int], 
+                                     weights: List[float], conflict_analysis: Dict) -> List[AuctionWinner]:
+        """Enhanced winner assembly with intelligent action assignment"""
+        go_set = set(selected_idx)
+        go_sorted = sorted(list(go_set), key=lambda i: weights[i], reverse=True)
+        
+        # Enhanced ranking considering conflict resolution effectiveness
+        rank_in_go = {}
+        for rank, idx in enumerate(go_sorted):
+            rank_in_go[idx] = rank + 1
+
+        winners: List[AuctionWinner] = []
+        for i, c in enumerate(candidates):
+            if i in go_set:
+                action = 'go'
+                rank = rank_in_go[i]
+            else:
+                action = 'wait'
+                rank = 0  # Wait vehicles get rank 0
+            
+            winners.append(self._to_winner(c, action, rank))
+        
+        return winners
+
+    # ...existing code...
+
+    def _calculate_enhanced_eta(self, state: Dict, agent) -> float:
+        """Enhanced ETA calculation with acceleration and deceleration modeling"""
+        if not state or 'location' not in state:
             return float('inf')
-        start_pos = h[0][1]
-        end_pos = h[-1][1]
-        dx = end_pos[0] - start_pos[0]
-        dy = end_pos[1] - start_pos[1]
-        return math.hypot(dx, dy)
+        
+        location = state['location']
+        velocity = state.get('velocity', [0, 0, 0])
+        current_speed = math.sqrt(velocity[0]**2 + velocity[1]**2)
+        
+        distance = _euclidean_2d(location, self.center)
+        
+        # Enhanced ETA with acceleration modeling
+        if current_speed < 0.5:  # Vehicle is stopped or very slow
+            # Assume acceleration to reasonable speed
+            acceleration = 2.0  # m/s^2
+            target_speed = 8.0  # m/s (reasonable urban speed)
+            
+            # Time to reach target speed
+            accel_time = target_speed / acceleration
+            accel_distance = 0.5 * acceleration * accel_time**2
+            
+            if distance <= accel_distance:
+                # Pure acceleration phase
+                return math.sqrt(2 * distance / acceleration)
+            else:
+                # Acceleration + constant speed phase
+                remaining_distance = distance - accel_distance
+                constant_speed_time = remaining_distance / target_speed
+                return accel_time + constant_speed_time
+        else:
+            # Use current speed with slight deceleration near intersection
+            effective_speed = max(current_speed * 0.8, 2.0)  # Account for intersection approach
+            return distance / effective_speed
 
-    def paths_conflict(self, path1: List[Tuple[float,float]], path2: List[Tuple[float,float]]) -> bool:
-        """Check if two paths conflict using segment distance analysis"""
-        if not path1 or not path2 or len(path1) < 2 or len(path2) < 2:
+    def _predict_vehicle_path(self, state: Dict, agent) -> List[Tuple[float, float]]:
+        """Predict vehicle path through intersection for spatial conflict detection"""
+        if not state or 'location' not in state:
+            return []
+        
+        location = state['location']
+        velocity = state.get('velocity', [0, 0, 0])
+        turn = self._infer_turn_enhanced(agent, state, {})
+        
+        path_points = []
+        current_pos = (location[0], location[1])
+        path_points.append(current_pos)
+        
+        # Calculate path based on turn type
+        if turn == 'straight':
+            # Straight path through intersection
+            if abs(velocity[0]) > 0.1 or abs(velocity[1]) > 0.1:
+                direction = math.atan2(velocity[1], velocity[0])
+            else:
+                # Use direction to center as fallback
+                direction = math.atan2(self.center[1] - location[1], self.center[0] - location[0])
+            
+            # Create straight path points
+            for i in range(1, 6):  # 5 points along path
+                step_distance = 10.0 * i
+                next_x = current_pos[0] + step_distance * math.cos(direction)
+                next_y = current_pos[1] + step_distance * math.sin(direction)
+                path_points.append((next_x, next_y))
+        
+        elif turn in ['left', 'right']:
+            # Curved path for turns
+            turn_radius = 15.0  # meters
+            turn_direction = 1 if turn == 'left' else -1
+            
+            # Calculate arc path
+            start_angle = math.atan2(velocity[1], velocity[0]) if abs(velocity[0]) > 0.1 or abs(velocity[1]) > 0.1 else 0
+            
+            for i in range(1, 6):
+                angle_increment = turn_direction * (math.pi/2) * (i/5.0)  # 90 degree turn over 5 steps
+                current_angle = start_angle + angle_increment
+                
+                step_distance = 10.0 * i
+                next_x = current_pos[0] + step_distance * math.cos(current_angle)
+                next_y = current_pos[1] + step_distance * math.sin(current_angle)
+                path_points.append((next_x, next_y))
+        
+        return path_points
+
+    def _detect_enhanced_conflict(self, mi: Dict, mj: Dict) -> Optional[str]:
+        """Enhanced conflict detection with spatial, temporal, and behavioral analysis"""
+        # 1) Temporal conflict check (enhanced)
+        ti, tj = mi['eta'], mj['eta']
+        if abs(ti - tj) > self.dt_conflict:
+            return None  # No temporal overlap
+        
+        # 2) Spatial conflict check using predicted paths
+        paths_intersect = self._check_path_intersection(
+            mi['predicted_path'], mj['predicted_path']
+        )
+        
+        if paths_intersect:
+            # 3) Turn-based conflict validation
+            if _turn_conflict(mi['turn'], mj['turn']):
+                return 'spatial_conflicts'
+            else:
+                return 'path_intersections'
+        
+        # 4) Platoon-specific conflict detection
+        if mi['is_platoon'] or mj['is_platoon']:
+            if self._detect_platoon_conflict(mi, mj):
+                return 'platoon_conflicts'
+        
+        # 5) Following behavior conflict (vehicles too close in same direction)
+        if self._detect_following_conflict(mi, mj):
+            return 'temporal_conflicts'
+        
+        return None
+
+    def _check_path_intersection(self, path1: List[Tuple[float, float]], 
+                               path2: List[Tuple[float, float]]) -> bool:
+        """Check if two predicted paths intersect within intersection area"""
+        if not path1 or not path2:
             return False
-
-        def segments(path):
-            return list(zip(path[:-1], path[1:]))
         
-        def point_to_segment_distance(pt, seg):
-            (x,y) = pt
-            (x1,y1),(x2,y2) = seg
-            dx = x2-x1; dy=y2-y1
-            if dx==0 and dy==0:
-                return math.hypot(x-x1,y-y1)
-            t = max(0,min(1, ((x-x1)*dx+(y-y1)*dy)/(dx*dx+dy*dy)))
-            px = x1 + t*dx; py = y1 + t*dy
-            return math.hypot(px-x,py-y)
-
-        segs1 = segments(path1)
-        segs2 = segments(path2)
-        conflict_threshold = 2.0  # meters
+        # Check each segment of path1 against each segment of path2
+        for i in range(len(path1) - 1):
+            for j in range(len(path2) - 1):
+                if self._line_segments_intersect(
+                    path1[i], path1[i+1], path2[j], path2[j+1]
+                ):
+                    # Verify intersection is within intersection area
+                    intersection_point = self._get_intersection_point(
+                        path1[i], path1[i+1], path2[j], path2[j+1]
+                    )
+                    if intersection_point:
+                        dist_to_center = math.sqrt(
+                            (intersection_point[0] - self.center[0])**2 + 
+                            (intersection_point[1] - self.center[1])**2
+                        )
+                        if dist_to_center <= self.intersection_radius:
+                            return True
         
-        for s1 in segs1:
-            for s2 in segs2:
-                if (point_to_segment_distance(s1[0], s2) < conflict_threshold or
-                    point_to_segment_distance(s1[1], s2) < conflict_threshold or
-                    point_to_segment_distance(s2[0], s1) < conflict_threshold or
-                    point_to_segment_distance(s2[1], s1) < conflict_threshold):
-                    return True
         return False
 
-    # ---------- Unified Deadlock Detection ----------
-    def detect_deadlock(self, agents: List[SimpleAgent], current_time: float) -> List[SimpleAgent]:
-        """Unified deadlock detection for 2-4 vehicles"""
-        # 1) Only consider agents inside intersection
-        inside = [a for a in agents if self._in_intersection(a.position)]
-        if len(inside) < self.min_agents:
-            # Clean history for non-inside agents
-            for a in agents:
-                if a.id not in [ia.id for ia in inside]:
-                    self.history.pop(a.id, None)
-            return []
+    def _line_segments_intersect(self, p1: Tuple[float, float], p2: Tuple[float, float],
+                               p3: Tuple[float, float], p4: Tuple[float, float]) -> bool:
+        """Check if two line segments intersect using cross product method"""
+        def ccw(A, B, C):
+            return (C[1]-A[1]) * (B[0]-A[0]) > (B[1]-A[1]) * (C[0]-A[0])
+        
+        return ccw(p1,p3,p4) != ccw(p2,p3,p4) and ccw(p1,p2,p3) != ccw(p1,p2,p4)
 
-        print(f"DEBUG: {len(inside)} agents inside intersection")
-
-        # 2) Update history for inside agents
-        for a in inside:
-            self.update_vehicle_history(a, current_time)
-
-        # 3) Check stalled agents with more lenient criteria
-        stalled = []
-        for a in inside:
-            progress = self._progress_in_window(a.id)
-            
-            # More lenient stalling criteria
-            history_length = len(self.history.get(a.id, []))
-            
-            # Consider stalled if:
-            # - Very low speed (< 0.1 m/s) OR
-            # - Low progress AND sufficient history
-            is_stalled = (
-                a.speed < 0.1 or  # Almost stopped
-                (progress < self.progress_eps and history_length >= 3)  # Low progress with history
-            )
-            
-            print(f"DEBUG: Agent {a.id} - speed: {a.speed:.3f}, progress: {progress:.3f}, history: {history_length}, stalled: {is_stalled}")
-            
-            if is_stalled:
-                stalled.append(a)
-
-        print(f"DEBUG: {len(stalled)} stalled agents out of {len(inside)} inside")
-
-        # 4) For 2 vehicles, use more lenient mutual blocking check
-        if len(stalled) >= 2:
-            if len(stalled) == 2:
-                # 2-vehicle check
-                if self._are_mutually_blocking(stalled[0], stalled[1]):
-                    print(f"🔒 2-vehicle deadlock detected: {stalled[0].id} ↔ {stalled[1].id}")
-                    return stalled
-            else:
-                # 3+ vehicles: Check if they form a blocking cycle
-                if self._forms_blocking_cycle(stalled):
-                    print(f"🔒 Multi-vehicle deadlock: {len(stalled)} agents")
-                    return stalled[:4]  # Limit to 4 for computational efficiency
-
-        # If vehicles are very close and both stopped, force deadlock detection
-        if len(inside) >= 2:
-            close_and_stopped = self._check_close_and_stopped(inside)
-            if close_and_stopped:
-                print(f"🔒 FORCED deadlock due to close proximity and low speeds")
-                return close_and_stopped
-
-        return []
-
-    def _check_close_and_stopped(self, agents: List[SimpleAgent]) -> List[SimpleAgent]:
-        """Check if vehicles are very close together and mostly stopped"""
-        stopped_agents = [a for a in agents if a.speed < 0.5]  # Very slow or stopped
+    def _get_intersection_point(self, p1: Tuple[float, float], p2: Tuple[float, float],
+                              p3: Tuple[float, float], p4: Tuple[float, float]) -> Optional[Tuple[float, float]]:
+        """Calculate intersection point of two line segments"""
+        x1, y1 = p1
+        x2, y2 = p2
+        x3, y3 = p3
+        x4, y4 = p4
         
-        if len(stopped_agents) < 2:
-            return []
-        
-        # Check if any two agents are very close
-        for i in range(len(stopped_agents)):
-            for j in range(i+1, len(stopped_agents)):
-                agent1, agent2 = stopped_agents[i], stopped_agents[j]
-                distance = math.hypot(
-                    agent1.position[0] - agent2.position[0],
-                    agent1.position[1] - agent2.position[1]
-                )
-                
-                print(f"DEBUG: Distance between {agent1.id} and {agent2.id}: {distance:.2f}m")
-                
-                # If very close (crash distance), force deadlock
-                if distance < 8.0:  # Increased threshold for crashed vehicles
-                    return stopped_agents[:2]  # Return the close pair
-    
-        return []
-
-    def _are_mutually_blocking(self, agent1: SimpleAgent, agent2: SimpleAgent) -> bool:
-        """Enhanced mutual blocking check"""
-        # Distance check
-        dx = agent1.position[0] - agent2.position[0]
-        dy = agent1.position[1] - agent2.position[1]
-        distance = math.hypot(dx, dy)
-        
-        print(f"DEBUG: Mutual blocking check - distance: {distance:.2f}m (threshold: {self.mutual_blocking_distance})")
-        
-        if distance > self.mutual_blocking_distance * 1.5:  # More lenient distance
-            return False
-        
-        # If vehicles are very close, assume they're blocking regardless of other factors
-        if distance < 3.0:
-            print(f"DEBUG: Vehicles very close ({distance:.2f}m) - assuming mutual blocking")
-            return True
-        
-        # Path conflict check - if paths available
-        if (len(agent1.intended_path) >= 2 and len(agent2.intended_path) >= 2):
-            paths_conflict = self.paths_conflict(agent1.intended_path, agent2.intended_path)
-            print(f"DEBUG: Paths conflict: {paths_conflict}")
-            if not paths_conflict:
-                # Even without explicit path conflict, close proximity might indicate blocking
-                if distance < 5.0:
-                    return True
-                return False
-        else:
-            # No valid paths - assume conflict if close
-            return distance < 6.0
-        
-        # Heading check - more tolerant
-        heading_diff = abs(agent1.heading - agent2.heading)
-        heading_diff = min(heading_diff, 2*math.pi - heading_diff)
-        
-        head_on = abs(heading_diff - math.pi) < 1.0  # More tolerant
-        perpendicular = abs(heading_diff - math.pi/2) < 1.0  # More tolerant
-        same_direction = heading_diff < 0.5
-        
-        print(f"DEBUG: Heading diff: {heading_diff:.2f}, head_on: {head_on}, perpendicular: {perpendicular}")
-        
-        return head_on or perpendicular or (distance < 4.0 and same_direction)
-
-    def _forms_blocking_cycle(self, agents: List[SimpleAgent]) -> bool:
-        """Check if multiple agents form a blocking cycle"""
-        if len(agents) < 3:
-            return False
-        
-        # If all agents are close and slow, assume blocking cycle
-        max_distance = 0
-        min_speed = float('inf')
-        
-        for i in range(len(agents)):
-            min_speed = min(min_speed, agents[i].speed)
-            for j in range(i+1, len(agents)):
-                distance = math.hypot(
-                    agents[i].position[0] - agents[j].position[0],
-                    agents[i].position[1] - agents[j].position[1]
-                )
-                max_distance = max(max_distance, distance)
-        
-        # If all vehicles are within a small area and moving slowly
-        compact_and_slow = max_distance < 10.0 and min_speed < 0.5
-        
-        if compact_and_slow:
-            print(f"DEBUG: Compact group detected - max_distance: {max_distance:.2f}, min_speed: {min_speed:.2f}")
-            return True
-        
-        # Original path-based conflict check as fallback
-        conflict_count = 0
-        total_pairs = len(agents) * (len(agents) - 1) // 2
-        
-        for i in range(len(agents)):
-            for j in range(i+1, len(agents)):
-                if self.paths_conflict(agents[i].intended_path, agents[j].intended_path):
-                    conflict_count += 1
-        
-        # Threshold: if more than 60% of pairs conflict, consider it a cycle
-        conflict_ratio = conflict_count / total_pairs if total_pairs > 0 else 0
-        return conflict_ratio > 0.6
-
-    # ---------- Enhanced Payoff Computation ----------
-    def compute_payoffs(self, agents: List[SimpleAgent], profile: Tuple[int, ...]) -> Dict[str,float]:
-        """Enhanced payoff computation with fairness consideration"""
-        n = len(agents)
-        payoffs = {a.id: 0.0 for a in agents}
-        
-        # Precompute conflicts
-        conflicts = self._precompute_conflicts(agents)
-        
-        # Compute individual payoffs
-        for i, agent in enumerate(agents):
-            action = profile[i]
-            
-            if action == 0:  # Wait
-                # Waiting penalty increases with wait time
-                payoffs[agent.id] = -0.1 * agent.wait_time - 0.05 * (agent.wait_time ** 1.2)
-            else:  # Go
-                # Base reward with diminishing returns for very high bids
-                bid_reward = self.w_bid * math.log(1 + agent.bid)
-                wait_reward = self.w_wait_inv * (1.0/(1.0 + agent.wait_time))
-                base_reward = bid_reward + wait_reward
-                
-                # Collision penalty
-                collision_count = sum(1 for j in range(n) 
-                                    if j != i and profile[j] == 1 and conflicts.get((min(i,j), max(i,j)), False))
-                
-                penalty = self.collision_penalty * collision_count
-                payoffs[agent.id] = base_reward - penalty
-
-        # Global penalties
-        if all(x == 0 for x in profile):  # Everyone waits
-            for agent in agents:
-                payoffs[agent.id] -= self.wait_penalty_allwait
-        elif sum(profile) == n:  # Everyone goes - discourage if many conflicts
-            total_conflicts = sum(conflicts.values())
-            if total_conflicts > n//2:  # Too many conflicts
-                for i, agent in enumerate(agents):
-                    if profile[i] == 1:
-                        payoffs[agent.id] -= 50.0  # Additional penalty
-
-        return payoffs
-
-    def _precompute_conflicts(self, agents: List[SimpleAgent]) -> Dict[Tuple[int,int], bool]:
-        """Precompute all pairwise conflicts"""
-        conflicts = {}
-        n = len(agents)
-        for i in range(n):
-            for j in range(i+1, n):
-                conflicts[(i,j)] = self.paths_conflict(agents[i].intended_path, agents[j].intended_path)
-        return conflicts
-
-    # ---------- Robust Nash Equilibrium Finding ----------
-    def find_pure_nash(self, agents: List[SimpleAgent]) -> List[Tuple[int,...]]:
-        """Find pure strategy Nash equilibria with robustness checks"""
-        n = len(agents)
-        if n == 0:
-            return []
-        
-        # For large n, use heuristic approach
-        if n > 4:
-            return self._heuristic_nash_for_large_groups(agents)
-            
-        all_profiles = list(itertools.product([0,1], repeat=n))
-        nash_equilibria = []
-        
-        for profile in all_profiles:
-            if self._is_nash_equilibrium(agents, profile):
-                nash_equilibria.append(profile)
-        
-        return nash_equilibria
-
-    def _is_nash_equilibrium(self, agents: List[SimpleAgent], profile: Tuple[int,...]) -> bool:
-        """Check if a profile is a Nash equilibrium"""
-        payoffs = self.compute_payoffs(agents, profile)
-        
-        for i in range(len(agents)):
-            current_payoff = payoffs[agents[i].id]
-            
-            # Try deviating
-            deviation_profile = list(profile)
-            deviation_profile[i] = 1 - profile[i]
-            deviation_payoffs = self.compute_payoffs(agents, tuple(deviation_profile))
-            deviation_payoff = deviation_payoffs[agents[i].id]
-            
-            # If deviation improves payoff significantly, not Nash
-            if deviation_payoff > current_payoff + 1e-6:
-                return False
-        
-        return True
-
-    def _heuristic_nash_for_large_groups(self, agents: List[SimpleAgent]) -> List[Tuple[int,...]]:
-        """Heuristic Nash finding for large groups (n > 4)"""
-        n = len(agents)
-        
-        # Strategy 1: Sort by priority and allow top agents to go
-        sorted_agents = sorted(enumerate(agents), 
-                             key=lambda x: x[1].bid / (1 + x[1].wait_time), reverse=True)
-        
-        profiles = []
-        
-        # Try allowing 1, 2, or 3 top agents to go
-        for num_go in range(1, min(4, n+1)):
-            profile = [0] * n
-            for i in range(num_go):
-                agent_idx = sorted_agents[i][0]
-                profile[agent_idx] = 1
-            
-            # Check if this creates too many conflicts
-            conflicts = self._precompute_conflicts(agents)
-            conflict_count = sum(1 for (i,j), has_conflict in conflicts.items() 
-                               if has_conflict and profile[i] == 1 and profile[j] == 1)
-            
-            if conflict_count <= 1:  # Allow at most 1 conflict
-                profiles.append(tuple(profile))
-        
-        return profiles
-
-    # ---------- Unified Nash Resolution ----------
-    def resolve_deadlock(self, agents: List[SimpleAgent]) -> Dict[str,str]:
-        """Unified deadlock resolution for 2-4+ vehicles"""
-        if not agents:
-            return {}
-        
-        n = len(agents)
-        print(f"🎯 Resolving {n}-agent deadlock using Nash equilibrium")
-        
-        # Find Nash equilibria
-        nash_profiles = self.find_pure_nash(agents)
-        
-        # Selection strategy
-        chosen_profile = self._select_best_nash_profile(agents, nash_profiles)
-        
-        if chosen_profile is None:
-            # Fallback: Greedy selection based on priority
-            chosen_profile = self._greedy_fallback(agents)
-        
-        # Convert to action dictionary
-        result = {}
-        for i, agent in enumerate(agents):
-            result[agent.id] = 'go' if chosen_profile[i] == 1 else 'wait'
-        
-        return result
-
-    def _select_best_nash_profile(self, agents: List[SimpleAgent], 
-                                 nash_profiles: List[Tuple[int,...]]) -> Optional[Tuple[int,...]]:
-        """Select the best Nash profile based on multiple criteria"""
-        if not nash_profiles:
+        denom = (x1-x2)*(y3-y4) - (y1-y2)*(x3-x4)
+        if abs(denom) < 1e-10:
             return None
         
-        # Filter collision-free profiles
-        safe_profiles = [p for p in nash_profiles if not self._profile_has_collisions(agents, p)]
+        t = ((x1-x3)*(y3-y4) - (y1-y3)*(x3-x4)) / denom
         
-        profiles_to_consider = safe_profiles if safe_profiles else nash_profiles
+        if 0 <= t <= 1:
+            x = x1 + t*(x2-x1)
+            y = y1 + t*(y2-y1)
+            return (x, y)
         
-        # Multi-criteria selection
-        best_profile = None
-        best_score = -float('inf')
-        
-        for profile in profiles_to_consider:
-            score = self._evaluate_profile_quality(agents, profile)
-            if score > best_score:
-                best_score = score
-                best_profile = profile
-        
-        return best_profile
+        return None
 
-    def _evaluate_profile_quality(self, agents: List[SimpleAgent], profile: Tuple[int,...]) -> float:
-        """Evaluate profile quality using multiple criteria"""
-        payoffs = self.compute_payoffs(agents, profile)
-        
-        # Criteria 1: Social welfare (total payoff)
-        social_welfare = sum(payoffs.values())
-        
-        # Criteria 2: Fairness (negative variance of payoffs)
-        payoff_values = list(payoffs.values())
-        mean_payoff = sum(payoff_values) / len(payoff_values)
-        variance = sum((p - mean_payoff)**2 for p in payoff_values) / len(payoff_values)
-        fairness_score = -variance
-        
-        # Criteria 3: Efficiency (number of agents that can go)
-        efficiency_score = sum(profile) * 10
-        
-        # Criteria 4: Safety (negative collision count)
-        conflicts = self._precompute_conflicts(agents)
-        collision_count = sum(1 for (i,j), has_conflict in conflicts.items() 
-                            if has_conflict and profile[i] == 1 and profile[j] == 1)
-        safety_score = -collision_count * 100
-        
-        # Combined score
-        total_score = social_welfare + 0.3 * fairness_score + efficiency_score + safety_score
-        return total_score
-
-    def _greedy_fallback(self, agents: List[SimpleAgent]) -> Tuple[int,...]:
-        """Greedy fallback when no good Nash equilibrium found"""
-        n = len(agents)
-        
-        # Sort by priority (bid/wait_time ratio)
-        sorted_indices = sorted(range(n), 
-                              key=lambda i: agents[i].bid / (1 + agents[i].wait_time), reverse=True)
-        
-        profile = [0] * n
-        conflicts = self._precompute_conflicts(agents)
-        
-        # Greedily assign 'go' to highest priority agents without conflicts
-        for i in sorted_indices:
-            # Check if agent i conflicts with any already assigned 'go' agents
-            has_conflict = any(profile[j] == 1 and conflicts.get((min(i,j), max(i,j)), False) 
-                             for j in range(n))
-            
-            if not has_conflict:
-                profile[i] = 1
-                
-                # Limit concurrent 'go' agents for safety
-                if sum(profile) >= min(3, n):
-                    break
-        
-        return tuple(profile)
-
-    def _profile_has_collisions(self, agents: List[SimpleAgent], profile: Tuple[int,...]) -> bool:
-        """Check if profile has collisions"""
-        conflicts = self._precompute_conflicts(agents)
-        
-        for (i,j), has_conflict in conflicts.items():
-            if has_conflict and profile[i] == 1 and profile[j] == 1:
+    def _detect_platoon_conflict(self, mi: Dict, mj: Dict) -> bool:
+        """Detect conflicts involving platoons with enhanced spacing requirements"""
+        # Platoons need more space and time
+        if mi['is_platoon'] or mj['is_platoon']:
+            # Stricter time window for platoons
+            if abs(mi['eta'] - mj['eta']) < self.dt_conflict * 1.5:
                 return True
+        
         return False
 
-    # ---------- Main Entry Point ----------
-    def handle_deadlock(self, agents: List[SimpleAgent], current_time: float) -> Dict[str,str]:
-        """Main entry point - pause system during deadlock until all participants pass"""
+    def _detect_following_conflict(self, mi: Dict, mj: Dict) -> bool:
+        """Detect conflicts between vehicles that might be following each other"""
+        state_i, state_j = mi['state'], mj['state']
         
-        # If deadlock is active, manage the resolution process
-        if self.deadlock_state.is_active:
-            print(f"🔒 DEADLOCK ACTIVE - Managing resolution (Group {self.deadlock_state.current_group_index + 1}/{len(self.deadlock_state.resolution_order)})")
-            return self._manage_active_deadlock(agents, current_time)
-        
-        # Check for new deadlock
-        deadlocked_agents = self.detect_deadlock(agents, current_time)
-        if not deadlocked_agents:
-            return {}  # No deadlock, allow normal operation
-        
-        # Apply cooldown to prevent rapid Nash re-computation
-        if current_time - self.last_nash_resolution_time < self.nash_resolution_cooldown:
-            print(f"🕐 DEADLOCK COOLDOWN - Waiting {self.nash_resolution_cooldown - (current_time - self.last_nash_resolution_time):.1f}s")
-            return {}
-            
-        print(f"🚨 NEW DEADLOCK DETECTED - PAUSING SYSTEM")
-        print(f"   Participants: {[a.id for a in deadlocked_agents]}")
-        print(f"   Positions: {[(a.id, f'({a.position[0]:.1f}, {a.position[1]:.1f})') for a in deadlocked_agents]}")
-        print(f"   Speeds: {[(a.id, f'{a.speed:.2f}m/s') for a in deadlocked_agents]}")
-        
-        # Initialize deadlock state and create resolution order
-        self._initialize_deadlock_resolution(deadlocked_agents, current_time)
-        
-        # Return initial actions for deadlock resolution
-        return self._manage_active_deadlock(agents, current_time)
-
-    def _initialize_deadlock_resolution(self, deadlocked_agents: List[SimpleAgent], current_time: float):
-        """Initialize deadlock resolution state"""
-        print(f"🎯 Creating Nash-based resolution order for {len(deadlocked_agents)} agents")
-        
-        # Find Nash equilibria and create resolution order
-        nash_profiles = self.find_pure_nash(deadlocked_agents)
-        chosen_profile = self._select_best_nash_profile(deadlocked_agents, nash_profiles)
-        if chosen_profile is None:
-            chosen_profile = self._greedy_fallback(deadlocked_agents)
-        
-        # Create sequential resolution order
-        resolution_order = self._convert_profile_to_sequence(deadlocked_agents, chosen_profile)
-        
-        # Initialize deadlock state
-        self.deadlock_state = DeadlockState(
-            is_active=True,
-            participants=[agent.id for agent in deadlocked_agents],
-            detection_time=current_time,
-            resolution_order=resolution_order,
-            current_group_index=0,
-            group_start_time=current_time
-        )
-        
-        self.last_nash_resolution_time = current_time
-        
-        print(f"📋 Deadlock resolution order created:")
-        for i, group in enumerate(resolution_order):
-            print(f"   Group {i+1}: {group}")
-        print(f"🔒 SYSTEM PAUSED - Only deadlock participants can proceed")
-
-    def _manage_active_deadlock(self, agents: List[SimpleAgent], current_time: float) -> Dict[str,str]:
-        """Manage active deadlock resolution"""
-        if not self.deadlock_state.is_active:
-            return {}
-        
-        # Check if all deadlock participants have passed through
-        if self._all_participants_have_passed(agents):
-            print("✅ All deadlock participants have passed - RESUMING SYSTEM")
-            self.deadlock_state = DeadlockState()  # Reset to inactive
-            return {}  # Allow normal operation to resume
-        
-        # Execute current group in resolution order
-        actions = self._execute_deadlock_resolution_step(agents, current_time)
-        
-        # CRITICAL: Pause all non-participant agents
-        return self._apply_system_pause_for_non_participants(agents, actions)
-
-    def _all_participants_have_passed(self, agents: List[SimpleAgent]) -> bool:
-        """Check if all deadlock participants have passed through the intersection"""
-        # Get current agent IDs in the system
-        current_agent_ids = {a.id for a in agents}
-        
-        # Check each participant
-        for participant_id in self.deadlock_state.participants:
-            if participant_id in current_agent_ids:
-                # Find the agent
-                participant_agent = next(a for a in agents if a.id == participant_id)
-                
-                # If still in intersection, not all have passed
-                if self._in_intersection(participant_agent.position):
-                    return False
-        
-        # All participants have either left the intersection or left the system
-        return True
-
-    def _execute_deadlock_resolution_step(self, agents: List[SimpleAgent], current_time: float) -> Dict[str,str]:
-        """Execute current step of deadlock resolution with fallback for wait agents"""
-        if not self.deadlock_state.resolution_order:
-            return {}
-        
-        # Get current group
-        if self.deadlock_state.current_group_index >= len(self.deadlock_state.resolution_order):
-            return self._wait_for_intersection_clearance(agents)
-        
-        current_group = self.deadlock_state.resolution_order[self.deadlock_state.current_group_index]
-        
-        # Check if current group has COMPLETELY cleared the intersection
-        current_group_in_intersection = [
-            agent_id for agent_id in current_group 
-            if any(a.id == agent_id and self._in_intersection(a.position) for a in agents)
-        ]
-        
-        # IMMEDIATE SWITCHING: Advance as soon as current group clears intersection
-        group_elapsed = current_time - self.deadlock_state.group_start_time
-        should_advance = (
-            len(current_group_in_intersection) == 0 or  # All cleared immediately
-            group_elapsed >= 2.0  # Safety timeout (reduced from 4.0)
-        )
-        
-        if should_advance and self.deadlock_state.current_group_index < len(self.deadlock_state.resolution_order) - 1:
-            self.deadlock_state.current_group_index += 1
-            self.deadlock_state.group_start_time = current_time
-            current_group = self.deadlock_state.resolution_order[self.deadlock_state.current_group_index]
-            print(f"🚦 Deadlock resolution: IMMEDIATELY advancing to group {self.deadlock_state.current_group_index + 1}")
-        
-        # Generate actions for current group with fallback logic
-        actions = {}
-        go_agents = []
-        wait_agents = []
-        
-        for agent in agents:
-            if agent.id in self.deadlock_state.participants:
-                if agent.id in current_group:
-                    actions[agent.id] = 'go'
-                    go_agents.append(agent.id)
-                else:
-                    # Check if wait agent needs to fall back
-                    needs_fallback = self._agent_needs_fallback(agent, agents, current_group)
-                    if needs_fallback:
-                        actions[agent.id] = 'fallback'
-                        print(f"🔙 Agent {agent.id} falling back to clear path")
-                    else:
-                        actions[agent.id] = 'wait'
-                wait_agents.append(agent.id)
-        
-        print(f"🎮 Group {self.deadlock_state.current_group_index + 1} actions:")
-        print(f"   GO: {go_agents}")
-        print(f"   WAIT/FALLBACK: {wait_agents}")
-        print(f"   Still in intersection: {current_group_in_intersection}")
-        
-        return actions
-
-    def _agent_needs_fallback(self, wait_agent: SimpleAgent, all_agents: List[SimpleAgent], 
-                         current_go_group: List[str]) -> bool:
-        """Determine if a waiting agent needs to fall back to clear the path"""
-        # Find agents in current go group
-        go_agents = [a for a in all_agents if a.id in current_go_group]
-        
-        if not go_agents:
+        if not state_i or not state_j:
             return False
         
-        # Check if wait agent is blocking any go agent
-        for go_agent in go_agents:
-            # Calculate distance between wait agent and go agent
-            distance = math.hypot(
-                wait_agent.position[0] - go_agent.position[0],
-                wait_agent.position[1] - go_agent.position[1]
-            )
-            
-            # If they're close (within blocking distance), wait agent should fall back
-            if distance < 8.0:  # 8 meters blocking threshold
-                print(f"🚧 Agent {wait_agent.id} blocking {go_agent.id} (distance: {distance:.1f}m)")
-                return True
+        # Check if vehicles are in similar locations (potential following)
+        loc_i = state_i.get('location', [0, 0, 0])
+        loc_j = state_j.get('location', [0, 0, 0])
         
-        # Check if wait agent is in intersection and could block the path
-        if self._in_intersection(wait_agent.position):
-            print(f"🚧 Agent {wait_agent.id} in intersection - needs fallback")
-            return True
+        distance = math.sqrt((loc_i[0] - loc_j[0])**2 + (loc_i[1] - loc_j[1])**2)
+        
+        if distance < self.min_safe_distance:
+            # Check if moving in similar directions
+            vel_i = state_i.get('velocity', [0, 0, 0])
+            vel_j = state_j.get('velocity', [0, 0, 0])
+            
+            speed_i = math.sqrt(vel_i[0]**2 + vel_i[1]**2)
+            speed_j = math.sqrt(vel_j[0]**2 + vel_j[1]**2)
+            
+            if speed_i > 0.5 and speed_j > 0.5:
+                # Calculate velocity similarity
+                dot_product = vel_i[0]*vel_j[0] + vel_i[1]*vel_j[1]
+                magnitude_product = speed_i * speed_j
+                
+                if magnitude_product > 0:
+                    cosine_similarity = dot_product / magnitude_product
+                    if cosine_similarity > self.velocity_similarity_threshold:
+                        return True
         
         return False
 
-    def _wait_for_intersection_clearance(self, agents: List[SimpleAgent]) -> Dict[str,str]:
-        """Wait for all participants to clear intersection after resolution"""
-        actions = {}
-        
-        # Allow all remaining participants to continue
-        for agent in agents:
-            if agent.id in self.deadlock_state.participants:
-                actions[agent.id] = 'go'
-        
-        return actions
+    # === MWIS：精确DFS（n<=max_exact） ===
+    def _mwis_exact(self, weights: List[float], adj: List[Set[int]]) -> List[int]:
+        n = len(weights)
+        best_sum = -1.0
+        best_set: List[int] = []
 
-    def _apply_system_pause_for_non_participants(self, agents: List[SimpleAgent], 
-                                               participant_actions: Dict[str,str]) -> Dict[str,str]:
-        """Apply system-wide pause: only deadlock participants can act"""
-        all_actions = {}
+        def dfs(idx: int, chosen: List[int], banned: Set[int], cur_sum: float):
+            nonlocal best_sum, best_set
+            if idx == n:
+                if cur_sum > best_sum:
+                    best_sum = cur_sum
+                    best_set = chosen.copy()
+                return
+            if idx in banned:
+                dfs(idx+1, chosen, banned, cur_sum)
+                return
+            # 分支上界（粗略剪枝）
+            # 这里可加更强上界估计；先省略
+            # 选择 idx
+            ok = True
+            for k in chosen:
+                if idx in adj[k] or k in adj[idx]:
+                    ok = False
+                    break
+            if ok:
+                new_banned = banned.union(adj[idx])
+                dfs(idx+1, chosen+[idx], new_banned, cur_sum + weights[idx])
+            # 不选 idx
+            dfs(idx+1, chosen, banned, cur_sum)
+
+        dfs(0, [], set(), 0.0)
+        return best_set
+
+    # === MWIS：贪心近似（n>max_exact） ===
+    def _mwis_greedy(self, weights: List[float], adj: List[Set[int]]) -> List[int]:
+        order = sorted(range(len(weights)), key=lambda i: weights[i], reverse=True)
+        selected: List[int] = []
+        blocked: Set[int] = set()
+        for i in order:
+            if i in blocked:
+                continue
+            # 与当前已选是否冲突
+            conflict = any((i in adj[j]) or (j in adj[i]) for j in selected)
+            if not conflict:
+                selected.append(i)
+                blocked.update(adj[i])
+        return selected
+
+    def _solve_mwis_adaptive(self, weights: List[float], adj: List[Set[int]], 
+                           conflict_analysis: Dict) -> List[int]:
+        """Adaptive MWIS solver selection based on problem characteristics"""
+        n = len(weights)
         
-        for agent in agents:
-            if agent.id in self.deadlock_state.participants:
-                # Use resolution actions for participants
-                all_actions[agent.id] = participant_actions.get(agent.id, 'wait')
+        # Enhanced selection criteria
+        if n <= self.max_exact:
+            self.stats['mwis_exact_calls'] += 1
+            return self._mwis_exact_enhanced(weights, adj)
+        else:
+            self.stats['mwis_greedy_calls'] += 1
+            # Choose greedy variant based on conflict density
+            total_conflicts = sum(conflict_analysis.values())
+            conflict_density = total_conflicts / (n * (n-1) / 2) if n > 1 else 0
+            
+            if conflict_density > 0.3:  # High conflict density
+                return self._mwis_greedy_weighted(weights, adj)
             else:
-                # PAUSE: All non-participants must wait
-                all_actions[agent.id] = 'wait'
-        
-        return all_actions
+                return self._mwis_greedy(weights, adj)
 
-    def _convert_profile_to_sequence(self, agents: List[SimpleAgent], profile: Tuple[int,...]) -> List[List[str]]:
-        """Convert Nash profile to sequential passing order"""
-        if not profile or len(profile) != len(agents):
-            # Fallback: sequential order
-            return [[agent.id] for agent in agents]
+    # === MWIS：精确DFS（增强版） ===
+    def _mwis_exact_enhanced(self, weights: List[float], adj: List[Set[int]]) -> List[int]:
+        """Enhanced exact MWIS with better pruning and memoization"""
+        n = len(weights)
+        best_sum = -1.0
+        best_set: List[int] = []
         
-        # Group agents by their actions
-        go_agents = []
-        wait_agents = []
+        # Enhanced pruning with upper bound estimation
+        def calculate_upper_bound(remaining_vertices: Set[int], current_sum: float) -> float:
+            # Greedy upper bound: sort remaining by weight/degree ratio
+            vertex_scores = []
+            for v in remaining_vertices:
+                degree_in_remaining = len(adj[v] & remaining_vertices)
+                score = weights[v] / (degree_in_remaining + 1)
+                vertex_scores.append((score, weights[v], v))
+            
+            vertex_scores.sort(reverse=True)
+            
+            upper_bound = current_sum
+            used_vertices = set()
+            
+            for score, weight, v in vertex_scores:
+                if v not in used_vertices:
+                    upper_bound += weight
+                    used_vertices.add(v)
+                    used_vertices.update(adj[v] & remaining_vertices)
+            
+            return upper_bound
+
+        def dfs_enhanced(idx: int, chosen: List[int], banned: Set[int], cur_sum: float, remaining: Set[int]):
+            nonlocal best_sum, best_set
+            
+            if idx == n:
+                if cur_sum > best_sum:
+                    best_sum = cur_sum
+                    best_set = chosen.copy()
+                return
+            
+            # Enhanced pruning with upper bound
+            if calculate_upper_bound(remaining, cur_sum) <= best_sum:
+                return
+            
+            if idx in banned:
+                remaining.discard(idx)
+                dfs_enhanced(idx+1, chosen, banned, cur_sum, remaining)
+                return
+            
+            # Try not selecting idx first (better pruning order)
+            remaining_copy = remaining.copy()
+            remaining_copy.discard(idx)
+            dfs_enhanced(idx+1, chosen, banned, cur_sum, remaining_copy)
+            
+            # Try selecting idx
+            conflict_with_chosen = any(idx in adj[k] or k in adj[idx] for k in chosen)
+            if not conflict_with_chosen:
+                new_banned = banned | adj[idx]
+                new_remaining = remaining - adj[idx] - {idx}
+                dfs_enhanced(idx+1, chosen + [idx], new_banned, cur_sum + weights[idx], new_remaining)
+
+        initial_remaining = set(range(n))
+        dfs_enhanced(0, [], set(), 0.0, initial_remaining)
+        return best_set
+
+    # === MWIS：贪心近似（加权版） ===
+    def _mwis_greedy_weighted(self, weights: List[float], adj: List[Set[int]]) -> List[int]:
+        """Enhanced greedy MWIS considering weight-to-degree ratio"""
+        n = len(weights)
+        selected: List[int] = []
+        available = set(range(n))
         
-        for i, agent in enumerate(agents):
-            if profile[i] == 1:  # Go
-                go_agents.append(agent.id)
-            else:  # Wait
-                wait_agents.append(agent.id)
+        while available:
+            # Calculate weight-to-degree ratio for remaining vertices
+            best_vertex = -1
+            best_ratio = -1
+            
+            for v in available:
+                degree = len(adj[v] & available)
+                ratio = weights[v] / (degree + 1)  # +1 to avoid division by zero
+                
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_vertex = v
+            
+            if best_vertex == -1:
+                break
+            
+            # Select the best vertex
+            selected.append(best_vertex)
+            
+            # Remove selected vertex and its neighbors
+            to_remove = {best_vertex} | (adj[best_vertex] & available)
+            available -= to_remove
         
-        # Create resolution order
-        resolution_order = []
+        return selected
+
+    # === 辅助：抽取数据/封装返回 ===
+    def _get_bid(self, c) -> float:
+        # 兼容不同字段名
+        if hasattr(c, 'bid'):
+            bid_obj = getattr(c, 'bid')
+            if hasattr(bid_obj, 'value'):
+                return float(bid_obj.value)
+            return float(bid_obj or 0.0)
+        if isinstance(c, dict) and 'bid' in c:
+            return float(c['bid'] or 0.0)
+        return 0.0
+
+    def _get_agent(self, c):
+        if hasattr(c, 'participant'):
+            return getattr(c, 'participant')
+        if isinstance(c, dict):
+            return c.get('participant')
+        return c  # 兜底
+
+    def _lookup_state(self, agent, vehicle_states: Dict[str, Dict], platoon_manager=None) -> Dict:
+        """
+        返回包含至少 {location:(x,y,z), speed:float, turn(optional)} 的state字典。
+        - 若 agent 是 platoon，则取其 leader 的state。
+        - 若找不到，返回空dict。
+        """
+        if agent is None:
+            return {}
+        agent_id = getattr(agent, 'id', None) or (isinstance(agent, dict) and agent.get('id'))
+        agent_type = getattr(agent, 'type', None) or (isinstance(agent, dict) and agent.get('type'))
         
-        # Add go agents as first group (they can proceed immediately)
-        if go_agents:
-            resolution_order.append(go_agents)
+        if agent_type == 'platoon' and platoon_manager is not None:
+            leader_id = getattr(agent, 'data', {}).get('leader_id', None) if hasattr(agent, 'data') else (agent.get('data', {}) if isinstance(agent, dict) else {}).get('leader_id')
+            if leader_id and str(leader_id) in vehicle_states:
+                state = vehicle_states[str(leader_id)]
+                # Calculate speed from velocity
+                velocity = state.get('velocity', [0, 0, 0])
+                speed = math.sqrt(velocity[0]**2 + velocity[1]**2) if velocity else 0.0
+                return {**state, 'speed': speed}
         
-        # Add wait agents as subsequent groups
-        # For safety, split wait agents into smaller groups if many
-        if wait_agents:
-            # Split into groups of max 2 agents for safety
-            for i in range(0, len(wait_agents), 2):
-                group = wait_agents[i:i+2]
-                resolution_order.append(group)
+        if agent_id and str(agent_id) in vehicle_states:
+            state = vehicle_states[str(agent_id)]
+            # Calculate speed from velocity
+            velocity = state.get('velocity', [0, 0, 0])
+            speed = math.sqrt(velocity[0]**2 + velocity[1]**2) if velocity else 0.0
+            return {**state, 'speed': speed}
+        return {}
+
+    def _infer_turn(self, agent, state: Dict) -> str:
+        """
+        尝试从 agent/state 推断转向：'left'/'right'/'straight'。
+        若无信息，返回 'straight' 以保守判定。
+        """
+        # 1) 优先用state内已有标注
+        turn = (state or {}).get('turn') if isinstance(state, dict) else None
+        if turn:
+            return str(turn).lower()
+        # 2) 从agent.data里推断
+        data = getattr(agent, 'data', {}) if agent is not None else {}
+        if isinstance(data, dict):
+            if 'turn' in data:
+                return str(data['turn']).lower()
+            if 'planned_path' in data:
+                # TODO: 根据 planned_path 起终向量粗判转向；这里先简化
+                pass
+        return 'straight'
+
+    def _to_winner(self, c, conflict_action: str, rank: int) -> AuctionWinner:
+        bid_value = self._get_bid(c)
+        participant = self._get_agent(c)
         
-        # Ensure we have at least one group
-        if not resolution_order:
-            resolution_order = [[agent.id for agent in agents]]
+        # Create bid object if needed
+        if hasattr(c, 'bid'):
+            bid_obj = c.bid
+        else:
+            # Create a simple bid object
+            class SimpleBid:
+                def __init__(self, value):
+                    self.value = value
+            bid_obj = SimpleBid(bid_value)
         
-        return resolution_order
+        # 兼容已有 AuctionWinner；若需要保留c的其它字段，可在此扩展
+        return AuctionWinner(
+            participant=participant,
+            bid=bid_obj,
+            rank=rank,
+            conflict_action=conflict_action
+        )
+
+    # === 性能统计相关 ===
+    def _update_stats(self, resolution_time: float, graph_size: int, conflict_analysis: Dict):
+        """Update performance statistics"""
+        self.stats['total_resolutions'] += 1
+        self.stats['conflicts_detected'] += sum(conflict_analysis.values())
+        
+        # Update average resolution time
+        old_avg = self.stats['avg_resolution_time']
+        new_avg = (old_avg * (self.stats['total_resolutions'] - 1) + resolution_time) / self.stats['total_resolutions']
+        self.stats['avg_resolution_time'] = new_avg
+
+    def get_performance_stats(self) -> Dict:
+        """Get comprehensive performance statistics"""
+        return {
+            **self.stats,
+            'exact_vs_greedy_ratio': (
+                self.stats['mwis_exact_calls'] / max(1, self.stats['mwis_greedy_calls'])
+            ),
+            'avg_conflicts_per_resolution': (
+                self.stats['conflicts_detected'] / max(1, self.stats['total_resolutions'])
+            )
+        }

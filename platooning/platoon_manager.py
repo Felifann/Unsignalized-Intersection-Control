@@ -10,8 +10,8 @@ class PlatoonConfiguration:
     def __init__(self):
         self.max_platoon_size = 4
         self.min_platoon_size = 2
-        self.max_following_distance = 25.0
-        self.target_following_distance = 8.0
+        self.max_following_distance = 20.0  # Reduced from 25.0 for tighter formation
+        self.target_following_distance = 6.0  # Reduced from 8.0 for closer following
         self.update_interval = 1.0
         self.intersection_center = (-188.9, -89.7, 0.0)
 
