@@ -56,7 +56,7 @@ class TrafficController:
         
         current_controlled.update(auction_controlled)
         
-        # 3. 恢复不再被控制的车辆
+        # 3. 恢复不再被控制的车辆 (using expanded vehicle state detection)
         self._restore_uncontrolled_vehicles(current_controlled)
         
         # 4. 更新当前控制状态
@@ -93,23 +93,26 @@ class TrafficController:
             return 'wait'  # 其他优先级都等待
 
     def _apply_auction_based_control(self, auction_winners: List, platoon_manager=None) -> Set[str]:
-        """Apply control based on auction results"""
+        """Apply control based on auction results with traffic flow control awareness"""
         controlled_vehicles = set()
         
         if not auction_winners:
             return controlled_vehicles
         
-        print(f"🚦 Normal auction control")
+        print(f"🚦 Auction control with traffic flow awareness")
         for winner in auction_winners:
             participant = winner.participant
             
-            # Determine control action (go/wait only)
-            control_action = self._get_control_action_by_rank(winner.rank)
+            # Use the conflict_action determined by Nash solver (includes traffic flow control)
+            control_action = winner.conflict_action
             
             # Apply control
             if participant.type == 'vehicle':
                 vehicle_id = str(participant.id)
-                print(f"   🚗 Vehicle {vehicle_id}: {control_action}")
+                action_emoji = "🟢" if control_action == 'go' else "🔴"
+                reason = "traffic flow control" if control_action == 'wait' and winner.rank > 0 else "priority"
+                print(f"   🚗 Vehicle {vehicle_id}: {control_action} {action_emoji} ({reason})")
+                
                 if self._apply_single_vehicle_control(vehicle_id, winner.rank, 
                                                     winner.bid.value, control_action):
                     controlled_vehicles.add(vehicle_id)
@@ -118,7 +121,10 @@ class TrafficController:
                 vehicles = participant.data.get('vehicles', [])
                 if vehicles:
                     leader_id = str(vehicles[0]['id'])
-                    print(f"   🚛 Platoon {participant.id} (leader {leader_id}): {control_action}")
+                    action_emoji = "🟢" if control_action == 'go' else "🔴"
+                    reason = "traffic flow control" if control_action == 'wait' and winner.rank > 0 else "priority"
+                    print(f"   🚛 Platoon {participant.id} (leader {leader_id}): {control_action} {action_emoji} ({reason})")
+                    
                     platoon_vehicles = self._apply_platoon_control(
                         participant, winner.rank, winner.bid.value, control_action
                     )
@@ -165,7 +171,7 @@ class TrafficController:
                     'follow_distance': 1.5,   # Normal following distance for leader
                     'ignore_lights': 100.0,   
                     'ignore_signs': 100.0,    
-                    'ignore_vehicles': 10.0   # Limited vehicle ignoring for leader
+                    'ignore_vehicles': 50.0   # Limited vehicle ignoring for leader
                 }
             else:
                 return {
@@ -173,7 +179,7 @@ class TrafficController:
                     'follow_distance': 1.2,   
                     'ignore_lights': 100.0,   
                     'ignore_signs': 100.0,    
-                    'ignore_vehicles': 0.0
+                    'ignore_vehicles': 50.0
                 }
 
     def _restore_uncontrolled_vehicles(self, current_controlled: Set[str]):
@@ -353,7 +359,8 @@ class TrafficController:
             self.traffic_manager.ignore_vehicles_percentage(
                 carla_vehicle, params['ignore_vehicles']
             )
-
+        
+            
             # Record control state
             self.controlled_vehicles[vehicle_id] = {
                 'rank': rank,
@@ -411,7 +418,7 @@ class TrafficController:
                 'follow_distance': 1.2,   
                 'ignore_lights': 100.0,   
                 'ignore_signs': 100.0,    
-                'ignore_vehicles': 0.0
+                'ignore_vehicles': 50.0
                 }
 
     def _restore_uncontrolled_vehicles(self, current_controlled: Set[str]):
@@ -464,7 +471,7 @@ class TrafficController:
         return distance_to_center > exit_threshold
 
     def get_control_stats(self) -> Dict[str, Any]:
-        """Get control statistics including deadlock state and auction pause info"""
+        """Get control statistics"""
         go_vehicles = 0
         waiting_vehicles = 0
         platoon_members = 0
@@ -481,14 +488,13 @@ class TrafficController:
                 if control_info.get('is_leader', False):
                     leaders += 1
         
-        
         return {
             'total_controlled': len(self.controlled_vehicles),
             'go_vehicles': go_vehicles,
             'waiting_vehicles': waiting_vehicles,
             'platoon_members': platoon_members,
             'platoon_leaders': leaders,
-            'active_controls': list(self.controlled_vehicles.keys()),
+            'active_controls': list(self.controlled_vehicles.keys())
         }
 
     def _apply_single_vehicle_control(self, vehicle_id: str, rank: int, bid_value: float, 

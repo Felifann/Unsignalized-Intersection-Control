@@ -64,8 +64,11 @@ print(f"=== 无信号灯交叉路口仿真 (集成拍卖系统) ===")
 
 # 生成交通流
 scenario.reset_scenario()
-scenario.show_intersection_area()
-scenario.show_intersection_area1()
+scenario.show_intersection_area()      # Show larger general intersection area
+scenario.show_intersection_area1()     # Show smaller core deadlock detection area
+
+print("🔍 死锁检测区域：使用小型核心区域 (蓝色边框)")
+print("🚦 一般拍卖区域：使用大型检测区域 (绿色边框)")
 
 # 在仿真开始前添加
 from traffic_light_override import force_vehicles_run_lights, freeze_lights_green
@@ -86,14 +89,24 @@ try:
         vehicle_states = state_extractor.get_vehicle_states()
         
         if step % unified_update_interval == 0:
-            # 1. 更新车队分组
-            platoon_manager.update()
-            
-            # 2. 更新拍卖系统
-            auction_winners = auction_engine.update(vehicle_states, platoon_manager)
-            
-            # 3. 更新交通控制
-            traffic_controller.update_control(platoon_manager, auction_engine)
+            try:
+                # 1. 更新车队分组
+                platoon_manager.update()
+                
+                # 2. 更新拍卖系统
+                auction_winners = auction_engine.update(vehicle_states, platoon_manager)
+                
+                # 3. 更新交通控制
+                traffic_controller.update_control(platoon_manager, auction_engine)
+                
+            except Exception as e:
+                if "deadlock" in str(e).lower():
+                    print(f"\n🚨 Deadlock detected: {e}")
+                    print("🛑 Stopping simulation due to deadlock...")
+                    break
+                else:
+                    print(f"⚠️  Error in simulation update: {e}")
+                    # Continue simulation for other errors
         
         # 统一打印频率：所有状态信息同时输出
         if step % unified_print_interval == 0:
@@ -110,7 +123,25 @@ try:
             vehicles_in_junction = [v for v in vehicle_states if v['is_junction']]
             
             print(f"📊 基础信息: FPS:{actual_fps:.1f}, 车辆总数:{len(vehicles_in_radius)}, 路口内:{len(vehicles_in_junction)}")
-        
+            
+            # Enhanced deadlock detection status with traffic flow control info
+            nash_stats = nash_solver.get_performance_stats()
+            if nash_stats.get('deadlock_detection_enabled', False):
+                history_length = nash_stats.get('deadlock_history_length', 0)
+                deadlocks_detected = nash_stats.get('deadlocks_detected', 0)
+                core_half_size = nash_stats.get('deadlock_core_half_size', 0)
+                square_size = core_half_size * 2
+                
+                # Traffic flow control status
+                traffic_control_active = nash_stats.get('traffic_flow_control_active', False)
+                entry_blocks_activated = nash_stats.get('entry_blocks_activated', 0)
+                entry_blocks_released = nash_stats.get('entry_blocks_released', 0)
+                
+                control_status = "🚧 ACTIVE" if traffic_control_active else "🟢 NORMAL"
+                
+                print(f"🔍 死锁检测: 激活中 | 核心方形区域: {square_size:.1f}m x {square_size:.1f}m | 历史记录: {history_length} | 检测到: {deadlocks_detected}")
+                print(f"🚦 交通流控制: {control_status} | 阻止进入: {entry_blocks_activated} | 释放阻止: {entry_blocks_released}")
+
             # 1. 车队管理状态
             # platoon_manager.print_platoon_info()
             
@@ -184,5 +215,18 @@ try:
 
 except KeyboardInterrupt:
     print("\n仿真已手动终止。")
+except Exception as e:
+    if "deadlock" in str(e).lower():
+        print(f"\n🚨 仿真因死锁而终止: {e}")
+        # Print final deadlock statistics
+        nash_stats = nash_solver.get_performance_stats()
+        print(f"📈 最终统计:")
+        print(f"   总冲突解决: {nash_stats.get('total_resolutions', 0)}")
+        print(f"   检测到死锁: {nash_stats.get('deadlocks_detected', 0)}")
+        print(f"   平均解决时间: {nash_stats.get('avg_resolution_time', 0):.3f}s")
+    else:
+        print(f"\n❌ 仿真意外终止: {e}")
+finally:
+    print("\n🏁 仿真结束")
 
 

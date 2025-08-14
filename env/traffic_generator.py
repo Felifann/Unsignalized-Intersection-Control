@@ -43,10 +43,9 @@ class TrafficGenerator:
         traffic_manager.set_synchronous_mode(True)
         
         # 全局设置
-        traffic_manager.global_percentage_speed_difference(-40.0)  # 全局提速40%
+        traffic_manager.global_percentage_speed_difference(-50.0)  # 全局提速50%
         traffic_manager.set_global_distance_to_leading_vehicle(1.5)  # 跟车距离1.5米
-        traffic_manager.set_random_device_seed(42)  # 固定随机种子
-        
+
         self.vehicles = []
         for i in range(num_vehicles):
             transform = spawn_points[i]
@@ -54,11 +53,9 @@ class TrafficGenerator:
             if vehicle is not None:
                 vehicle.set_autopilot(True, traffic_manager.get_port())
                 
-                # 随机化每辆车的行为
-                if random.random() < 0.3:  # 30%的车更激进
-                    traffic_manager.vehicle_percentage_speed_difference(vehicle, -60.0)
-                    traffic_manager.distance_to_leading_vehicle(vehicle, 0.8)
-                
+                # 设置每辆车的 ignore_vehicles_percentage
+                traffic_manager.ignore_vehicles_percentage(vehicle, 10.0)
+
                 self.vehicles.append(vehicle)
 
                 # 新增：为每辆车添加碰撞传感器
