@@ -39,18 +39,48 @@ state_extractor = StateExtractor(scenario.carla)
 # 初始化车队管理 - 传入state_extractor用于导航
 platoon_manager = PlatoonManager(state_extractor)
 
+# ===== 可配置参数 (用于DRL训练) =====
+# 这些参数可以通过DRL训练进行优化
+class DRLConfig:
+    """DRL可训练的配置参数"""
+    MAX_GO_AGENTS = 8  # 最大同时通行代理数量 (可训练范围: 3-8)
+    CONFLICT_TIME_WINDOW = 2.0  # 冲突时间窗口 (可训练范围: 1.0-5.0)
+    
+    @classmethod
+    def update_from_drl_params(cls, max_go_agents=None, conflict_time_window=None):
+        """从DRL训练参数更新配置"""
+        if max_go_agents is not None:
+            cls.MAX_GO_AGENTS = max(3, min(8, int(max_go_agents)))  # 限制在合理范围内
+        if conflict_time_window is not None:
+            cls.CONFLICT_TIME_WINDOW = max(1.0, min(5.0, float(conflict_time_window)))
+        
+        print(f"🤖 DRL配置更新: MAX_GO_AGENTS={cls.MAX_GO_AGENTS}, CONFLICT_TIME_WINDOW={cls.CONFLICT_TIME_WINDOW}")
+
 # 初始化分布式拍卖引擎 - 传入state_extractor
-auction_engine = DecentralizedAuctionEngine(state_extractor=state_extractor)
+auction_engine = DecentralizedAuctionEngine(
+    state_extractor=state_extractor, 
+    max_go_agents=DRLConfig.MAX_GO_AGENTS
+)
 
 # 初始化Nash deadlock solver
 nash_solver = DeadlockNashSolver(
     max_exact=15,
-    conflict_time_window=2.0,
-    intersection_center=(-188.9, -89.7, 0.0)
+    conflict_time_window=DRLConfig.CONFLICT_TIME_WINDOW,
+    intersection_center=(-188.9, -89.7, 0.0),
+    max_go_agents=DRLConfig.MAX_GO_AGENTS  # Add limit parameter
 )
 
+# 在主循环开始前添加动态配置更新
+def update_system_configuration():
+    """Update all system components with current DRL configuration"""
+    auction_engine.max_go_agents = DRLConfig.MAX_GO_AGENTS
+    auction_engine.evaluator.max_go_agents = DRLConfig.MAX_GO_AGENTS
+    nash_solver.max_go_agents = DRLConfig.MAX_GO_AGENTS
+    traffic_controller.max_go_agents = DRLConfig.MAX_GO_AGENTS
+    print(f"🔄 System configuration updated: MAX_GO_AGENTS={DRLConfig.MAX_GO_AGENTS}")
+
 # 初始化交通控制器
-traffic_controller = TrafficController(scenario.carla, state_extractor)
+traffic_controller = TrafficController(scenario.carla, state_extractor, max_go_agents=DRLConfig.MAX_GO_AGENTS)
 
 # REACTIVATED: Set platoon manager reference
 traffic_controller.set_platoon_manager(platoon_manager)
@@ -90,6 +120,10 @@ try:
         
         if step % unified_update_interval == 0:
             try:
+                # Optional: Check for configuration updates every few cycles
+                if step % (unified_update_interval * 10) == 0:  # Every 100 steps
+                    update_system_configuration()
+                
                 # 1. 更新车队分组
                 platoon_manager.update()
                 
@@ -124,24 +158,6 @@ try:
             
             print(f"📊 基础信息: FPS:{actual_fps:.1f}, 车辆总数:{len(vehicles_in_radius)}, 路口内:{len(vehicles_in_junction)}")
             
-            # Enhanced deadlock detection status with traffic flow control info
-            nash_stats = nash_solver.get_performance_stats()
-            if nash_stats.get('deadlock_detection_enabled', False):
-                history_length = nash_stats.get('deadlock_history_length', 0)
-                deadlocks_detected = nash_stats.get('deadlocks_detected', 0)
-                core_half_size = nash_stats.get('deadlock_core_half_size', 0)
-                square_size = core_half_size * 2
-                
-                # Traffic flow control status
-                traffic_control_active = nash_stats.get('traffic_flow_control_active', False)
-                entry_blocks_activated = nash_stats.get('entry_blocks_activated', 0)
-                entry_blocks_released = nash_stats.get('entry_blocks_released', 0)
-                
-                control_status = "🚧 ACTIVE" if traffic_control_active else "🟢 NORMAL"
-                
-                print(f"🔍 死锁检测: 激活中 | 核心方形区域: {square_size:.1f}m x {square_size:.1f}m | 历史记录: {history_length} | 检测到: {deadlocks_detected}")
-                print(f"🚦 交通流控制: {control_status} | 阻止进入: {entry_blocks_activated} | 释放阻止: {entry_blocks_released}")
-
             # 1. 车队管理状态
             # platoon_manager.print_platoon_info()
             
@@ -218,12 +234,6 @@ except KeyboardInterrupt:
 except Exception as e:
     if "deadlock" in str(e).lower():
         print(f"\n🚨 仿真因死锁而终止: {e}")
-        # Print final deadlock statistics
-        nash_stats = nash_solver.get_performance_stats()
-        print(f"📈 最终统计:")
-        print(f"   总冲突解决: {nash_stats.get('total_resolutions', 0)}")
-        print(f"   检测到死锁: {nash_stats.get('deadlocks_detected', 0)}")
-        print(f"   平均解决时间: {nash_stats.get('avg_resolution_time', 0):.3f}s")
     else:
         print(f"\n❌ 仿真意外终止: {e}")
 finally:

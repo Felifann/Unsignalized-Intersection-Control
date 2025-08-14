@@ -9,7 +9,7 @@ class TrafficController:
     核心思想：所有控制都基于拍卖获胜者的优先级排序
     """
     
-    def __init__(self, carla_wrapper, state_extractor):
+    def __init__(self, carla_wrapper, state_extractor, max_go_agents: int = 8):
         self.carla = carla_wrapper
         self.state_extractor = state_extractor
         self.world = carla_wrapper.world
@@ -22,20 +22,27 @@ class TrafficController:
         # 控制参数
         self.default_speed_diff = -40.0  # 默认速度差异
         self.default_follow_distance = 1.5  # 默认跟车距离
-        # self.default_ignore_vehicles = 100.0  # 默认忽略信号灯
-        # self.default_ignore_signs = 100.0  # 默认忽略标志
 
         # 控制状态跟踪
         self.controlled_vehicles: Dict[str, Dict] = {}
         self.current_controlled_vehicles: Set[str] = set()
         self.platoon_manager = None
         
-        print("🎮 增强交通控制器初始化完成 - 支持车队、单车")
+        # Add configurable max go agents limit
+        self.max_go_agents = max_go_agents
+        
+        print(f"🎮 增强交通控制器初始化完成 - 支持车队、单车 (max go agents: {max_go_agents})")
 
     def set_platoon_manager(self, platoon_manager):
         """Set platoon manager reference"""
         self.platoon_manager = platoon_manager
         print("🔗 车队管理器已连接到交通控制器")
+
+    # Add method to update configuration
+    def update_max_go_agents(self, max_go_agents: int):
+        """Update the maximum go agents limit"""
+        self.max_go_agents = max_go_agents
+        print(f"🔄 Traffic controller: Updated MAX_GO_AGENTS to {max_go_agents}")
 
     def update_control(self, platoon_manager=None, auction_engine=None):
         """主控制更新函数"""
@@ -87,7 +94,7 @@ class TrafficController:
 
     def _get_control_action_by_rank(self, rank: int) -> str:
         """根据排名获取控制动作"""
-        if rank <= 4:
+        if rank <= self.max_go_agents:  # Use configurable limit
             return 'go'  # 最高优先级，直接通行
         else:
             return 'wait'  # 其他优先级都等待

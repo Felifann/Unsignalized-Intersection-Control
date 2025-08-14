@@ -58,6 +58,10 @@ def _turn_conflict(turn_i: str, turn_j: str) -> bool:
         return True
     return False
 
+class DeadlockException(Exception):
+    """Exception raised when deadlock is detected"""
+    pass
+
 class DeadlockNashSolver:
     """
     Enhanced MWIS-based deadlock solver with improved conflict detection and path analysis
@@ -68,7 +72,8 @@ class DeadlockNashSolver:
                  intersection_center: Tuple[float, float, float] = (-188.9, -89.7, 0.0),
                  intersection_radius: float = 25.0,
                  min_safe_distance: float = 5.0,
-                 speed_prediction_horizon: float = 5.0):
+                 speed_prediction_horizon: float = 5.0,
+                 max_go_agents: int = 8):  # Changed default to match DRLConfig
         self.max_exact = max_exact
         self.dt_conflict = conflict_time_window
         self.center = intersection_center
@@ -81,7 +86,7 @@ class DeadlockNashSolver:
         self.velocity_similarity_threshold = 0.3  # for detecting following behavior
         
         # Deadlock detection parameters - Use exact square area like show_intersection_area1
-        self.deadlock_detection_window = 15.0  # seconds to track for deadlock
+        self.deadlock_detection_window = 35.0  # seconds to track for deadlock
         self.deadlock_speed_threshold = 0.5  # m/s - vehicles below this are considered stopped
         self.deadlock_min_vehicles = 6  # minimum vehicles for deadlock detection
         self.deadlock_history = []  # track intersection state over time
@@ -109,6 +114,9 @@ class DeadlockNashSolver:
             'entry_blocks_activated': 0,
             'entry_blocks_released': 0
         }
+
+        # Add max go agents limit - now configurable from DRLConfig
+        self.max_go_agents = max_go_agents
 
     # === 外部调用的主入口（签名尽量与旧版一致） ===
     def resolve(self,
@@ -285,562 +293,290 @@ class DeadlockNashSolver:
         
         return adj, conflict_analysis
 
-    def _infer_turn_enhanced(self, agent, state: Dict, vehicle_states: Dict) -> str:
-        """Enhanced turn inference using velocity vectors and waypoint analysis"""
-        # 1) Existing turn inference
-        turn = self._infer_turn(agent, state)
-        if turn != 'straight':
-            return turn
-        
-        # 2) Enhanced inference using velocity direction
-        if state and 'velocity' in state and 'location' in state:
-            velocity = state['velocity']
-            location = state['location']
-            
-            # Calculate velocity-based heading
-            if abs(velocity[0]) > 0.5 or abs(velocity[1]) > 0.5:
-                velocity_heading = math.atan2(velocity[1], velocity[0])
-                
-                # Calculate direction to intersection center
-                to_center_x = self.center[0] - location[0]
-                to_center_y = self.center[1] - location[1]
-                center_heading = math.atan2(to_center_y, to_center_x)
-                
-                # Calculate relative angle
-                angle_diff = self._normalize_angle(velocity_heading - center_heading)
-                
-                if angle_diff > math.pi/4:  # 45 degrees
-                    return 'left'
-                elif angle_diff < -math.pi/4:
-                    return 'right'
-        
-        return 'straight'
-
-    def _normalize_angle(self, angle: float) -> float:
-        """Normalize angle to [-π, π]"""
-        while angle > math.pi:
-            angle -= 2 * math.pi
-        while angle < -math.pi:
-            angle += 2 * math.pi
-        return angle
-
-    def _assemble_winners_with_actions(self, candidates: List, selected_idx: List[int], 
-                                     weights: List[float], conflict_analysis: Dict) -> List[AuctionWinner]:
-        """Enhanced winner assembly with intelligent action assignment"""
-        go_set = set(selected_idx)
-        go_sorted = sorted(list(go_set), key=lambda i: weights[i], reverse=True)
-        
-        # Enhanced ranking considering conflict resolution effectiveness
-        rank_in_go = {}
-        for rank, idx in enumerate(go_sorted):
-            rank_in_go[idx] = rank + 1
-
-        winners: List[AuctionWinner] = []
-        for i, c in enumerate(candidates):
-            if i in go_set:
-                action = 'go'
-                rank = rank_in_go[i]
-            else:
-                action = 'wait'
-                rank = 0  # Wait vehicles get rank 0
-            
-            winners.append(self._to_winner(c, action, rank))
-        
-        return winners
-
-    def _assemble_winners_with_traffic_control(self, candidates: List, selected_idx: List[int], 
-                                             weights: List[float], conflict_analysis: Dict,
-                                             vehicle_states: Dict[str, Dict]) -> List[AuctionWinner]:
-        """Enhanced winner assembly with traffic flow control logic"""
-        go_set = set(selected_idx)
-        go_sorted = sorted(list(go_set), key=lambda i: weights[i], reverse=True)
-        
-        # Enhanced ranking considering conflict resolution effectiveness
-        rank_in_go = {}
-        for rank, idx in enumerate(go_sorted):
-            rank_in_go[idx] = rank + 1
-
-        winners: List[AuctionWinner] = []
-        for i, c in enumerate(candidates):
-            if i in go_set:
-                # Check if this winner should be allowed to enter core region
-                if self._should_allow_entry(c, vehicle_states):
-                    action = 'go'
-                    rank = rank_in_go[i]
-                else:
-                    # Block entry due to traffic flow control
-                    action = 'wait'
-                    rank = 0
-                    if self.region_entry_blocked:
-                        print(f"🚧 Blocking {self._get_agent_type(c)} {self._get_agent_id(c)} - region entry controlled")
-            else:
-                action = 'wait'
-                rank = 0  # Wait vehicles get rank 0
-            
-            winners.append(self._to_winner(c, action, rank))
-        
-        return winners
-
-    def _should_allow_entry(self, candidate, vehicle_states: Dict[str, Dict]) -> bool:
-        """Determine if a candidate should be allowed to enter the core region"""
-        # If traffic flow control is not active, allow entry
-        if not self.region_entry_blocked:
-            return True
-        
-        # If traffic flow control is active, check if candidate is approaching core region
-        agent = self._get_agent(candidate)
-        state = self._lookup_state(agent, vehicle_states, None)
-        
-        if not state or 'location' not in state:
-            return True  # Default to allow if no location info
-        
-        location = state['location']
-        
-        # Check if vehicle is already in core region (allow to continue)
-        if self._is_in_core_region(location):
-            return True  # Already in region, let it continue
-        
-        # Check if vehicle is approaching core region
-        if self._is_approaching_core_region(location, state):
-            return False  # Block entry to core region
-        
-        # Vehicle is far from core region, allow normal movement
+    def _turn_conflict_enhanced(self, turn_i: str, turn_j: str, 
+                          approach_i: str, approach_j: str,
+                          location_i: Tuple[float, float, float],
+                          location_j: Tuple[float, float, float]) -> bool:
+        """
+        增强转向冲突检测，基于实际路网几何和进入方向
+    
+        Args:
+            turn_i, turn_j: 转向动作 {'left', 'right', 'straight', 'u_turn'}
+            approach_i, approach_j: 进入方向 {'north', 'south', 'east', 'west'}
+            location_i, location_j: 当前位置坐标
+    
+        Returns:
+            bool: 是否存在冲突
+        """
+        # 标准化输入
+        turn_i = (turn_i or 'straight').lower()
+        turn_j = (turn_j or 'straight').lower()
+    
+        # 如果无法确定进入方向，使用位置推断
+        if not approach_i:
+            approach_i = self._infer_approach_direction(location_i)
+        if not approach_j:
+            approach_j = self._infer_approach_direction(location_j)
+    
+        # 1. 同向车辆冲突检测
+        if approach_i == approach_j:
+            return self._same_approach_conflict(turn_i, turn_j)
+    
+        # 2. 对向车辆冲突检测
+        if self._are_opposite_approaches(approach_i, approach_j):
+            return self._opposite_approach_conflict(turn_i, turn_j)
+    
+        # 3. 垂直方向车辆冲突检测
+        if self._are_perpendicular_approaches(approach_i, approach_j):
+            return self._perpendicular_approach_conflict(turn_i, turn_j, approach_i, approach_j)
+    
+        # 4. 默认保守处理：未知配置认为可能冲突
         return True
 
-    def _is_in_core_region(self, location: Tuple[float, float, float]) -> bool:
-        """Check if location is within the core blue square region"""
-        center_x, center_y = self.center[0], self.center[1]
-        half_size = self.deadlock_core_half_size
-        
-        return (
-            (center_x - half_size) <= location[0] <= (center_x + half_size) and
-            (center_y - half_size) <= location[1] <= (center_y + half_size)
-        )
-
-    def _is_approaching_core_region(self, location: Tuple[float, float, float], state: Dict) -> bool:
-        """Check if vehicle is approaching the core region"""
-        # Calculate distance to core region boundary
-        center_x, center_y = self.center[0], self.center[1]
-        half_size = self.deadlock_core_half_size
-        
-        # Distance to core region center
-        distance_to_center = math.sqrt((location[0] - center_x)**2 + (location[1] - center_y)**2)
-        
-        # Consider approaching if within 2x the core region size
-        approach_threshold = half_size * 2
-        
-        if distance_to_center <= approach_threshold:
-            # Check if moving towards the core region
-            velocity = state.get('velocity', [0, 0, 0])
-            if velocity and len(velocity) >= 2:
-                # Calculate direction vector to core center
-                to_center_x = center_x - location[0]
-                to_center_y = center_y - location[1]
-                
-                # Calculate dot product to see if moving towards center
-                dot_product = velocity[0] * to_center_x + velocity[1] * to_center_y
-                
-                # If moving towards center, consider it approaching
-                return dot_product > 0
-        
-        return False
-
-    def _get_agent_type(self, candidate) -> str:
-        """Get agent type for logging"""
-        agent = self._get_agent(candidate)
-        agent_type = getattr(agent, 'type', None)
-        return agent_type or 'vehicle'
-
-    def _get_agent_id(self, candidate) -> str:
-        """Get agent ID for logging"""
-        agent = self._get_agent(candidate)
-        agent_id = getattr(agent, 'id', None)
-        return str(agent_id) if agent_id else 'unknown'
-
-    def _handle_deadlock_detection(self):
-        """Handle detected deadlock - stop simulation"""
-        self.stats['deadlocks_detected'] += 1
-        
-        print(f"\n💀 SIMULATION STOPPED DUE TO DEADLOCK")
-        print(f"📊 Total deadlocks detected: {self.stats['deadlocks_detected']}")
-        print(f"🎯 Conflict resolutions attempted: {self.stats['total_resolutions']}")
-        print(f"⚡ Average resolution time: {self.stats['avg_resolution_time']:.3f}s")
-        print(f"🚧 Entry blocks activated: {self.stats['entry_blocks_activated']}")
-        print(f"✅ Entry blocks released: {self.stats['entry_blocks_released']}")
-        
-        # Raise exception to stop simulation
-        raise DeadlockException("Deadlock detected - simulation terminated")
-
-    # === 性能统计相关 ===
-    def _update_stats(self, resolution_time: float, graph_size: int, conflict_analysis: Dict):
-        """Update performance statistics"""
-        self.stats['total_resolutions'] += 1
-        self.stats['conflicts_detected'] += sum(conflict_analysis.values())
-        
-        # Update average resolution time
-        old_avg = self.stats['avg_resolution_time']
-        new_avg = (old_avg * (self.stats['total_resolutions'] - 1) + resolution_time) / self.stats['total_resolutions']
-        self.stats['avg_resolution_time'] = new_avg
-
-    def get_performance_stats(self) -> Dict:
-        """Get comprehensive performance statistics"""
-        return {
-            **self.stats,
-            'exact_vs_greedy_ratio': (
-                self.stats['mwis_exact_calls'] / max(1, self.stats['mwis_greedy_calls'])
-            ),
-            'avg_conflicts_per_resolution': (
-                self.stats['conflicts_detected'] / max(1, self.stats['total_resolutions'])
-            ),
-            'deadlock_detection_enabled': True,
-            'deadlock_history_length': len(self.deadlock_history),
-            'deadlock_core_half_size': self.deadlock_core_half_size,
-            'traffic_flow_control_active': self.region_entry_blocked,
-            'entry_blocks_activated': self.stats['entry_blocks_activated'],
-            'entry_blocks_released': self.stats['entry_blocks_released']
-        }
-
-    def _detect_deadlock(self, vehicle_states: Dict[str, Dict], current_time: float) -> bool:
-        """Detect deadlock situations based on vehicle states and history"""
-        self._update_deadlock_history(vehicle_states, current_time)
-        
-        # Analyze deadlock patterns in the history
-        if len(self.deadlock_history) < 2:
-            return False  # Not enough data for detection
-        
-        latest_snapshot = self.deadlock_history[-1]
-        previous_snapshot = self.deadlock_history[-2]
-        
-        # 1) Check for consistent stopped vehicles in the core area
-        if self._check_consistent_stopped_vehicles():
-            return True
-        
-        # 2) Check for circular waiting patterns
-        if self._check_circular_waiting_pattern():
-            return True
-        
-        # 3) Check for no progress in core square
-        if self._check_no_progress_pattern():
-            return True
-        
-        return False
-
-    def _update_deadlock_history(self, vehicle_states: Dict[str, Dict], current_time: float):
-        """Update the deadlock history with the current state of the intersection"""
-        snapshot = self._create_state_snapshot(self._get_intersection_vehicles(vehicle_states), current_time)
-        self.deadlock_history.append(snapshot)
-        
-        # Limit history size
-        if len(self.deadlock_history) > 10:
-            self.deadlock_history.pop(0)
-
-    def _get_intersection_vehicles(self, vehicle_states: Dict[str, Dict]) -> List[Dict]:
-        """Get vehicles that are in the core deadlock detection SQUARE area (same as show_intersection_area1)"""
-        intersection_vehicles = []
-        
-        for vehicle_id, vehicle_state in vehicle_states.items():
-            if not vehicle_state or 'location' not in vehicle_state:
-                continue
-            
-            location = vehicle_state['location']
-            
-            # Use EXACT SQUARE bounds like show_intersection_area1
+    def _infer_approach_direction(self, location: Tuple[float, float, float]) -> str:
+        """根据车辆位置推断进入方向"""
+        try:
             center_x, center_y = self.center[0], self.center[1]
-            half_size = self.deadlock_core_half_size
-            
-            # Check if vehicle is within the square bounds
-            in_core_square = (
-                (center_x - half_size) <= location[0] <= (center_x + half_size) and
-                (center_y - half_size) <= location[1] <= (center_y + half_size)
-            )
-            
-            # Check if vehicle is within the buffer square (2x the core area)
-            buffer_half_size = half_size * 2
-            in_buffer_square = (
-                (center_x - buffer_half_size) <= location[0] <= (center_x + buffer_half_size) and
-                (center_y - buffer_half_size) <= location[1] <= (center_y + buffer_half_size)
-            )
-            
-            if in_core_square:
-                vehicle_data = dict(vehicle_state)
-                vehicle_data['id'] = vehicle_id
-                vehicle_data['in_core_area'] = True
-                vehicle_data['distance_to_center'] = _euclidean_2d(location, self.center)
-                intersection_vehicles.append(vehicle_data)
-            elif in_buffer_square:
-                # Include vehicles in buffer zone but mark them differently
-                vehicle_data = dict(vehicle_state)
-                vehicle_data['id'] = vehicle_id
-                vehicle_data['in_core_area'] = False
-                vehicle_data['distance_to_center'] = _euclidean_2d(location, self.center)
-                intersection_vehicles.append(vehicle_data)
+            rel_x = location[0] - center_x
+            rel_y = location[1] - center_y
         
-        return intersection_vehicles
+            # 使用角度判断主要方向
+            angle = math.atan2(rel_y, rel_x)
+            angle_deg = math.degrees(angle)
+        
+            # 标准化到 [0, 360)
+            if angle_deg < 0:
+                angle_deg += 360
+        
+            # 分配到四个主要方向（考虑45度容差）
+            if 315 <= angle_deg or angle_deg < 45:
+                return 'east'    # 从东侧进入
+            elif 45 <= angle_deg < 135:
+                return 'north'   # 从北侧进入
+            elif 135 <= angle_deg < 225:
+                return 'west'    # 从西侧进入
+            else:  # 225 <= angle_deg < 315
+                return 'south'   # 从南侧进入
+            
+        except Exception:
+            return 'unknown'
 
-    def _create_state_snapshot(self, vehicles: List[Dict], timestamp: float) -> Dict:
-        """Create a snapshot of the intersection state focusing on core SQUARE area"""
-        stopped_vehicles = []
-        moving_vehicles = []
-        core_stopped = []
-        buffer_stopped = []
-        
-        for vehicle in vehicles:
-            velocity = vehicle.get('velocity', [0, 0, 0])
-            speed = math.sqrt(velocity[0]**2 + velocity[1]**2) if velocity else 0.0
-            
-            vehicle_summary = {
-                'id': vehicle['id'],
-                'location': vehicle['location'],
-                'speed': speed,
-                'is_junction': vehicle.get('is_junction', False),
-                'distance_to_center': vehicle.get('distance_to_center', 0),
-                'in_core_area': vehicle.get('in_core_area', False)
-            }
-            
-            if speed < self.deadlock_speed_threshold:
-                stopped_vehicles.append(vehicle_summary)
-                if vehicle.get('in_core_area', False):
-                    core_stopped.append(vehicle_summary)
-                else:
-                    buffer_stopped.append(vehicle_summary)
-            else:
-                moving_vehicles.append(vehicle_summary)
-        
-        return {
-            'timestamp': timestamp,
-            'stopped_vehicles': stopped_vehicles,
-            'moving_vehicles': moving_vehicles,
-            'core_stopped': core_stopped,
-            'buffer_stopped': buffer_stopped,
-            'total_vehicles': len(vehicles),
-            'stopped_count': len(stopped_vehicles),
-            'moving_count': len(moving_vehicles),
-            'core_stopped_count': len(core_stopped),
-            'core_detection_half_size': self.deadlock_core_half_size
+    def _same_approach_conflict(self, turn_i: str, turn_j: str) -> bool:
+        """同向车辆转向冲突矩阵"""
+        # 同向车辆冲突相对较少，主要是变道和速度差异
+        conflict_matrix = {
+            ('straight', 'straight'): False,  # 直行不冲突
+            ('straight', 'left'): True,       # 直行与左转可能冲突（变道）
+            ('straight', 'right'): True,      # 直行与右转可能冲突（变道）
+            ('left', 'left'): False,          # 同向左转不冲突
+            ('left', 'right'): True,          # 左转与右转交叉冲突
+            ('right', 'right'): False,        # 同向右转不冲突
+            ('u_turn', 'straight'): True,     # 掉头与直行冲突
+            ('u_turn', 'left'): True,         # 掉头与左转冲突
+            ('u_turn', 'right'): True,        # 掉头与右转冲突
+            ('u_turn', 'u_turn'): True,       # 掉头之间冲突
         }
+    
+        key = tuple(sorted([turn_i, turn_j]))
+        return conflict_matrix.get(key, True)  # 未知情况保守处理
 
-    def _print_deadlock_analysis(self):
-        """Print detailed deadlock analysis with core SQUARE area focus"""
-        latest = self.deadlock_history[-1]
-        
-        print(f"⏰ Detection Time: {time.strftime('%H:%M:%S', time.localtime(latest['timestamp']))}")
-        print(f"🚗 Total Vehicles: {latest['total_vehicles']}")
-        print(f"🛑 Stopped Vehicles: {latest['stopped_count']}")
-        print(f"🚦 Moving Vehicles: {latest['moving_count']}")
-        print(f"🔴 Core Square Stopped: {latest['core_stopped_count']}")
-        
-        # Calculate square bounds for display
-        center_x, center_y = self.center[0], self.center[1]
-        half_size = latest['core_detection_half_size']
-        min_x, max_x = center_x - half_size, center_x + half_size
-        min_y, max_y = center_y - half_size, center_y + half_size
-        
-        print(f"📏 Core Detection Square: ({min_x:.1f}, {min_y:.1f}) to ({max_x:.1f}, {max_y:.1f})")
-        print(f"   Square Size: {half_size * 2:.1f}m x {half_size * 2:.1f}m")
-        
-        print(f"\n📍 Core Square Analysis (Deadlock Detection Zone):")
-        for vehicle in latest['core_stopped']:
-            status = "🔴 CORE SQUARE" if vehicle.get('in_core_area', False) else "🟡 BUFFER ZONE"
-            location = vehicle.get('location', [0, 0, 0])
-            distance = vehicle.get('distance_to_center', 0)
-            print(f"   {status} Vehicle {vehicle['id']} - Pos: ({location[0]:.1f}, {location[1]:.1f}), "
-                  f"Distance: {distance:.1f}m, Speed: {vehicle['speed']:.1f}m/s")
-        
-        if latest['buffer_stopped']:
-            print(f"\n📍 Buffer Zone Stopped Vehicles:")
-            for vehicle in latest['buffer_stopped'][:3]:  # Show max 3 buffer vehicles
-                location = vehicle.get('location', [0, 0, 0])
-                distance = vehicle.get('distance_to_center', 0)
-                print(f"   🟡 BUFFER Vehicle {vehicle['id']} - Pos: ({location[0]:.1f}, {location[1]:.1f}), "
-                      f"Distance: {distance:.1f}m, Speed: {vehicle['speed']:.1f}m/s")
-        
-        if len(self.deadlock_history) >= 2:
-            duration = latest['timestamp'] - self.deadlock_history[0]['timestamp']
-            print(f"\n⏱️  Deadlock Duration: {duration:.1f} seconds")
-        
-        print(f"\n🔄 Pattern Analysis (Core Square Focus):")
-        print(f"   • Consistent core stopped vehicles: {self._check_consistent_stopped_vehicles()}")
-        print(f"   • Core square circular waiting: {self._check_circular_waiting_pattern()}")
-        print(f"   • No progress in core square: {self._check_no_progress_pattern()}")
+    def _opposite_approach_conflict(self, turn_i: str, turn_j: str) -> bool:
+        """对向车辆转向冲突矩阵"""
+        # 对向车辆冲突是最复杂的情况
+        conflict_matrix = {
+            ('straight', 'straight'): True,   # 对向直行冲突
+            ('straight', 'left'): True,       # 直行与对向左转冲突
+            ('straight', 'right'): False,     # 直行与对向右转通常不冲突
+            ('left', 'left'): False,          # 对向左转通常不冲突（除非路口很小）
+            ('left', 'right'): False,         # 左转与对向右转不冲突
+            ('right', 'right'): False,        # 对向右转不冲突
+            ('u_turn', 'straight'): True,     # 掉头与对向直行冲突
+            ('u_turn', 'left'): True,         # 掉头与对向左转冲突
+            ('u_turn', 'right'): True,        # 掉头与对向右转冲突
+            ('u_turn', 'u_turn'): True,       # 对向掉头冲突
+        }
+    
+        key = tuple(sorted([turn_i, turn_j]))
+        return conflict_matrix.get(key, True)
 
-    def _check_consistent_stopped_vehicles(self) -> bool:
-        """Check if there are consistent stopped vehicles in the core area across history"""
-        if len(self.deadlock_history) < 2:
-            return False
-        
-        latest_stopped = {v['id'] for v in self.deadlock_history[-1]['core_stopped']}
-        previous_stopped = {v['id'] for v in self.deadlock_history[-2]['core_stopped']}
-        
-        # Check if the same vehicles are stopped in the core area in the latest two snapshots
-        return len(latest_stopped & previous_stopped) >= self.deadlock_min_vehicles
-
-    def _check_circular_waiting_pattern(self) -> bool:
-        """Check for circular waiting patterns in the core area"""
-        if len(self.deadlock_history) < 2:
-            return False
-        
-        latest_core = self.deadlock_history[-1]['core_stopped']
-        previous_core = self.deadlock_history[-2]['core_stopped']
-        
-        # Create a mapping of vehicle ID to their position in the latest snapshot
-        position_map = {v['id']: v['location'] for v in latest_core}
-        
-        # Check if any of the previously stopped vehicles are now in motion and vice versa
-        for vehicle in previous_core:
-            if vehicle['id'] in position_map:
-                # Vehicle was stopped, now check if it's in motion
-                if vehicle.get('speed', 0) > self.deadlock_speed_threshold:
-                    return True  # Detected motion from a previously stopped vehicle
-        
-        return False
-
-    def _check_no_progress_pattern(self) -> bool:
-        """Check for no progress patterns in the core square"""
-        if len(self.deadlock_history) < 2:
-            return False
-        
-        latest = self.deadlock_history[-1]
-        previous = self.deadlock_history[-2]
-        
-        # Check if the core stopped vehicles have not changed their relative positions
-        for vehicle in latest['core_stopped']:
-            if vehicle['id'] not in {v['id'] for v in previous['core_stopped']}:
-                continue  # Vehicle not present in previous snapshot
-            
-            # Find the corresponding vehicle in the previous snapshot
-            prev_vehicle = next((v for v in previous['core_stopped'] if v['id'] == vehicle['id']), None)
-            if prev_vehicle:
-                # Compare distances to center as a proxy for progress
-                if abs(vehicle['distance_to_center'] - prev_vehicle['distance_to_center']) < 0.1:
-                    return True  # Detected no progress
-        
-        return False
-
-    # === Missing helper methods ===
-    def _get_agent(self, candidate):
-        """Extract agent from candidate"""
-        if hasattr(candidate, 'participant'):
-            return candidate.participant
-        elif hasattr(candidate, 'agent'):
-            return candidate.agent
+    def _perpendicular_approach_conflict(self, turn_i: str, turn_j: str, 
+                                   approach_i: str, approach_j: str) -> bool:
+        """垂直方向车辆转向冲突矩阵"""
+        # 确定相对位置关系
+        is_i_left_of_j = self._is_left_approach(approach_i, approach_j)
+    
+        # 垂直方向冲突矩阵（考虑右行规则）
+        if is_i_left_of_j:
+            # i在j的左侧
+            conflict_matrix = {
+                ('straight', 'straight'): True,   # 垂直直行冲突
+                ('straight', 'left'): True,       # 直行与垂直左转冲突
+                ('straight', 'right'): False,     # 直行与垂直右转不冲突（右转先行）
+                ('left', 'straight'): True,       # 左转与垂直直行冲突
+                ('left', 'left'): True,           # 左转与垂直左转冲突
+                ('left', 'right'): False,         # 左转与垂直右转不冲突
+                ('right', 'straight'): False,     # 右转与垂直直行不冲突（右转先行）
+                ('right', 'left'): False,         # 右转与垂直左转不冲突
+                ('right', 'right'): False,        # 右转之间不冲突
+                ('u_turn', 'straight'): True,     # 掉头与垂直直行冲突
+                ('u_turn', 'left'): True,         # 掉头与垂直左转冲突
+                ('u_turn', 'right'): True,        # 掉头与垂直右转冲突
+                ('u_turn', 'u_turn'): True,       # 掉头之间冲突
+            }
         else:
-            return candidate
+            # j在i的左侧，交换优先级
+            conflict_matrix = {
+                ('straight', 'straight'): True,
+                ('straight', 'left'): False,      # 垂直左转让行直行
+                ('straight', 'right'): True,      # 直行与垂直右转冲突
+                ('left', 'straight'): False,      # 左转让行垂直直行
+                ('left', 'left'): True,
+                ('left', 'right'): True,
+                ('right', 'straight'): True,
+                ('right', 'left'): True,
+                ('right', 'right'): False,
+                ('u_turn', 'straight'): True,
+                ('u_turn', 'left'): True,
+                ('u_turn', 'right'): True,
+                ('u_turn', 'u_turn'): True,
+            }
+    
+        key = (turn_i, turn_j)
+        return conflict_matrix.get(key, conflict_matrix.get((turn_j, turn_i), True))
 
-    def _get_bid(self, candidate) -> float:
-        """Extract bid value from candidate"""
-        if hasattr(candidate, 'bid'):
-            if hasattr(candidate.bid, 'value'):
-                return candidate.bid.value
-            else:
-                return float(candidate.bid)
-        elif hasattr(candidate, 'value'):
-            return candidate.value
-        else:
-            return 1.0  # Default bid value
+    def _are_opposite_approaches(self, approach_i: str, approach_j: str) -> bool:
+        """判断是否为对向进入"""
+        opposites = {
+            ('north', 'south'), ('south', 'north'),
+            ('east', 'west'), ('west', 'east')
+        }
+        return (approach_i, approach_j) in opposites
 
-    def _lookup_state(self, agent, vehicle_states: Dict[str, Dict], platoon_manager=None) -> Optional[Dict]:
-        """Lookup vehicle state for an agent"""
-        try:
-            agent_id = str(getattr(agent, 'id', agent))
-            
-            # For single vehicles
-            if agent_id in vehicle_states:
-                return vehicle_states[agent_id]
-            
-            # For platoons, get leader state
-            if platoon_manager and hasattr(agent, 'type') and agent.type == 'platoon':
-                vehicles = getattr(agent, 'vehicles', [])
-                if vehicles:
-                    leader_id = str(vehicles[0].get('id', vehicles[0].get('vehicle_id')))
-                    return vehicle_states.get(leader_id)
-            
-            # Try to find by data attribute
-            if hasattr(agent, 'data') and 'vehicles' in agent.data:
-                vehicles = agent.data['vehicles']
-                if vehicles:
-                    leader_id = str(vehicles[0].get('id'))
-                    return vehicle_states.get(leader_id)
-            
-            return None
-            
-        except Exception as e:
-            print(f"[Warning] Lookup state failed for agent {agent}: {e}")
-            return None
+    def _are_perpendicular_approaches(self, approach_i: str, approach_j: str) -> bool:
+        """判断是否为垂直进入"""
+        if approach_i == 'unknown' or approach_j == 'unknown':
+            return False
+        return not self._are_opposite_approaches(approach_i, approach_j) and approach_i != approach_j
 
-    def _infer_turn(self, agent, state: Dict) -> str:
-        """Basic turn inference from agent state"""
-        if not state:
+    def _is_left_approach(self, approach_i: str, approach_j: str) -> bool:
+        """判断approach_i是否在approach_j的左侧（基于右行规则）"""
+        # 定义左侧关系（顺时针）
+        left_relations = {
+            'north': 'west',  # 北向车辆的左侧是西向
+            'west': 'south',  # 西向车辆的左侧是南向
+            'south': 'east',  # 南向车辆的左侧是东向
+            'east': 'north'   # 东向车辆的左侧是北向
+        }
+    
+        return left_relations.get(approach_j) == approach_i
+
+    def _infer_turn_enhanced(self, agent, state: Dict, vehicle_states: Dict) -> str:
+        """增强转向推断，结合速度向量和路径预测"""
+        if not state or 'location' not in state:
             return 'straight'
+    
+        location = state['location']
+        velocity = state.get('velocity', [0, 0, 0])
+    
+        # 1. 基础转向推断
+        basic_turn = self._infer_turn(agent, state)
+    
+        # 2. 速度向量分析
+        if abs(velocity[0]) > 0.5 or abs(velocity[1]) > 0.5:
+            velocity_turn = self._infer_turn_from_velocity(location, velocity)
         
+            # 如果速度向量给出明确信号，优先使用
+            if velocity_turn != 'straight':
+                return velocity_turn
+    
+        # 3. 历史轨迹分析（如果有历史数据）
+        trajectory_turn = self._infer_turn_from_trajectory(agent, state, vehicle_states)
+        if trajectory_turn != 'straight':
+            return trajectory_turn
+    
+        # 4. 目标点分析（如果有路径规划信息）
+        if hasattr(agent, 'destination') or 'destination' in state:
+            destination_turn = self._infer_turn_from_destination(agent, state)
+            if destination_turn != 'straight':
+                return destination_turn
+    
+        return basic_turn
+
+    def _infer_turn_from_velocity(self, location: Tuple[float, float, float], 
+                            velocity: List[float]) -> str:
+        """基于速度向量推断转向"""
         try:
-            # Try to get turn from state directly
-            if 'turn' in state:
-                return state['turn']
-            
-            # Basic heading-based inference
-            rotation = state.get('rotation', [0, 0, 0])
-            heading = rotation[2] if len(rotation) > 2 else 0
-            
-            # Simple heuristic based on heading relative to intersection
-            if abs(heading) < 45:
-                return 'straight'
-            elif heading > 45:
+            # 计算当前朝向
+            current_heading = math.atan2(velocity[1], velocity[0])
+        
+            # 计算到路口中心的方向
+            to_center_x = self.center[0] - location[0]
+            to_center_y = self.center[1] - location[1]
+            to_center_heading = math.atan2(to_center_y, to_center_x)
+        
+            # 计算相对角度
+            relative_angle = self._normalize_angle(current_heading - to_center_heading)
+        
+            # 基于角度判断转向
+            if relative_angle > math.pi/3:  # 60度
                 return 'left'
-            else:
+            elif relative_angle < -math.pi/3:
                 return 'right'
-                
+            elif abs(relative_angle) > 2*math.pi/3:  # 120度，可能是掉头
+                return 'u_turn'
+            else:
+                return 'straight'
+            
         except Exception:
             return 'straight'
 
-    def _calculate_enhanced_eta(self, state: Dict, agent) -> float:
-        """Calculate enhanced ETA to intersection"""
-        if not state or 'location' not in state:
-            return float('inf')
-        
+    def _infer_turn_from_trajectory(self, agent, state: Dict, 
+                              vehicle_states: Dict) -> str:
+        """基于历史轨迹推断转向（需要轨迹历史）"""
+        # 这里可以实现基于历史位置的转向推断
+        # 目前返回默认值，可以在后续实现中添加轨迹跟踪
+        return 'straight'
+
+    def _infer_turn_from_destination(self, agent, state: Dict) -> str:
+        """基于目标点推断转向"""
         try:
+            destination = None
+            if hasattr(agent, 'destination'):
+                destination = agent.destination
+            elif 'destination' in state:
+                destination = state['destination']
+        
+            if not destination:
+                return 'straight'
+        
             location = state['location']
-            distance = _euclidean_2d(location, self.center)
-            
-            # Get speed from state
-            velocity = state.get('velocity', [0, 0, 0])
-            speed = math.sqrt(velocity[0]**2 + velocity[1]**2) if velocity else 0.0
-            speed = max(speed, 0.1)  # Avoid division by zero
-            
-            return distance / speed
+        
+            # 计算到目标的方向
+            to_dest_x = destination[0] - location[0]
+            to_dest_y = destination[1] - location[1]
+            to_dest_heading = math.atan2(to_dest_y, to_dest_x)
+        
+            # 计算经过路口中心的方向
+            to_center_x = self.center[0] - location[0]
+            to_center_y = self.center[1] - location[1]
+            to_center_heading = math.atan2(to_center_y, to_center_x)
+        
+            # 比较两个方向
+            angle_diff = self._normalize_angle(to_dest_heading - to_center_heading)
+        
+            if angle_diff > math.pi/4:
+                return 'left'
+            elif angle_diff < -math.pi/4:
+                return 'right'
+            else:
+                return 'straight'
             
         except Exception:
-            return float('inf')
+            return 'straight'
 
-    def _predict_vehicle_path(self, state: Dict, agent) -> List[Tuple[float, float]]:
-        """Predict vehicle path"""
-        if not state or 'location' not in state:
-            return []
-        
-        try:
-            location = state['location']
-            velocity = state.get('velocity', [0, 0, 0])
-            
-            # Simple linear prediction
-            current_pos = (location[0], location[1])
-            
-            if abs(velocity[0]) < 0.1 and abs(velocity[1]) < 0.1:
-                return [current_pos]  # Stationary vehicle
-            
-            # Predict next few positions
-            path = [current_pos]
-            dt = 1.0  # 1 second intervals
-            for i in range(1, 6):  # 5 second prediction
-                next_x = location[0] + velocity[0] * dt * i
-                next_y = location[1] + velocity[1] * dt * i
-                path.append((next_x, next_y))
-            
-            return path
-            
-        except Exception:
-            return [(state.get('location', [0, 0, 0])[0], state.get('location', [0, 0, 0])[1])]
-
+    # 在 _build_enhanced_conflict_graph 方法中更新冲突检测调用
     def _detect_enhanced_conflict(self, meta_i: Dict, meta_j: Dict) -> Optional[str]:
-        """Detect enhanced conflicts between two agents"""
+        """使用增强转向冲突检测的冲突检测"""
         try:
             state_i = meta_i['state']
             state_j = meta_j['state']
@@ -848,20 +584,30 @@ class DeadlockNashSolver:
             if not state_i or not state_j:
                 return None
             
-            # 1. Spatial conflict check
+            # 1. 空间冲突检测
             if self._has_spatial_conflict(meta_i, meta_j):
                 return 'spatial_conflicts'
             
-            # 2. Temporal conflict check
+            # 2. 时间冲突检测
             if self._has_temporal_conflict(meta_i, meta_j):
                 return 'temporal_conflicts'
             
-            # 3. Path intersection check
+            # 3. 路径相交检测
             if self._has_path_intersection(meta_i, meta_j):
                 return 'path_intersections'
             
-            # 4. Turn-based conflict
-            if _turn_conflict(meta_i['turn'], meta_j['turn']):
+            # 4. 增强转向冲突检测
+            location_i = state_i.get('location', (0, 0, 0))
+            location_j = state_j.get('location', (0, 0, 0))
+            
+            approach_i = self._infer_approach_direction(location_i)
+            approach_j = self._infer_approach_direction(location_j)
+            
+            if self._turn_conflict_enhanced(
+                meta_i['turn'], meta_j['turn'],
+                approach_i, approach_j,
+                location_i, location_j
+            ):
                 return 'spatial_conflicts'
             
             return None
@@ -1036,3 +782,372 @@ class DeadlockNashSolver:
             rank=rank,
             conflict_action=action
         )
+
+    def _lookup_state(self, agent, vehicle_states: Dict[str, Dict], platoon_manager=None) -> Optional[Dict]:
+        """Lookup vehicle state for an agent"""
+        try:
+            agent_id = str(getattr(agent, 'id', agent))
+            
+            # For single vehicles
+            if agent_id in vehicle_states:
+                return vehicle_states[agent_id]
+            
+            # For platoons, get leader state
+            if platoon_manager and hasattr(agent, 'type') and agent.type == 'platoon':
+                vehicles = getattr(agent, 'vehicles', [])
+                if vehicles:
+                    leader_id = str(vehicles[0].get('id', vehicles[0].get('vehicle_id')))
+                    return vehicle_states.get(leader_id)
+            
+            # Try to find by data attribute
+            if hasattr(agent, 'data') and 'vehicles' in agent.data:
+                vehicles = agent.data['vehicles']
+                if vehicles:
+                    leader_id = str(vehicles[0].get('id'))
+                    return vehicle_states.get(leader_id)
+            
+            return None
+            
+        except Exception as e:
+            print(f"[Warning] Lookup state failed for agent {agent}: {e}")
+            return None
+
+    def _get_bid(self, candidate) -> float:
+        """Extract bid value from candidate"""
+        if hasattr(candidate, 'bid'):
+            if hasattr(candidate.bid, 'value'):
+                return candidate.bid.value
+            else:
+                return float(candidate.bid)
+        elif hasattr(candidate, 'value'):
+            return candidate.value
+        else:
+            return 1.0  # Default bid value
+
+    def _infer_turn(self, agent, state: Dict) -> str:
+        """Basic turn inference from agent state"""
+        if not state:
+            return 'straight'
+        
+        try:
+            # Try to get turn from state directly
+            if 'turn' in state:
+                return state['turn']
+            
+            # Basic heading-based inference
+            rotation = state.get('rotation', [0, 0, 0])
+            heading = rotation[2] if len(rotation) > 2 else 0
+            
+            # Simple heuristic based on heading relative to intersection
+            if abs(heading) < 45:
+                return 'straight'
+            elif heading > 45:
+                return 'left'
+            else:
+                return 'right'
+                
+        except Exception:
+            return 'straight'
+
+    def _detect_deadlock(self, vehicle_states: Dict[str, Dict], current_time: float) -> bool:
+        """Enhanced deadlock detection with multiple detection modes"""
+        # Only check periodically to avoid excessive computation
+        if current_time - self.last_deadlock_check < self.deadlock_check_interval:
+            return False
+        
+        self.last_deadlock_check = current_time
+        
+        # Get vehicles in core region
+        core_vehicles = self._get_core_region_vehicles(vehicle_states)
+        
+        if len(core_vehicles) < self.deadlock_min_vehicles:
+            return False
+        
+        # Create snapshot of current state
+        snapshot = {
+            'timestamp': current_time,
+            'core_vehicles': {v['id']: {
+                'location': v.get('location', (0, 0, 0)),
+                'velocity': v.get('velocity', [0, 0, 0]),
+                'speed': math.sqrt(sum(x**2 for x in v.get('velocity', [0, 0, 0]))),
+                'stalled': math.sqrt(sum(x**2 for x in v.get('velocity', [0, 0, 0]))) < self.deadlock_speed_threshold
+            } for v in core_vehicles},
+            'stalled_count': self._count_stalled_vehicles(core_vehicles)
+        }
+        
+        # Add to history
+        self.deadlock_history.append(snapshot)
+        
+        # Keep only recent history
+        cutoff_time = current_time - self.deadlock_detection_window
+        self.deadlock_history = [s for s in self.deadlock_history if s['timestamp'] > cutoff_time]
+        
+        # Need sufficient history for detection
+        if len(self.deadlock_history) < 5:
+            return False
+        
+        # Mode 1: Persistent core stalling
+        if self._detect_persistent_core_stalling():
+            print(f"\n🚨 DEADLOCK DETECTED - Persistent Core Stalling")
+            print(f"   📍 Location: Core intersection region")
+            print(f"   🕐 Duration: {self.deadlock_detection_window}s+ of stalling")
+            print(f"   🚗 Vehicles: {len(core_vehicles)} vehicles affected")
+            return True
+        
+        # Mode 2: Circular waiting pattern
+        if self._detect_circular_waiting():
+            print(f"\n🚨 DEADLOCK DETECTED - Circular Waiting Pattern")
+            print(f"   🔄 Pattern: Vehicles blocking each other in cycle")
+            print(f"   🚗 Vehicles: {len(core_vehicles)} vehicles affected")
+            return True
+        
+        # Mode 3: No progress detection
+        if self._detect_no_progress():
+            print(f"\n🚨 DEADLOCK DETECTED - No Progress")
+            print(f"   ⏱️ Pattern: No movement toward intersection center")
+            print(f"   🚗 Vehicles: {len(core_vehicles)} vehicles affected")
+            return True
+        
+        return False
+
+    def _detect_persistent_core_stalling(self) -> bool:
+        """Detect if the same set of vehicles have been stalled in core for extended time"""
+        if len(self.deadlock_history) < 10:  # Need at least 20 seconds of history
+            return False
+        
+        # Check if we have consistent stalling over time
+        recent_snapshots = self.deadlock_history[-10:]
+        
+        # Count snapshots where stalled vehicle count is above threshold
+        high_stall_count = sum(1 for s in recent_snapshots 
+                              if s['stalled_count'] >= self.deadlock_min_vehicles)
+        
+        # If most recent snapshots show high stalling, it's likely deadlock
+        return high_stall_count >= 8  # 80% of recent snapshots
+
+    def _detect_circular_waiting(self) -> bool:
+        """Detect circular waiting patterns where vehicles block each other"""
+        if len(self.deadlock_history) < 5:
+            return False
+        
+        current_snapshot = self.deadlock_history[-1]
+        core_vehicles = current_snapshot['core_vehicles']
+        
+        # Simple heuristic: if most vehicles in core are stalled and positioned 
+        # in different quadrants, likely circular waiting
+        stalled_vehicles = [v_id for v_id, data in core_vehicles.items() if data['stalled']]
+        
+        if len(stalled_vehicles) < 4:  # Need at least 4 vehicles for circular pattern
+            return False
+        
+        # Check if vehicles are distributed across different approaches
+        quadrant_count = self._count_vehicles_by_quadrant(stalled_vehicles, core_vehicles)
+        
+        # If vehicles are in 3+ quadrants and mostly stalled, likely circular waiting
+        return len(quadrant_count) >= 3 and len(stalled_vehicles) >= self.deadlock_min_vehicles
+
+    def _detect_no_progress(self) -> bool:
+        """Detect lack of progress toward intersection center"""
+        if len(self.deadlock_history) < 8:  # Need sufficient history
+            return False
+        
+        # Compare current positions with positions from 15 seconds ago
+        current_snapshot = self.deadlock_history[-1]
+        old_snapshot = self.deadlock_history[-8]  # ~15 seconds ago
+        
+        current_vehicles = current_snapshot['core_vehicles']
+        old_vehicles = old_snapshot['core_vehicles']
+        
+        # Track vehicles that were present in both snapshots
+        common_vehicles = set(current_vehicles.keys()) & set(old_vehicles.keys())
+        
+        if len(common_vehicles) < 3:
+            return False
+        
+        # Check if vehicles have made progress toward center
+        no_progress_count = 0
+        center = self.center
+        
+        for v_id in common_vehicles:
+            old_pos = old_vehicles[v_id]['location']
+            current_pos = current_vehicles[v_id]['location']
+            
+            old_dist = _euclidean_2d(old_pos, center)
+            current_dist = _euclidean_2d(current_pos, center)
+            
+            # No significant progress if distance to center hasn't decreased much
+            if current_dist >= old_dist - 1.0:  # Less than 1 meter progress
+                no_progress_count += 1
+        
+        # If most tracked vehicles made no progress, likely deadlock
+        return no_progress_count >= len(common_vehicles) * 0.8
+
+    def _count_vehicles_by_quadrant(self, vehicle_ids: List[str], 
+                                   vehicles_data: Dict[str, Dict]) -> Dict[str, int]:
+        """Count vehicles in each quadrant relative to intersection center"""
+        quadrant_count = defaultdict(int)
+        center_x, center_y = self.center[0], self.center[1]
+        
+        for v_id in vehicle_ids:
+            if v_id not in vehicles_data:
+                continue
+            
+            location = vehicles_data[v_id]['location']
+            rel_x = location[0] - center_x
+            rel_y = location[1] - center_y
+            
+            if rel_x >= 0 and rel_y >= 0:
+                quadrant = 'NE'
+            elif rel_x < 0 and rel_y >= 0:
+                quadrant = 'NW'
+            elif rel_x < 0 and rel_y < 0:
+                quadrant = 'SW'
+            else:
+                quadrant = 'SE'
+            
+            quadrant_count[quadrant] += 1
+        
+        return quadrant_count
+
+    def _handle_deadlock_detection(self):
+        """Handle deadlock detection by updating stats and raising exception"""
+        self.stats['deadlocks_detected'] += 1
+        raise DeadlockException("Deadlock detected in intersection core region")
+
+    def _get_agent(self, candidate) -> object:
+        """Extract agent from candidate"""
+        if hasattr(candidate, 'participant'):
+            return candidate.participant
+        elif hasattr(candidate, 'agent'):
+            return candidate.agent
+        else:
+            return candidate
+
+    def _calculate_enhanced_eta(self, state: Dict, agent) -> float:
+        """Calculate enhanced ETA with velocity prediction"""
+        if not state or 'location' not in state:
+            return float('inf')
+        
+        location = state['location']
+        velocity = state.get('velocity', [0, 0, 0])
+        speed = math.sqrt(sum(x**2 for x in velocity)) if velocity else 0.0
+        
+        # Distance to intersection center
+        distance = _euclidean_2d(location, self.center)
+        
+        # Use actual speed or minimum speed
+        effective_speed = max(speed, 0.1)
+        
+        return distance / effective_speed
+
+    def _predict_vehicle_path(self, state: Dict, agent) -> List[Tuple[float, float]]:
+        """Predict vehicle path for the next few seconds"""
+        if not state or 'location' not in state:
+            return []
+        
+        location = state['location']
+        velocity = state.get('velocity', [0, 0, 0])
+        
+        if not velocity or (velocity[0] == 0 and velocity[1] == 0):
+            return [location[:2]]  # Stationary vehicle
+        
+        # Predict path using linear projection
+        path = [location[:2]]
+        dt = 0.5  # 0.5 second intervals
+        
+        for i in range(1, int(self.prediction_horizon / dt) + 1):
+            t = i * dt
+            future_x = location[0] + velocity[0] * t
+            future_y = location[1] + velocity[1] * t
+            path.append((future_x, future_y))
+        
+        return path
+
+    def _normalize_angle(self, angle: float) -> float:
+        """Normalize angle to [-pi, pi]"""
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle
+
+    def _update_stats(self, resolution_time: float, graph_size: int, conflict_analysis: Dict):
+        """Update performance statistics"""
+        self.stats['total_resolutions'] += 1
+        self.stats['conflicts_detected'] += sum(conflict_analysis.values())
+        
+        # Update average resolution time
+        total_time = self.stats['avg_resolution_time'] * (self.stats['total_resolutions'] - 1)
+        self.stats['avg_resolution_time'] = (total_time + resolution_time) / self.stats['total_resolutions']
+
+    def _assemble_winners_with_traffic_control(self, candidates: List, selected_idx: List[int], 
+                                             weights: List[float], conflict_analysis: Dict,
+                                             vehicle_states: Dict[str, Dict]) -> List[AuctionWinner]:
+        """Assemble winners with traffic flow control considerations"""
+        if not selected_idx:
+            return []
+        
+        # Sort selected candidates by weight (bid value) in descending order
+        selected_candidates = [(candidates[i], weights[i], i) for i in selected_idx]
+        selected_candidates.sort(key=lambda x: x[1], reverse=True)
+        
+        winners = []
+        go_count = 0
+        
+        for candidate, weight, idx in selected_candidates:
+            agent = self._get_agent(candidate)
+            
+            # Determine action based on rank and traffic flow control
+            if go_count < self.max_go_agents:
+                # Check if this agent should be allowed entry during traffic flow control
+                if self.region_entry_blocked and self._should_block_entry(agent, vehicle_states):
+                    action = 'wait'
+                else:
+                    action = 'go'
+                    go_count += 1
+            else:
+                action = 'wait'
+        
+            winner = self._to_winner(candidate, action, len(winners) + 1)
+            winners.append(winner)
+        
+        return winners
+
+    def _should_block_entry(self, agent, vehicle_states: Dict[str, Dict]) -> bool:
+        """Determine if agent should be blocked from entering during traffic flow control"""
+        try:
+            # Get agent's vehicle state
+            state = self._lookup_state(agent, vehicle_states)
+            if not state or 'location' not in state:
+                return True  # Block if we can't determine location
+            
+            location = state['location']
+            
+            # Check if vehicle is already in core region
+            center_x, center_y = self.center[0], self.center[1]
+            half_size = self.deadlock_core_half_size
+            
+            in_core = (
+                (center_x - half_size) <= location[0] <= (center_x + half_size) and
+                (center_y - half_size) <= location[1] <= (center_y + half_size)
+            )
+            
+            # Don't block vehicles already in core (let them exit)
+            if in_core:
+                return False
+            
+            # Block vehicles trying to enter core during traffic flow control
+            return True
+            
+        except Exception:
+            return True  # Conservative: block if unsure
+
+    def _should_allow_entry(self, agent, vehicle_states: Dict[str, Dict]) -> bool:
+        """Determine if agent should be allowed entry to core region"""
+        return not self._should_block_entry(agent, vehicle_states)
+
+    # Add method to update configuration
+    def update_max_go_agents(self, max_go_agents: int):
+        """Update the maximum go agents limit"""
+        self.max_go_agents = max_go_agents
+        print(f"🔄 Nash solver: Updated MAX_GO_AGENTS to {max_go_agents}")
