@@ -31,6 +31,11 @@ class TrafficController:
         # Add configurable max go agents limit (can be None)
         self.max_go_agents = max_go_agents
         
+        # Statistics tracking
+        self.total_vehicles_controlled = 0  # Total number of vehicles ever controlled
+        self.vehicles_exited_intersection = 0  # Number of vehicles that exited intersection
+        self.control_history = {}  # Track when vehicles entered/exited control
+        
         limit_text = "unlimited" if max_go_agents is None else str(max_go_agents)
         print(f"🎮 增强交通控制器初始化完成 - 支持车队、单车 (max go agents: {limit_text})")
 
@@ -250,6 +255,10 @@ class TrafficController:
                     self._vehicle_has_exited_intersection(vehicle_state)):
                     vehicles_to_restore.add(vehicle_id)
                     print(f"✅ 车辆 {vehicle_id} 已离开路口，移除控制")
+            else:
+                # Vehicle no longer exists in simulation
+                vehicles_to_restore.add(vehicle_id)
+                print(f"🗑️ 车辆 {vehicle_id} 已从仿真中移除，清理控制")
         
         for vehicle_id in vehicles_to_restore:
             try:
@@ -264,6 +273,16 @@ class TrafficController:
                     )
                     self.traffic_manager.ignore_lights_percentage(carla_vehicle, 0.0)
                     self.traffic_manager.ignore_vehicles_percentage(carla_vehicle, 0.0)
+                
+                # Track exit statistics
+                if vehicle_id in self.controlled_vehicles:
+                    # Mark exit time for statistics
+                    self.control_history[vehicle_id] = {
+                        'enter_time': self.controlled_vehicles[vehicle_id].get('timestamp', 0),
+                        'exit_time': time.time(),
+                        'action': self.controlled_vehicles[vehicle_id].get('action', 'unknown')
+                    }
+                    self.vehicles_exited_intersection += 1
                 
                 # 移除控制记录
                 self.controlled_vehicles.pop(vehicle_id, None)
@@ -304,206 +323,19 @@ class TrafficController:
             'waiting_vehicles': waiting_vehicles,
             'platoon_members': platoon_members,
             'platoon_leaders': leaders,
-            'active_controls': list(self.controlled_vehicles.keys())
+            'active_controls': list(self.controlled_vehicles.keys()),
+            # New statistics
+            'total_vehicles_ever_controlled': self.total_vehicles_controlled,
+            'vehicles_exited_intersection': self.vehicles_exited_intersection
         }
 
-    def _apply_single_vehicle_control(self, vehicle_id: str, rank: int, bid_value: float, 
-                                    action: str) -> bool:
-        """Apply control to a single vehicle"""
-        try:
-            carla_vehicle = self.world.get_actor(int(vehicle_id))
-            if not carla_vehicle or not carla_vehicle.is_alive:
-                return False
-            
-            # Get control parameters based on action
-            params = self._get_control_params_by_rank_and_action(rank, action)
-            
-            # Apply traffic manager settings
-            self.traffic_manager.vehicle_percentage_speed_difference(
-                carla_vehicle, params['speed_diff']
-            )
-            self.traffic_manager.distance_to_leading_vehicle(
-                carla_vehicle, params['follow_distance']
-            )
-            self.traffic_manager.ignore_lights_percentage(
-                carla_vehicle, params['ignore_lights']
-            )
-            self.traffic_manager.ignore_signs_percentage(
-                carla_vehicle, params['ignore_signs']
-            )
-            self.traffic_manager.ignore_vehicles_percentage(
-                carla_vehicle, params['ignore_vehicles']
-            )
-            
-            # Record control state
-            self.controlled_vehicles[vehicle_id] = {
-                'rank': rank,
-                'bid_value': bid_value,
-                'action': action,
-                'params': params,
-                'is_platoon_member': False,
-                'is_leader': False,
-                'timestamp': time.time()
-            }
-            
-            return True
-            
-        except Exception as e:
-            print(f"[Warning] 应用车辆控制失败 {vehicle_id}: {e}")
-            return False
-
-    def _apply_platoon_control(self, participant, rank: int, bid_value: float, 
-                             action: str) -> Set[str]:
-        """Apply control to all vehicles in a platoon"""
-        controlled_vehicles = set()
-        
-        try:
-            vehicles = participant.data.get('vehicles', [])
-            if not vehicles:
-                return controlled_vehicles
-            
-            for i, vehicle_data in enumerate(vehicles):
-                vehicle_id = str(vehicle_data['id'])
-                is_leader = (i == 0)
-                
-                # Apply control to each vehicle in platoon
-                if self._apply_single_platoon_vehicle_control(
-                    vehicle_id, rank, bid_value, action, is_leader
-                ):
-                    controlled_vehicles.add(vehicle_id)
-            
-            return controlled_vehicles
-            
-        except Exception as e:
-            print(f"[Warning] 应用车队控制失败 {participant.id}: {e}")
-            return controlled_vehicles
-
-    def _apply_single_platoon_vehicle_control(self, vehicle_id: str, rank: int, 
-                                            bid_value: float, action: str, 
-                                            is_leader: bool) -> bool:
-        """Apply control to a single vehicle within a platoon with enhanced follower aggression"""
-        try:
-            carla_vehicle = self.world.get_actor(int(vehicle_id))
-            if not carla_vehicle or not carla_vehicle.is_alive:
-                return False
-            
-            # Get control parameters for platoon member
-            params = self._get_control_params_by_rank_and_action(
-                rank, action, is_platoon_member=True, is_leader=is_leader
-            )
-            
-            # Apply traffic manager settings
-            self.traffic_manager.vehicle_percentage_speed_difference(
-                carla_vehicle, params['speed_diff']
-            )
-            self.traffic_manager.distance_to_leading_vehicle(
-                carla_vehicle, params['follow_distance']
-            )
-            self.traffic_manager.ignore_lights_percentage(
-                carla_vehicle, params['ignore_lights']
-            )
-            self.traffic_manager.ignore_signs_percentage(
-                carla_vehicle, params['ignore_signs']
-            )
-            self.traffic_manager.ignore_vehicles_percentage(
-                carla_vehicle, params['ignore_vehicles']
-            )
-        
-            
-            # Record control state
-            self.controlled_vehicles[vehicle_id] = {
-                'rank': rank,
-                'bid_value': bid_value,
-                'action': action,
-                'params': params,
-                'is_platoon_member': True,
-                'is_leader': is_leader,
-                'timestamp': time.time()
-            }
-            
-            return True
-            
-        except Exception as e:
-            print(f"[Warning] 应用车队车辆控制失败 {vehicle_id}: {e}")
-            return False
-
-    def _determine_agent_control_status(self, auction_winners: List) -> Dict[str, str]:
-        """根据拍卖排名和当前状态确定代理控制状态"""
-        control_status = {}
-        
-        for winner in auction_winners:
-            participant = winner.participant
-            
-            if participant.type == 'vehicle':
-                vehicle_id = str(participant.id)
-                # 基于排名和当前动作确定控制状态
-                control_status[vehicle_id] = self._get_control_action_by_rank(winner.rank)
-                
-            elif participant.type == 'platoon':
-                vehicles = participant.data.get('vehicles', [])
-                if vehicles:
-                    leader_id = str(vehicles[0]['id'])
-                    # 基于排名和当前动作确定控制状态 (使用车队首领的排名)
-                    control_status[participant.id] = self._get_control_action_by_rank(winner.rank)
-        
-        return control_status
-
-    def _get_control_params_by_rank_and_action(self, rank: int, action: str, 
-                                         is_platoon_member: bool = False,
-                                         is_leader: bool = False) -> Dict[str, float]:
-        """根据排名、动作和车队状态获取控制参数 """
-        if action == 'wait':
-            return {
-                'speed_diff': -70.0,      # Strong speed reduction for waiting
-                'follow_distance': 2.5 if not is_platoon_member else 2.0,
-                'ignore_lights': 0.0,     
-                'ignore_signs': 0.0,      
-                'ignore_vehicles': 0.0    
-            }
-
-        elif action == 'go':
-            return {
-                'speed_diff': -55.0,      
-                'follow_distance': 1.2,   
-                'ignore_lights': 100.0,   
-                'ignore_signs': 100.0,    
-                'ignore_vehicles': 50.0
-                }
-
-    def _vehicle_has_exited_intersection(self, vehicle_state: Dict) -> bool:
-        """检查车辆是否已完全离开路口区域"""
-        vehicle_location = vehicle_state['location']
-        distance_to_center = SimulationConfig.distance_to_intersection_center(vehicle_location)
-        
-        # 如果车辆距离路口中心超过一定距离，认为已离开
-        exit_threshold = self.intersection_half_size/ 2
-        return distance_to_center > exit_threshold
-
-    def get_control_stats(self) -> Dict[str, Any]:
-        """Get control statistics"""
-        go_vehicles = 0
-        waiting_vehicles = 0
-        platoon_members = 0
-        leaders = 0
-        
-        for vehicle_id, control_info in self.controlled_vehicles.items():
-            if control_info.get('action') == 'go':
-                go_vehicles += 1
-            else:
-                waiting_vehicles += 1
-            
-            if control_info.get('is_platoon_member', False):
-                platoon_members += 1
-                if control_info.get('is_leader', False):
-                    leaders += 1
-        
+    def get_final_statistics(self) -> Dict[str, Any]:
+        """Get final simulation statistics"""
         return {
-            'total_controlled': len(self.controlled_vehicles),
-            'go_vehicles': go_vehicles,
-            'waiting_vehicles': waiting_vehicles,
-            'platoon_members': platoon_members,
-            'platoon_leaders': leaders,
-            'active_controls': list(self.controlled_vehicles.keys())
+            'total_vehicles_controlled': self.total_vehicles_controlled,
+            'vehicles_exited_intersection': self.vehicles_exited_intersection,
+            'vehicles_still_controlled': len(self.controlled_vehicles),
+            'control_history_count': len(self.control_history)
         }
 
     def _apply_single_vehicle_control(self, vehicle_id: str, rank: int, bid_value: float, 

@@ -211,13 +211,15 @@ try:
                         print(f"      #{rank}: {action_emoji}🚛车队{participant.id} "
                               f"({vehicle_count}车) 出价:{bid_value:.1f}")
             
-            # 3. 控制器状态
+            # 3. 控制器状态 - ENHANCED WITH EXIT TRACKING
             control_stats = traffic_controller.get_control_stats()
             if control_stats['total_controlled'] > 0:
                 platoon_info = f"车队成员:{control_stats['platoon_members']}, 领队:{control_stats['platoon_leaders']}" if control_stats['platoon_members'] > 0 else ""
-                print(f"🎮 控制器状态: 总控制:{control_stats['total_controlled']} | "
+                print(f"🎮 控制器状态: 当前控制:{control_stats['total_controlled']} | "
                       f"等待:{control_stats['waiting_vehicles']} | "
                       f"通行:{control_stats['go_vehicles']} | {platoon_info}")
+                print(f"   📊 统计: 总控制车辆:{control_stats['total_vehicles_ever_controlled']} | "
+                      f"已离开路口:{control_stats['vehicles_exited_intersection']}")
             
             # 4. 拍卖系统统计 - ENHANCED
             auction_stats = auction_engine.get_auction_stats()
@@ -251,6 +253,22 @@ finally:
               f"({sim_elapsed:.2f}s)" if sim_elapsed is not None else "   • 仿真世界时间    : N/A")
     except Exception as e:
         print(f"⚠️ 无法获取时间统计: {e}")
+
+    # Print traffic control statistics
+    try:
+        control_final_stats = traffic_controller.get_final_statistics()
+        print("\n🎮 交通控制统计:")
+        print(f"   • 总控制车辆数: {control_final_stats['total_vehicles_controlled']}")
+        print(f"   • 成功离开路口: {control_final_stats['vehicles_exited_intersection']}")
+        print(f"   • 仍在控制中: {control_final_stats['vehicles_still_controlled']}")
+        print(f"   • 控制历史记录: {control_final_stats['control_history_count']}")
+        
+        if control_final_stats['total_vehicles_controlled'] > 0:
+            success_rate = (control_final_stats['vehicles_exited_intersection'] / 
+                          control_final_stats['total_vehicles_controlled']) * 100
+            print(f"   • 成功通过率: {success_rate:.1f}%")
+    except Exception as e:
+        print(f"⚠️ 无法获取控制统计: {e}")
 
     # Print collision report (only printed at simulation end)
     try:
