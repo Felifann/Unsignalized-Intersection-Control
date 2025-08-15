@@ -7,6 +7,11 @@ from enum import Enum
 from env.simulation_config import SimulationConfig
 from .bid_policy import AgentBidPolicy
 
+# Add missing utility function
+def _euclidean_2d(a: Tuple[float, float, float], b: Tuple[float, float, float]) -> float:
+    """Calculate 2D Euclidean distance between two 3D points (ignoring z-coordinate)"""
+    return math.hypot(a[0]-b[0], a[1]-b[1])
+
 class AuctionStatus(Enum):
     WAITING = "waiting"
     BIDDING = "bidding" 
@@ -253,75 +258,41 @@ class AuctionEvaluator:
         self.intersection_center = intersection_center
         self.protected_agents: set = set()
         self.agents_in_transit: Dict[str, Dict] = {}
-        self.max_go_agents = max_go_agents  # Now configurable from DRLConfig
+        self.max_go_agents = max_go_agents  # Keep for compatibility but don't use internally
 
     def evaluate_auction(self, auction: Auction) -> List[AuctionWinner]:
-        """Evaluate auction and determine winners with priority ranking and 'go' limit"""
+        """Evaluate auction and determine winners - with in-transit protection"""
         if not auction.bids:
             return []
         
-        # Sort remaining bidders by bid value
-        remaining_bids = {k: v for k, v in auction.bids.items()}
-        regular_winners = self._evaluate_regular_bids(remaining_bids)
-        
-        # Apply 'go' limit
-        limited_winners = self._apply_go_limit(regular_winners)
-        
-        # Assign final rankings
-        for i, winner in enumerate(limited_winners):
-            winner.rank = i + 1
-        
-        auction.winners = limited_winners
-        return limited_winners
-
-    def _apply_go_limit(self, winners: List[AuctionWinner]) -> List[AuctionWinner]:
-        """Apply the maximum 'go' agents limit"""
-        if len(winners) <= self.max_go_agents:
-            # All winners can 'go'
-            for winner in winners:
-                winner.conflict_action = 'go'
-            return winners
-        
-        # Limit the number of 'go' agents
-        limited_winners = []
-        go_count = 0
-        
-        for winner in winners:
-            if go_count < self.max_go_agents:
-                winner.conflict_action = 'go'
-                go_count += 1
-                print(f"🟢 Agent {winner.participant.id} assigned 'go' (#{go_count}/{self.max_go_agents})")
-            else:
-                winner.conflict_action = 'wait'
-                print(f"🔴 Agent {winner.participant.id} assigned 'wait' - go limit reached")
-            
-            limited_winners.append(winner)
-        
-        return limited_winners
-
-    def _get_protected_winners(self, bids: Dict[str, Bid]) -> List[AuctionWinner]:
-        """Get winners that are protected (in transit through intersection)"""
         protected_winners = []
+        regular_bids = dict(auction.bids)
         
-        for bid in bids.values():
-            if self._is_participant_in_transit(bid.participant):
-                # Mark as protected
-                self.protected_agents.add(bid.participant_id)
-                self.agents_in_transit[bid.participant_id] = {
-                    'start_time': time.time(),
-                    'original_bid': bid.value
-                }
-                
-                winner = AuctionWinner(
+        # First: Create winners for protected (in-transit) agents
+        for agent_id in self.protected_agents:
+            if agent_id in regular_bids:
+                bid = regular_bids.pop(agent_id)  # Remove from regular processing
+                protected_winner = AuctionWinner(
                     participant=bid.participant,
                     bid=bid,
-                    rank=0,
-                    protected=True
+                    rank=0,  # Highest priority
+                    conflict_action='go'  # Always go
                 )
-                protected_winners.append(winner)
+                protected_winners.append(protected_winner)
+                print(f"🔒 Protected agent {agent_id}: ALWAYS GO (in transit)")
         
-        return protected_winners
-    
+        # Second: Process remaining bids normally
+        regular_winners = self._evaluate_regular_bids(regular_bids)
+        
+        # Combine and assign rankings
+        all_winners = protected_winners + regular_winners
+        for i, winner in enumerate(all_winners):
+            winner.rank = i + 1
+        
+        auction.winners = all_winners
+        print(f"📊 Auction evaluator: {len(protected_winners)} protected + {len(regular_winners)} regular = {len(all_winners)} total winners")
+        return all_winners
+
     def _evaluate_regular_bids(self, bids: Dict[str, Bid]) -> List[AuctionWinner]:
         """Evaluate regular (non-protected) bids"""
         if not bids:
@@ -339,13 +310,12 @@ class AuctionEvaluator:
             winner = AuctionWinner(
                 participant=bid.participant,
                 bid=bid,
-                rank=0,
-                #protected=False
+                rank=0,  # Will be assigned later
             )
             winners.append(winner)
         
         return winners
-    
+
     def _is_participant_in_transit(self, participant: AuctionAgent) -> bool:
         """Check if participant is currently in transit through intersection"""
         if participant.type == 'vehicle':
@@ -358,7 +328,7 @@ class AuctionEvaluator:
         return False
     
     def cleanup_completed_agents(self, vehicle_states: List[Dict], platoon_manager=None):
-        """Clean up agents that have completed transit - 支持车队和单车"""
+        """Clean up agents that have completed transit"""
         current_time = time.time()
         completed_agents = []
         
@@ -378,11 +348,9 @@ class AuctionEvaluator:
         for agent_id in completed_agents:
             self.protected_agents.discard(agent_id)
             self.agents_in_transit.pop(agent_id, None)
-            agent_type = "车队" if agent_id.startswith("platoon_") else "车辆"
-            print(f"✅ {agent_type} {agent_id} completed transit, protection removed")
-    
+
     def _check_agent_still_in_transit(self, agent_id: str, vehicle_states: List[Dict], platoon_manager=None) -> bool:
-        """检查agent是否仍在通过路口 - 支持车队和单车"""
+        """Check if agent is still in transit through intersection"""
         # Check if it's a platoon
         if agent_id.startswith("platoon_") and platoon_manager:
             return self._check_platoon_still_in_transit(agent_id, platoon_manager)
@@ -390,7 +358,7 @@ class AuctionEvaluator:
             return self._check_single_vehicle_in_transit(agent_id, vehicle_states)
     
     def _check_platoon_still_in_transit(self, platoon_id: str, platoon_manager) -> bool:
-        """检查车队是否仍在通过路口"""
+        """Check if platoon is still in transit"""
         # Find the platoon
         for platoon in platoon_manager.get_all_platoons():
             if platoon.platoon_id == platoon_id:
@@ -400,30 +368,27 @@ class AuctionEvaluator:
         return False
     
     def _check_single_vehicle_in_transit(self, agent_id: str, vehicle_states: List[Dict]) -> bool:
-        """检查单车是否仍在通过路口 - 简化版本"""
+        """Check if single vehicle is still in transit"""
         for vehicle_state in vehicle_states:
             vehicle_id = str(vehicle_state['id'])
             if vehicle_id == str(agent_id):
                 return vehicle_state.get('is_junction', False)
         return False
-    
-    # DISABLED: Platoon-specific transit checking
-    # def _check_agent_still_in_transit(self, agent_id: str, vehicle_states: List[Dict], platoon_manager) -> bool:
 
 class DecentralizedAuctionEngine:
     """Main auction engine managing the complete auction process - 支持车队和单车"""
     
     def __init__(self, intersection_center=(-188.9, -89.7, 0.0), 
-                 communication_range=50.0, state_extractor=None, max_go_agents: int = 8):
+                 communication_range=50.0, state_extractor=None, max_go_agents: int = None):
         self.intersection_center = intersection_center
         self.communication_range = communication_range
         self.state_extractor = state_extractor
-        self.max_go_agents = max_go_agents  # Now configurable from DRLConfig
+        self.max_go_agents = max_go_agents  # Can be None for no limit
         
         # Core components
         self.lane_grouper = LaneGrouper(state_extractor)
         self.participant_identifier = ParticipantIdentifier(self.lane_grouper)
-        self.evaluator = AuctionEvaluator(intersection_center, max_go_agents)  # Pass configurable limit
+        self.evaluator = AuctionEvaluator(intersection_center, max_go_agents)
         
         # Auction management
         self.current_auction: Optional[Auction] = None
@@ -440,14 +405,16 @@ class DecentralizedAuctionEngine:
         # Nash integration
         self.nash_controller = None
         
-        print(f"🎯 增强拍卖引擎已初始化 - 支持车队、单车和Nash deadlock解决 (max go agents: {max_go_agents})")
+        limit_text = "unlimited" if max_go_agents is None else str(max_go_agents)
+        print(f"🎯 增强拍卖引擎已初始化 - 支持车队、单车和Nash deadlock解决 (max go agents: {limit_text})")
 
     # Add method to update configuration
-    def update_max_go_agents(self, max_go_agents: int):
+    def update_max_go_agents(self, max_go_agents: int = None):
         """Update the maximum go agents limit"""
         self.max_go_agents = max_go_agents
         self.evaluator.max_go_agents = max_go_agents
-        print(f"🔄 Auction engine: Updated MAX_GO_AGENTS to {max_go_agents}")
+        limit_text = "unlimited" if max_go_agents is None else str(max_go_agents)
+        print(f"🔄 Auction engine: Updated MAX_GO_AGENTS to {limit_text}")
 
     def set_vehicle_enforcer(self, vehicle_enforcer):
         """Set vehicle control enforcer for integration"""
@@ -467,6 +434,10 @@ class DecentralizedAuctionEngine:
             vehicle_states, platoon_manager
         )
         
+        print(f"\n🎯 Auction Update: Found {len(agents)} potential agents")
+        for agent in agents:
+            print(f"   - {agent.type} {agent.id}: distance to intersection = {_euclidean_2d(agent.location, self.intersection_center):.1f}m")
+        
         # 2. Start new auction if needed
         if agents and not self.current_auction:
             self._start_new_auction(agents, current_time)
@@ -476,22 +447,30 @@ class DecentralizedAuctionEngine:
         if self.current_auction:
             winners = self._process_current_auction(current_time)
         
-        # 4. Apply Nash deadlock resolution if needed
+        # 4. Apply Nash conflict resolution if needed
         if winners and self.nash_controller:
-            # Convert vehicle_states list to dict format expected by Nash solver
+            print(f"🧠 Applying Nash conflict resolution to {len(winners)} winners")
             vehicle_states_dict = {str(v['id']): v for v in vehicle_states}
-            nash_winners = self.nash_controller.resolve(winners, vehicle_states_dict, platoon_manager)
-            if nash_winners:
-                winners = nash_winners
-        
-        # 5. Clean up completed agents
-        self.evaluator.cleanup_completed_agents(vehicle_states, platoon_manager)
-        
-        # 6. Simulate communication
-        self._simulate_v2v_communication()
-        
-        return winners
+            
+            try:
+                nash_winners = self.nash_controller.resolve(winners, vehicle_states_dict, platoon_manager)
+                if nash_winners:
+                    print(f"✅ Nash solver returned {len(nash_winners)} resolved winners")
+                    winners = nash_winners
+                    # IMPORTANT: Update the current auction winners
+                    if self.current_auction:
+                        self.current_auction.winners = nash_winners
+                else:
+                    print("⚠️ Nash solver returned no winners")
+            except Exception as e:
+                print(f"❌ Nash solver error: {e}")
+                # Set default conflict_action for fallback
+                for winner in winners:
+                    if not hasattr(winner, 'conflict_action'):
+                        winner.conflict_action = 'go'
     
+        return winners
+
     def _start_new_auction(self, agents: List[AuctionAgent], start_time: float):
         """Start a new auction round"""
         auction_id = f"junction_auction_{int(start_time)}"
@@ -520,15 +499,17 @@ class DecentralizedAuctionEngine:
         if auction.status == AuctionStatus.BIDDING:
             if auction.is_expired():
                 auction.status = AuctionStatus.EVALUATING
+                print(f"⏰ Auction {auction.id} bidding phase completed")
         
         elif auction.status == AuctionStatus.EVALUATING:
+            print(f"🔍 Evaluating auction {auction.id} with {len(auction.bids)} bids")
             winners = self.evaluator.evaluate_auction(auction)
             auction.status = AuctionStatus.COMPLETED
             
             # Broadcast results
             self._broadcast_auction_results(auction.id, winners)
-            # self._print_auction_results(auction.id, winners)
             
+            print(f"🏁 Auction {auction.id} completed with {len(winners)} winners")
             return winners
         
         elif auction.status == AuctionStatus.COMPLETED:
@@ -536,6 +517,7 @@ class DecentralizedAuctionEngine:
             self.auction_history[auction.id] = auction
             self.current_auction = None
             self.last_auction_time = current_time
+            print(f"🗄️ Auction {auction.id} archived")
         
         return auction.winners if auction.winners else []
     
@@ -543,6 +525,8 @@ class DecentralizedAuctionEngine:
         """Collect bids from all agents"""
         if not self.current_auction:
             return
+        
+        print(f"💰 Collecting bids from {len(self.current_auction.agents)} agents:")
         
         for agent in self.current_auction.agents:
             # Create bid policy and compute bid
@@ -562,7 +546,8 @@ class DecentralizedAuctionEngine:
             )
             
             self.current_auction.add_bid(bid)
-    
+            print(f"   - {agent.type} {agent.id}: bid = {bid_value:.2f}")
+
     def _agent_to_dict(self, agent: AuctionAgent) -> Dict:
         """Convert AuctionAgent to dict format for BidPolicy"""
         agent_dict = {
@@ -653,7 +638,7 @@ class DecentralizedAuctionEngine:
             'completed_auctions': len(self.auction_history),
             'protected_agents': len(self.evaluator.protected_agents),
             'auction_status': self.current_auction.status.value if self.current_auction else 'none',
-            'max_go_agents': self.max_go_agents,  # Add to stats
+            'max_go_agents': 'unlimited' if self.max_go_agents is None else self.max_go_agents,
             'current_go_count': go_count,
             'current_wait_count': wait_count
         }
@@ -661,7 +646,7 @@ class DecentralizedAuctionEngine:
     # Extension points for future integration
     def apply_conflict_resolution(self, winners: List[AuctionWinner], 
                                 conflict_actions: Dict[str, str]) -> List[AuctionWinner]:
-        """Apply conflict resolution results with 'go' agent limit enforcement"""
+        """Apply conflict resolution results with optional 'go' agent limit enforcement"""
         if not conflict_actions:
             return self._enforce_go_limit(winners)
         
@@ -677,8 +662,8 @@ class DecentralizedAuctionEngine:
             else:
                 waiting_winners.append(winner)
         
-        # Enforce 'go' limit even with conflict resolution
-        if len(resolved_winners) > self.max_go_agents:
+        # Enforce 'go' limit only if limit is set
+        if self.max_go_agents is not None and len(resolved_winners) > self.max_go_agents:
             # Sort by bid value and keep only top N
             resolved_winners.sort(key=lambda w: w.bid.value, reverse=True)
             excess_winners = resolved_winners[self.max_go_agents:]
@@ -699,14 +684,15 @@ class DecentralizedAuctionEngine:
         if waiting_winners:
             go_count = len(resolved_winners)
             wait_count = len(waiting_winners)
-            print(f"🎮 Final allocation: {go_count} go, {wait_count} wait (limit: {self.max_go_agents})")
+            limit_text = "unlimited" if self.max_go_agents is None else str(self.max_go_agents)
+            print(f"🎮 Final allocation: {go_count} go, {wait_count} wait (limit: {limit_text})")
         
         return all_winners
 
     def _enforce_go_limit(self, winners: List[AuctionWinner]) -> List[AuctionWinner]:
         """Enforce go limit when no conflict resolution is applied"""
-        if len(winners) <= self.max_go_agents:
-            # All winners can 'go'
+        if self.max_go_agents is None or len(winners) <= self.max_go_agents:
+            # All winners can 'go' if no limit or within limit
             for winner in winners:
                 winner.conflict_action = 'go'
             return winners

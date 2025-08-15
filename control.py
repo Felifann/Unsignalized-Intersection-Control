@@ -9,7 +9,7 @@ class TrafficController:
     核心思想：所有控制都基于拍卖获胜者的优先级排序
     """
     
-    def __init__(self, carla_wrapper, state_extractor, max_go_agents: int = 8):
+    def __init__(self, carla_wrapper, state_extractor, max_go_agents: int = None):
         self.carla = carla_wrapper
         self.state_extractor = state_extractor
         self.world = carla_wrapper.world
@@ -28,10 +28,11 @@ class TrafficController:
         self.current_controlled_vehicles: Set[str] = set()
         self.platoon_manager = None
         
-        # Add configurable max go agents limit
+        # Add configurable max go agents limit (can be None)
         self.max_go_agents = max_go_agents
         
-        print(f"🎮 增强交通控制器初始化完成 - 支持车队、单车 (max go agents: {max_go_agents})")
+        limit_text = "unlimited" if max_go_agents is None else str(max_go_agents)
+        print(f"🎮 增强交通控制器初始化完成 - 支持车队、单车 (max go agents: {limit_text})")
 
     def set_platoon_manager(self, platoon_manager):
         """Set platoon manager reference"""
@@ -39,12 +40,13 @@ class TrafficController:
         print("🔗 车队管理器已连接到交通控制器")
 
     # Add method to update configuration
-    def update_max_go_agents(self, max_go_agents: int):
+    def update_max_go_agents(self, max_go_agents: int = None):
         """Update the maximum go agents limit"""
         self.max_go_agents = max_go_agents
-        print(f"🔄 Traffic controller: Updated MAX_GO_AGENTS to {max_go_agents}")
+        limit_text = "unlimited" if max_go_agents is None else str(max_go_agents)
+        print(f"🔄 Traffic controller: Updated MAX_GO_AGENTS to {limit_text}")
 
-    def update_control(self, platoon_manager=None, auction_engine=None):
+    def update_control(self, platoon_manager=None, auction_engine=None, direct_winners=None):
         """主控制更新函数"""
         if platoon_manager:
             self.platoon_manager = platoon_manager
@@ -52,8 +54,8 @@ class TrafficController:
         # 1. Maintain intersection vehicle control
         current_controlled = self._maintain_intersection_vehicle_control()
         
-        # 2. Apply auction-based control
-        auction_winners = auction_engine.get_current_priority_order() if auction_engine else []
+        # 2. Apply auction-based control - use direct winners if provided
+        auction_winners = direct_winners or (auction_engine.get_current_priority_order() if auction_engine else [])
         if auction_winners:
             auction_controlled = self._apply_auction_based_control(
                 auction_winners, platoon_manager
@@ -94,10 +96,12 @@ class TrafficController:
 
     def _get_control_action_by_rank(self, rank: int) -> str:
         """根据排名获取控制动作"""
-        if rank <= self.max_go_agents:  # Use configurable limit
-            return 'go'  # 最高优先级，直接通行
+        if self.max_go_agents is None:
+            return 'go'  # No limit, everyone can go
+        elif rank <= self.max_go_agents:
+            return 'go'  # Within limit, can go
         else:
-            return 'wait'  # 其他优先级都等待
+            return 'wait'  # Beyond limit, must wait
 
     def _apply_auction_based_control(self, auction_winners: List, platoon_manager=None) -> Set[str]:
         """Apply control based on auction results with traffic flow control awareness"""
@@ -106,18 +110,48 @@ class TrafficController:
         if not auction_winners:
             return controlled_vehicles
         
-        print(f"🚦 Auction control with traffic flow awareness")
-        for winner in auction_winners:
+        print(f"🚦 Applying auction control to {len(auction_winners)} winners:")
+        
+        # First pass: Identify and protect vehicles already in transit
+        in_transit_vehicles = set()
+        vehicle_states = self.state_extractor.get_vehicle_states()
+        vehicle_lookup = {str(v['id']): v for v in vehicle_states}
+        
+        for vehicle_id, vehicle_state in vehicle_lookup.items():
+            if vehicle_state.get('is_junction', False) and vehicle_id in self.controlled_vehicles:
+                # Vehicle is in intersection and was previously controlled - protect it
+                if self.controlled_vehicles[vehicle_id].get('action') == 'go':
+                    in_transit_vehicles.add(vehicle_id)
+                    # Force continue with 'go' action
+                    if self._apply_single_vehicle_control(vehicle_id, 
+                                                        self.controlled_vehicles[vehicle_id]['rank'],
+                                                        self.controlled_vehicles[vehicle_id]['bid_value'], 
+                                                        'go'):
+                        controlled_vehicles.add(vehicle_id)
+                        print(f"   🔒 Vehicle {vehicle_id}: PROTECTED (in transit)")
+        
+        # Second pass: Apply new auction controls
+        for i, winner in enumerate(auction_winners):
             participant = winner.participant
             
             # Use the conflict_action determined by Nash solver (includes traffic flow control)
-            control_action = winner.conflict_action
+            control_action = getattr(winner, 'conflict_action', 'go')  # Safe default
+            
+            # Validate action
+            if control_action not in ['go', 'wait']:
+                print(f"⚠️ Invalid conflict_action '{control_action}' for {participant.id}, defaulting to 'go'")
+                control_action = 'go'
             
             # Apply control
             if participant.type == 'vehicle':
                 vehicle_id = str(participant.id)
+                
+                # Skip if vehicle is already protected as in-transit
+                if vehicle_id in in_transit_vehicles:
+                    continue
+                    
                 action_emoji = "🟢" if control_action == 'go' else "🔴"
-                reason = "traffic flow control" if control_action == 'wait' and winner.rank > 0 else "priority"
+                reason = f"rank #{winner.rank}"
                 print(f"   🚗 Vehicle {vehicle_id}: {control_action} {action_emoji} ({reason})")
                 
                 if self._apply_single_vehicle_control(vehicle_id, winner.rank, 
@@ -128,8 +162,16 @@ class TrafficController:
                 vehicles = participant.data.get('vehicles', [])
                 if vehicles:
                     leader_id = str(vehicles[0]['id'])
+                    
+                    # Check if any platoon vehicle is in transit
+                    platoon_in_transit = any(str(v['id']) in in_transit_vehicles for v in vehicles)
+                    if platoon_in_transit:
+                        # Force 'go' for entire platoon if any member is in transit
+                        control_action = 'go'
+                        print(f"   🔒 Platoon {participant.id}: PROTECTED (member in transit)")
+                    
                     action_emoji = "🟢" if control_action == 'go' else "🔴"
-                    reason = "traffic flow control" if control_action == 'wait' and winner.rank > 0 else "priority"
+                    reason = f"rank #{winner.rank}"
                     print(f"   🚛 Platoon {participant.id} (leader {leader_id}): {control_action} {action_emoji} ({reason})")
                     
                     platoon_vehicles = self._apply_platoon_control(
@@ -427,46 +469,6 @@ class TrafficController:
                 'ignore_signs': 100.0,    
                 'ignore_vehicles': 50.0
                 }
-
-    def _restore_uncontrolled_vehicles(self, current_controlled: Set[str]):
-        """恢复不再被控制的车辆，包括已离开路口的车辆"""
-        previously_controlled = set(self.controlled_vehicles.keys())
-        vehicles_to_restore = previously_controlled - current_controlled
-        
-        # 检查是否有车辆已完全离开路口区域
-        vehicle_states = self.state_extractor.get_vehicle_states()
-        vehicle_lookup = {str(v['id']): v for v in vehicle_states}
-        
-        for vehicle_id in list(self.controlled_vehicles.keys()):
-            if vehicle_id in vehicle_lookup:
-                vehicle_state = vehicle_lookup[vehicle_id]
-                
-                # 如果车辆已离开路口且不在当前控制列表中，移除控制
-                if (not vehicle_state.get('is_junction', False) and 
-                    vehicle_id not in current_controlled and
-                    self._vehicle_has_exited_intersection(vehicle_state)):
-                    vehicles_to_restore.add(vehicle_id)
-                    print(f"✅ 车辆 {vehicle_id} 已离开路口，移除控制")
-        
-        for vehicle_id in vehicles_to_restore:
-            try:
-                carla_vehicle = self.world.get_actor(int(vehicle_id))
-                if carla_vehicle and carla_vehicle.is_alive:
-                    # 恢复默认控制参数
-                    self.traffic_manager.vehicle_percentage_speed_difference(
-                        carla_vehicle, self.default_speed_diff
-                    )
-                    self.traffic_manager.distance_to_leading_vehicle(
-                        carla_vehicle, self.default_follow_distance
-                    )
-                    self.traffic_manager.ignore_lights_percentage(carla_vehicle, 0.0)
-                    self.traffic_manager.ignore_vehicles_percentage(carla_vehicle, 0.0)
-                
-                # 移除控制记录
-                self.controlled_vehicles.pop(vehicle_id, None)
-                
-            except Exception as e:
-                print(f"[Warning] 恢复车辆控制失败 {vehicle_id}: {e}")
 
     def _vehicle_has_exited_intersection(self, vehicle_state: Dict) -> bool:
         """检查车辆是否已完全离开路口区域"""

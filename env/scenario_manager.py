@@ -1,5 +1,6 @@
-import carla
 import math
+import time
+import carla
 from .carla_wrapper import CarlaWrapper
 from .traffic_generator import TrafficGenerator
 from .simulation_config import SimulationConfig
@@ -10,6 +11,14 @@ class ScenarioManager:
         map_name = town or SimulationConfig.MAP_NAME
         self.carla = CarlaWrapper(town=map_name)
         self.traffic_gen = TrafficGenerator(self.carla)
+
+        self.traffic_generator = self.traffic_gen
+
+        # Timing attributes for real and simulation time measurements
+        self._real_start = None
+        self._real_end = None
+        self._sim_start = None
+        self._sim_end = None
 
     def reset_scenario(self):
         self.carla.destroy_all_vehicles()
@@ -165,3 +174,58 @@ class ScenarioManager:
             except Exception as e:
                 print(f"[Warning] 显示road/lane标签失败: {e}")
                 continue
+
+    def start_time_counters(self):
+        """Start both real-world and simulation-world timers."""
+        try:
+            self._real_start = time.time()
+            # CARLA snapshot timestamp contains elapsed_seconds for simulation time
+            snapshot = self.carla.world.get_snapshot()
+            self._sim_start = getattr(snapshot.timestamp, 'elapsed_seconds', None)
+        except Exception:
+            # Fallback: only set real time if sim time not available
+            self._real_start = time.time()
+            self._sim_start = None
+
+    def stop_time_counters(self):
+        """Stop timers and record end times."""
+        try:
+            self._real_end = time.time()
+            snapshot = self.carla.world.get_snapshot()
+            self._sim_end = getattr(snapshot.timestamp, 'elapsed_seconds', None)
+        except Exception:
+            self._real_end = time.time()
+            # keep sim end as None if unavailable
+
+    def get_real_elapsed(self):
+        """Return elapsed real-world seconds (float)."""
+        if self._real_start is None:
+            return 0.0
+        end = self._real_end if self._real_end is not None else time.time()
+        return max(0.0, end - self._real_start)
+
+    def get_sim_elapsed(self):
+        """Return elapsed simulation seconds (float). Returns None if sim-timestamp unavailable."""
+        if self._sim_start is None:
+            return None
+        end = self._sim_end if self._sim_end is not None else None
+        if end is None:
+            try:
+                snapshot = self.carla.world.get_snapshot()
+                end = getattr(snapshot.timestamp, 'elapsed_seconds', None)
+            except Exception:
+                end = None
+        if end is None:
+            return None
+        return max(0.0, end - self._sim_start)
+
+    def format_elapsed(self, seconds):
+        """Format seconds into H:MM:SS or return 'N/A' for None."""
+        if seconds is None:
+            return "N/A"
+        s = int(round(seconds))
+        h, rem = divmod(s, 3600)
+        m, sec = divmod(rem, 60)
+        if h > 0:
+            return f"{h}:{m:02d}:{sec:02d}"
+        return f"{m:02d}:{sec:02d}"

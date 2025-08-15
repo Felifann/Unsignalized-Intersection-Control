@@ -43,23 +43,22 @@ platoon_manager = PlatoonManager(state_extractor)
 # 这些参数可以通过DRL训练进行优化
 class DRLConfig:
     """DRL可训练的配置参数"""
-    MAX_GO_AGENTS = 8  # 最大同时通行代理数量 (可训练范围: 3-8)
-    CONFLICT_TIME_WINDOW = 2.0  # 冲突时间窗口 (可训练范围: 1.0-5.0)
+    MAX_GO_AGENTS = None  # REMOVED: No limit on simultaneous go agents
+    CONFLICT_TIME_WINDOW = 3.0  # 冲突时间窗口 (可训练范围: 1.0-5.0)
     
     @classmethod
     def update_from_drl_params(cls, max_go_agents=None, conflict_time_window=None):
         """从DRL训练参数更新配置"""
-        if max_go_agents is not None:
-            cls.MAX_GO_AGENTS = max(3, min(8, int(max_go_agents)))  # 限制在合理范围内
+        # max_go_agents parameter is now ignored
         if conflict_time_window is not None:
             cls.CONFLICT_TIME_WINDOW = max(1.0, min(5.0, float(conflict_time_window)))
         
-        print(f"🤖 DRL配置更新: MAX_GO_AGENTS={cls.MAX_GO_AGENTS}, CONFLICT_TIME_WINDOW={cls.CONFLICT_TIME_WINDOW}")
+        print(f"🤖 DRL配置更新: NO GO LIMIT, CONFLICT_TIME_WINDOW={cls.CONFLICT_TIME_WINDOW}")
 
 # 初始化分布式拍卖引擎 - 传入state_extractor
 auction_engine = DecentralizedAuctionEngine(
     state_extractor=state_extractor, 
-    max_go_agents=DRLConfig.MAX_GO_AGENTS
+    max_go_agents=None  # No limit
 )
 
 # 初始化Nash deadlock solver
@@ -67,20 +66,17 @@ nash_solver = DeadlockNashSolver(
     max_exact=15,
     conflict_time_window=DRLConfig.CONFLICT_TIME_WINDOW,
     intersection_center=(-188.9, -89.7, 0.0),
-    max_go_agents=DRLConfig.MAX_GO_AGENTS  # Add limit parameter
+    max_go_agents=None  # No limit
 )
 
 # 在主循环开始前添加动态配置更新
 def update_system_configuration():
     """Update all system components with current DRL configuration"""
-    auction_engine.max_go_agents = DRLConfig.MAX_GO_AGENTS
-    auction_engine.evaluator.max_go_agents = DRLConfig.MAX_GO_AGENTS
-    nash_solver.max_go_agents = DRLConfig.MAX_GO_AGENTS
-    traffic_controller.max_go_agents = DRLConfig.MAX_GO_AGENTS
-    print(f"🔄 System configuration updated: MAX_GO_AGENTS={DRLConfig.MAX_GO_AGENTS}")
+    # No more max_go_agents to update
+    print(f"🔄 System configuration updated: NO GO LIMIT")
 
 # 初始化交通控制器
-traffic_controller = TrafficController(scenario.carla, state_extractor, max_go_agents=DRLConfig.MAX_GO_AGENTS)
+traffic_controller = TrafficController(scenario.carla, state_extractor, max_go_agents=None)
 
 # REACTIVATED: Set platoon manager reference
 traffic_controller.set_platoon_manager(platoon_manager)
@@ -94,6 +90,7 @@ print(f"=== 无信号灯交叉路口仿真 (集成拍卖系统) ===")
 
 # 生成交通流
 scenario.reset_scenario()
+scenario.start_time_counters()  # <-- start real/sim timers immediately after reset
 scenario.show_intersection_area()      # Show larger general intersection area
 scenario.show_intersection_area1()     # Show smaller core deadlock detection area
 
@@ -129,9 +126,9 @@ try:
                 
                 # 2. 更新拍卖系统
                 auction_winners = auction_engine.update(vehicle_states, platoon_manager)
-                
-                # 3. 更新交通控制
-                traffic_controller.update_control(platoon_manager, auction_engine)
+
+                # 3. 更新交通控制 - Pass winners directly
+                traffic_controller.update_control(platoon_manager, auction_engine, auction_winners)
                 
             except Exception as e:
                 if "deadlock" in str(e).lower():
@@ -157,6 +154,7 @@ try:
             vehicles_in_junction = [v for v in vehicle_states if v['is_junction']]
             
             print(f"📊 基础信息: FPS:{actual_fps:.1f}, 车辆总数:{len(vehicles_in_radius)}, 路口内:{len(vehicles_in_junction)}")
+            print(f"🎮 系统配置: NO GO LIMIT, CONFLICT_WINDOW={DRLConfig.CONFLICT_TIME_WINDOW}s")
             
             # 1. 车队管理状态
             # platoon_manager.print_platoon_info()
@@ -187,12 +185,15 @@ try:
                           f"{controlled_count}/{total_vehicles} 受控 "
                           f"(L:{leader_id}, F:{len(follower_ids)})")
 
-            # 2. 拍卖系统状态
+            # 2. 拍卖系统状态 - ENHANCED WITH CONFLICT INFO
             print(f"\n🎯 拍卖系统状态:")
             
             # 显示当前优先级排序（前5名）
             priority_order = auction_engine.get_current_priority_order()
             if priority_order:
+                go_count = sum(1 for w in priority_order if w.conflict_action == 'go')
+                wait_count = sum(1 for w in priority_order if w.conflict_action == 'wait')
+                print(f"   📋 当前决策: {go_count} GO, {wait_count} WAIT (no limit)")
                 print(f"   🏆 当前通行优先级（前5名）:")
                 for winner in priority_order[:5]:
                     participant = winner.participant
@@ -218,15 +219,17 @@ try:
                       f"等待:{control_stats['waiting_vehicles']} | "
                       f"通行:{control_stats['go_vehicles']} | {platoon_info}")
             
-            # 4. 拍卖系统统计
+            # 4. 拍卖系统统计 - ENHANCED
             auction_stats = auction_engine.get_auction_stats()
             if auction_stats['current_agents'] > 0:
                 print(f"🎯 拍卖统计: 参与者:{auction_stats['current_agents']} "
                       f"(车队:{auction_stats['platoon_agents']}, 单车:{auction_stats['vehicle_agents']})")
+                print(f"   状态: {auction_stats['auction_status']}, "
+                      f"GO决策: {auction_stats['current_go_count']} (no limit)")
 
         # 更新车辆ID标签显示（保持原频率）
         scenario.update_vehicle_labels()
-                
+        
         step += 1
 
 except KeyboardInterrupt:
@@ -237,6 +240,24 @@ except Exception as e:
     else:
         print(f"\n❌ 仿真意外终止: {e}")
 finally:
+    # Stop timers and print elapsed times before exiting
+    try:
+        scenario.stop_time_counters()
+        real_elapsed = scenario.get_real_elapsed()
+        sim_elapsed = scenario.get_sim_elapsed()
+        print("\n⏱ 仿真时间统计:")
+        print(f"   • 实时耗时 (wall-clock): {scenario.format_elapsed(real_elapsed)} ({real_elapsed:.2f}s)")
+        print(f"   • 仿真世界时间    : {scenario.format_elapsed(sim_elapsed)} "
+              f"({sim_elapsed:.2f}s)" if sim_elapsed is not None else "   • 仿真世界时间    : N/A")
+    except Exception as e:
+        print(f"⚠️ 无法获取时间统计: {e}")
+
+    # Print collision report (only printed at simulation end)
+    try:
+        scenario.traffic_generator.print_collision_report()
+    except Exception as e:
+        print(f"⚠️ 无法获取碰撞统计: {e}")
+
     print("\n🏁 仿真结束")
 
 
