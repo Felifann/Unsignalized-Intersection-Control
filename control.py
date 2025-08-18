@@ -36,10 +36,22 @@ class TrafficController:
         self.vehicles_exited_intersection = 0  # Number of vehicles that exited intersection
         self.control_history = {}  # Track when vehicles entered/exited control
         
-        # New: Acceleration tracking for controlled vehicles
-        self.acceleration_data = {}  # {vehicle_id: [acceleration_values]}
+        # Enhanced: Separate positive/negative acceleration tracking with simulation time
+        self.acceleration_data = {
+            'positive': {},  # {vehicle_id: [positive_acceleration_values]}
+            'negative': {},  # {vehicle_id: [negative_acceleration_values]}
+            'absolute': {}   # {vehicle_id: [absolute_acceleration_values]} for backward compatibility
+        }
         self.previous_velocities = {}  # {vehicle_id: previous_velocity_vector}
-        self.previous_timestamps = {}  # {vehicle_id: previous_timestamp}
+        self.previous_sim_timestamps = {}  # {vehicle_id: previous_simulation_timestamp}
+        
+        # Acceleration filtering parameters
+        self.accel_filter_config = {
+            'min_time_delta': 0.01,  # Skip samples with very small time differences
+            'max_acceleration': 15.0,  # Truncate extreme acceleration values (m/s²)
+            'use_median_filter': True,  # Apply median filtering
+            'median_window_size': 5    # Window size for median filter
+        }
         
         limit_text = "unlimited" if max_go_agents is None else str(max_go_agents)
         print(f"🎮 增强交通控制器初始化完成 - 支持车队、单车 (max go agents: {limit_text})")
@@ -85,8 +97,9 @@ class TrafficController:
         self.current_controlled_vehicles = current_controlled
 
     def _update_acceleration_data(self, controlled_vehicles: Set[str]):
-        """Update acceleration data for controlled vehicles"""
-        current_time = time.time()
+        """Update acceleration data for controlled vehicles using simulation time and separate positive/negative tracking"""
+        # Get current simulation timestamp
+        current_sim_time = self.world.get_snapshot().timestamp.elapsed_seconds
         vehicle_states = self.state_extractor.get_vehicle_states()
         vehicle_lookup = {str(v['id']): v for v in vehicle_states}
         
@@ -115,9 +128,9 @@ class TrafficController:
                     current_speed = math.sqrt(current_velocity_x**2 + current_velocity_y**2 + current_velocity_z**2)
                     
                     # Calculate acceleration if we have previous data
-                    if vehicle_id in self.previous_velocities and vehicle_id in self.previous_timestamps:
+                    if vehicle_id in self.previous_velocities and vehicle_id in self.previous_sim_timestamps:
                         prev_velocity = self.previous_velocities[vehicle_id]
-                        prev_timestamp = self.previous_timestamps[vehicle_id]
+                        prev_sim_timestamp = self.previous_sim_timestamps[vehicle_id]
                         
                         # Handle previous velocity format consistently
                         if isinstance(prev_velocity, dict):
@@ -125,19 +138,38 @@ class TrafficController:
                         else:
                             prev_speed = math.sqrt(prev_velocity[0]**2 + prev_velocity[1]**2 + prev_velocity[2]**2)
                         
-                        time_delta = current_time - prev_timestamp
-                        if time_delta > 0:
-                            # Calculate acceleration magnitude (change in speed)
-                            acceleration = abs(current_speed - prev_speed) / time_delta
+                        time_delta = current_sim_time - prev_sim_timestamp
+                        
+                        # Filter: Skip if time delta is too small
+                        if time_delta >= self.accel_filter_config['min_time_delta']:
+                            # Calculate raw acceleration (can be positive or negative)
+                            raw_acceleration = (current_speed - prev_speed) / time_delta
                             
-                            # Store acceleration data
-                            if vehicle_id not in self.acceleration_data:
-                                self.acceleration_data[vehicle_id] = []
-                            self.acceleration_data[vehicle_id].append(acceleration)
+                            # Truncate extreme values
+                            max_accel = self.accel_filter_config['max_acceleration']
+                            truncated_acceleration = max(-max_accel, min(max_accel, raw_acceleration))
+                            
+                            # Initialize acceleration lists if needed
+                            for accel_type in ['positive', 'negative', 'absolute']:
+                                if vehicle_id not in self.acceleration_data[accel_type]:
+                                    self.acceleration_data[accel_type][vehicle_id] = []
+                            
+                            # Store acceleration data separately by sign
+                            if truncated_acceleration > 0:
+                                self.acceleration_data['positive'][vehicle_id].append(truncated_acceleration)
+                            elif truncated_acceleration < 0:
+                                self.acceleration_data['negative'][vehicle_id].append(abs(truncated_acceleration))
+                            
+                            # Also store absolute value for backward compatibility
+                            self.acceleration_data['absolute'][vehicle_id].append(abs(truncated_acceleration))
+                            
+                            # Apply median filtering if enabled
+                            if self.accel_filter_config['use_median_filter']:
+                                self._apply_median_filter(vehicle_id)
                     
                     # Update previous data - store as tuple for consistency
                     self.previous_velocities[vehicle_id] = (current_velocity_x, current_velocity_y, current_velocity_z)
-                    self.previous_timestamps[vehicle_id] = current_time
+                    self.previous_sim_timestamps[vehicle_id] = current_sim_time
                     
                 except Exception as e:
                     print(f"[Warning] 计算车辆 {vehicle_id} 加速度失败: {e}")
@@ -148,17 +180,63 @@ class TrafficController:
                     except:
                         pass
 
-    def _calculate_average_acceleration(self) -> float:
-        """Calculate average absolute acceleration for all controlled vehicles"""
-        all_accelerations = []
+    def _apply_median_filter(self, vehicle_id: str):
+        """Apply median filtering to the most recent acceleration samples"""
+        window_size = self.accel_filter_config['median_window_size']
         
-        for vehicle_id, accelerations in self.acceleration_data.items():
-            all_accelerations.extend(accelerations)
+        for accel_type in ['positive', 'negative', 'absolute']:
+            if vehicle_id in self.acceleration_data[accel_type]:
+                accel_list = self.acceleration_data[accel_type][vehicle_id]
+                
+                # Apply median filter only if we have enough samples
+                if len(accel_list) >= window_size:
+                    # Get the most recent window
+                    recent_window = accel_list[-window_size:]
+                    
+                    # Calculate median of the window
+                    sorted_window = sorted(recent_window)
+                    n = len(sorted_window)
+                    if n % 2 == 0:
+                        median_value = (sorted_window[n//2 - 1] + sorted_window[n//2]) / 2
+                    else:
+                        median_value = sorted_window[n//2]
+                    
+                    # Replace the most recent value with the median
+                    accel_list[-1] = median_value
+
+    def _calculate_average_acceleration(self) -> Dict[str, float]:
+        """Calculate average acceleration for positive, negative, and absolute values with separate absolute averages"""
+        results = {}
         
-        if all_accelerations:
-            return sum(all_accelerations) / len(all_accelerations)
-        else:
-            return 0.0
+        for accel_type in ['positive', 'negative', 'absolute']:
+            all_accelerations = []
+            
+            for vehicle_id, accelerations in self.acceleration_data[accel_type].items():
+                all_accelerations.extend(accelerations)
+            
+            if all_accelerations:
+                # Calculate average of absolute values for positive and negative separately
+                if accel_type in ['positive', 'negative']:
+                    # For positive/negative, calculate average of absolute values
+                    results[f'average_absolute_{accel_type}_acceleration'] = sum(abs(a) for a in all_accelerations) / len(all_accelerations)
+                    results[f'average_{accel_type}_acceleration'] = sum(all_accelerations) / len(all_accelerations)
+                else:
+                    # For absolute, keep original behavior
+                    results[f'average_{accel_type}_acceleration'] = sum(all_accelerations) / len(all_accelerations)
+                
+                results[f'{accel_type}_acceleration_samples'] = len(all_accelerations)
+                results[f'{accel_type}_acceleration_vehicles'] = len(self.acceleration_data[accel_type])
+            else:
+                if accel_type in ['positive', 'negative']:
+                    results[f'average_absolute_{accel_type}_acceleration'] = 0.0
+                    results[f'average_{accel_type}_acceleration'] = 0.0
+                else:
+                    results[f'average_{accel_type}_acceleration'] = 0.0
+                
+                results[f'{accel_type}_acceleration_samples'] = 0
+                results[f'{accel_type}_acceleration_vehicles'] = 0
+        
+        return results
 
     def _maintain_intersection_vehicle_control(self) -> Set[str]:
         """维持路口内车辆的控制"""
@@ -360,17 +438,23 @@ class TrafficController:
                 
                 # Track exit statistics
                 if vehicle_id in self.controlled_vehicles:
-                    # Mark exit time for statistics
+                    # Mark exit time for statistics - USE SIMULATION TIME
+                    current_sim_time = self.world.get_snapshot().timestamp.elapsed_seconds
                     self.control_history[vehicle_id] = {
-                        'enter_time': self.controlled_vehicles[vehicle_id].get('timestamp', 0),
-                        'exit_time': time.time(),
+                        'enter_time': self.controlled_vehicles[vehicle_id].get('sim_timestamp', current_sim_time),
+                        'exit_time': current_sim_time,  # Use simulation time instead of wall-clock time
                         'action': self.controlled_vehicles[vehicle_id].get('action', 'unknown')
                     }
                     self.vehicles_exited_intersection += 1
                 
                 # Clean up acceleration tracking data for exited vehicles
                 self.previous_velocities.pop(vehicle_id, None)
-                self.previous_timestamps.pop(vehicle_id, None)
+                self.previous_sim_timestamps.pop(vehicle_id, None)  # Updated to use sim timestamps
+                
+                # Clean up acceleration data
+                for accel_type in ['positive', 'negative', 'absolute']:
+                    if vehicle_id in self.acceleration_data[accel_type]:
+                        del self.acceleration_data[accel_type][vehicle_id]
                 
                 # 移除控制记录
                 self.controlled_vehicles.pop(vehicle_id, None)
@@ -418,18 +502,25 @@ class TrafficController:
         }
 
     def get_final_statistics(self) -> Dict[str, Any]:
-        """Get final simulation statistics"""
-        avg_acceleration = self._calculate_average_acceleration()
+        """Get final simulation statistics with enhanced acceleration metrics"""
+        accel_stats = self._calculate_average_acceleration()
         
-        return {
+        base_stats = {
             'total_vehicles_controlled': self.total_vehicles_controlled,
             'vehicles_exited_intersection': self.vehicles_exited_intersection,
             'vehicles_still_controlled': len(self.controlled_vehicles),
             'control_history_count': len(self.control_history),
-            'average_absolute_acceleration': avg_acceleration,
-            'total_acceleration_samples': sum(len(accel_list) for accel_list in self.acceleration_data.values()),
-            'vehicles_with_acceleration_data': len(self.acceleration_data)
         }
+        
+        # Merge acceleration statistics
+        base_stats.update(accel_stats)
+        
+        # Add legacy field for backward compatibility
+        base_stats['average_absolute_acceleration'] = accel_stats['average_absolute_acceleration']
+        base_stats['total_acceleration_samples'] = accel_stats['absolute_acceleration_samples']
+        base_stats['vehicles_with_acceleration_data'] = accel_stats['absolute_acceleration_vehicles']
+        
+        return base_stats
 
     def _apply_single_vehicle_control(self, vehicle_id: str, rank: int, bid_value: float, 
                                     action: str) -> bool:
@@ -459,7 +550,8 @@ class TrafficController:
                 carla_vehicle, params['ignore_vehicles']
             )
             
-            # Record control state
+            # Record control state - USE SIMULATION TIME
+            current_sim_time = self.world.get_snapshot().timestamp.elapsed_seconds
             self.controlled_vehicles[vehicle_id] = {
                 'rank': rank,
                 'bid_value': bid_value,
@@ -467,7 +559,8 @@ class TrafficController:
                 'params': params,
                 'is_platoon_member': False,
                 'is_leader': False,
-                'timestamp': time.time()
+                'timestamp': time.time(),  # Keep wall-clock time for other purposes
+                'sim_timestamp': current_sim_time  # Add simulation time
             }
             
             return True
@@ -534,7 +627,8 @@ class TrafficController:
             )
         
             
-            # Record control state
+            # Record control state - USE SIMULATION TIME
+            current_sim_time = self.world.get_snapshot().timestamp.elapsed_seconds
             self.controlled_vehicles[vehicle_id] = {
                 'rank': rank,
                 'bid_value': bid_value,
@@ -542,7 +636,8 @@ class TrafficController:
                 'params': params,
                 'is_platoon_member': True,
                 'is_leader': is_leader,
-                'timestamp': time.time()
+                'timestamp': time.time(),  # Keep wall-clock time for other purposes  
+                'sim_timestamp': current_sim_time  # Add simulation time
             }
             
             return True

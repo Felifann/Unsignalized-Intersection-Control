@@ -263,14 +263,27 @@ finally:
         print(f"   • 仍在控制中: {control_final_stats['vehicles_still_controlled']}")
         print(f"   • 控制历史记录: {control_final_stats['control_history_count']}")
         
-        # New: Print acceleration statistics
-        avg_accel = control_final_stats['average_absolute_acceleration']
-        accel_samples = control_final_stats['total_acceleration_samples']
-        vehicles_with_data = control_final_stats['vehicles_with_acceleration_data']
+        # New: Print enhanced acceleration statistics
+        avg_pos_accel = control_final_stats['average_positive_acceleration']
+        avg_neg_accel = control_final_stats['average_negative_acceleration']
+        avg_abs_accel = control_final_stats['average_absolute_acceleration']
         
-        print(f"   • 平均绝对加速度: {avg_accel:.3f} m/s² ({accel_samples} 样本)")
-        print(f"   • 有加速度数据的车辆: {vehicles_with_data}")
+        # NEW: Print separate absolute averages for positive/negative accelerations
+        avg_abs_pos_accel = control_final_stats.get('average_absolute_positive_acceleration', 0.0)
+        avg_abs_neg_accel = control_final_stats.get('average_absolute_negative_acceleration', 0.0)
         
+        pos_samples = control_final_stats['positive_acceleration_samples']
+        neg_samples = control_final_stats['negative_acceleration_samples']
+        abs_samples = control_final_stats['absolute_acceleration_samples']
+        
+        pos_vehicles = control_final_stats['positive_acceleration_vehicles']
+        neg_vehicles = control_final_stats['negative_acceleration_vehicles']
+        abs_vehicles = control_final_stats['absolute_acceleration_vehicles']
+        
+        print(f"   • 平均正加速度: {avg_pos_accel:.3f} m/s² (绝对值: {avg_abs_pos_accel:.3f} m/s²) ({pos_samples} 样本, {pos_vehicles} 车辆)")
+        print(f"   • 平均负加速度: {avg_neg_accel:.3f} m/s² (绝对值: {avg_abs_neg_accel:.3f} m/s²) ({neg_samples} 样本, {neg_vehicles} 车辆)")
+        print(f"   • 平均绝对加速度: {avg_abs_accel:.3f} m/s² ({abs_samples} 样本, {abs_vehicles} 车辆)")
+    
         if control_final_stats['total_vehicles_controlled'] > 0:
             success_rate = (control_final_stats['vehicles_exited_intersection'] / 
                           control_final_stats['total_vehicles_controlled']) * 100
