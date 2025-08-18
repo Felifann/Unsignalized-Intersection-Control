@@ -263,10 +263,23 @@ finally:
         print(f"   • 仍在控制中: {control_final_stats['vehicles_still_controlled']}")
         print(f"   • 控制历史记录: {control_final_stats['control_history_count']}")
         
+        # New: Print acceleration statistics
+        avg_accel = control_final_stats['average_absolute_acceleration']
+        accel_samples = control_final_stats['total_acceleration_samples']
+        vehicles_with_data = control_final_stats['vehicles_with_acceleration_data']
+        
+        print(f"   • 平均绝对加速度: {avg_accel:.3f} m/s² ({accel_samples} 样本)")
+        print(f"   • 有加速度数据的车辆: {vehicles_with_data}")
+        
         if control_final_stats['total_vehicles_controlled'] > 0:
             success_rate = (control_final_stats['vehicles_exited_intersection'] / 
                           control_final_stats['total_vehicles_controlled']) * 100
             print(f"   • 成功通过率: {success_rate:.1f}%")
+    
+        # Print 单位时间通行数
+        throughput = control_final_stats['vehicles_exited_intersection'] / sim_elapsed * 3600 if sim_elapsed > 0 else 0
+        print(f"   • 单位时间通行数: {throughput:.1f} 辆/h")
+        
     except Exception as e:
         print(f"⚠️ 无法获取控制统计: {e}")
 
