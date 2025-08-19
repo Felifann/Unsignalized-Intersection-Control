@@ -7,11 +7,6 @@ from enum import Enum
 from env.simulation_config import SimulationConfig
 from .bid_policy import AgentBidPolicy
 
-# Add missing utility function
-def _euclidean_2d(a: Tuple[float, float, float], b: Tuple[float, float, float]) -> float:
-    """Calculate 2D Euclidean distance between two 3D points (ignoring z-coordinate)"""
-    return math.hypot(a[0]-b[0], a[1]-b[1])
-
 class AuctionStatus(Enum):
     WAITING = "waiting"
     BIDDING = "bidding" 
@@ -428,6 +423,11 @@ class DecentralizedAuctionEngine:
         self.nash_controller = nash_controller
         print("🔗 Nash deadlock controller已连接到拍卖引擎")
 
+    def set_bid_policy(self, bid_policy):
+        """Set trainable DRL bid policy"""
+        self.bid_policy = bid_policy
+        print("🔗 Trainable bid policy connected to auction engine")
+
     def update(self, vehicle_states: List[Dict], platoon_manager=None) -> List[AuctionWinner]:
         """Main update loop with Nash deadlock support"""
         current_time = time.time()
@@ -530,13 +530,38 @@ class DecentralizedAuctionEngine:
         print(f"💰 Collecting bids from {len(self.current_auction.agents)} agents:")
         
         for agent in self.current_auction.agents:
-            # Create bid policy and compute bid
-            bid_policy = AgentBidPolicy(
-                self._agent_to_dict(agent),
-                self.intersection_center,
-                self.state_extractor
-            )
-            bid_value = bid_policy.compute_bid()
+            bid_value = 0.0
+            
+            # Use trainable DRL policy if available
+            if self.bid_policy:
+                if agent.type == 'vehicle':
+                    bid_value = self.bid_policy.calculate_bid(
+                        vehicle_state=agent.data,
+                        is_platoon_leader=False,
+                        platoon_size=1,
+                        context={}
+                    )
+                elif agent.type == 'platoon':
+                    # For platoons, use leader's data with platoon context
+                    vehicles = agent.data.get('vehicles', [])
+                    if vehicles:
+                        leader_data = vehicles[0]
+                        bid_value = self.bid_policy.calculate_bid(
+                            vehicle_state=leader_data,
+                            is_platoon_leader=True,
+                            platoon_size=len(vehicles),
+                            context={'platoon_vehicles': vehicles}
+                        )
+                    else:
+                        bid_value = 20.0  # fallback
+            else:
+                # Fallback to original static bid policy
+                bid_policy = AgentBidPolicy(
+                    self._agent_to_dict(agent),
+                    self.intersection_center,
+                    self.state_extractor
+                )
+                bid_value = bid_policy.compute_bid()
             
             # Create and add bid
             bid = Bid(
@@ -547,7 +572,8 @@ class DecentralizedAuctionEngine:
             )
             
             self.current_auction.add_bid(bid)
-            print(f"   - {agent.type} {agent.id}: bid = {bid_value:.2f}")
+            policy_type = "DRL" if self.bid_policy else "static"
+            print(f"   - {agent.type} {agent.id}: bid = {bid_value:.2f} ({policy_type})")
 
     def _agent_to_dict(self, agent: AuctionAgent) -> Dict:
         """Convert AuctionAgent to dict format for BidPolicy"""

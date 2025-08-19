@@ -7,7 +7,7 @@ class TrainableBidPolicy:
     """增强的可训练出价策略，完全集成DRL优化"""
     
     def __init__(self):
-        # 核心可训练参数
+        # 核心可训练参数 - 扩展版本
         self.bid_scale = 1.0  # 总体出价缩放因子
         self.eta_weight = 1.0  # ETA权重
         self.speed_weight = 0.3  # 速度权重
@@ -15,14 +15,23 @@ class TrainableBidPolicy:
         self.platoon_bonus = 0.5  # 车队奖励
         self.junction_penalty = 0.2  # 路口惩罚
         
-        # 控制参数修正
+        # 新增：更多可训练参数
+        self.fairness_factor = 0.1  # 公平性因子
+        self.urgency_threshold = 5.0  # 紧急度阈值
+        self.adaptation_rate = 0.05  # 适应率
+        self.proximity_bonus_weight = 1.0  # 邻近性奖励权重
+        
+        # 控制参数修正 - 扩展版本
         self.speed_diff_modifier = 0.0  # 速度差异修正
         self.follow_distance_modifier = 0.0  # 跟车距离修正
         
+        # 新增：ignore_vehicles参数控制
+        self.ignore_vehicles_go = 50.0  # GO状态下的ignore_vehicles百分比
+        self.ignore_vehicles_wait = 0.0  # WAIT状态下的ignore_vehicles百分比
+        self.ignore_vehicles_platoon_leader = 50.0  # 车队领队的ignore_vehicles
+        self.ignore_vehicles_platoon_follower = 90.0  # 车队跟随者的ignore_vehicles
+        
         # 动态适应参数
-        self.fairness_factor = 0.1
-        self.urgency_threshold = 5.0
-        self.adaptation_rate = 0.05
         self.performance_window = 100
         self.performance_history = deque(maxlen=self.performance_window)
         
@@ -36,7 +45,7 @@ class TrainableBidPolicy:
         self.episode_bids = []
         self.episode_rewards = []
         
-        print("🎯 可训练出价策略初始化")
+        print("🎯 扩展可训练出价策略初始化 - 包含ignore_vehicles控制")
 
     def reset_episode(self):
         """重置回合状态"""
@@ -46,26 +55,55 @@ class TrainableBidPolicy:
         print("🔄 策略状态已重置")
 
     def update_bid_scale(self, bid_scale: float):
-        """更新出价缩放因子"""
+        """Update only bid scale (backward compatibility)"""
         self.bid_scale = np.clip(bid_scale, 0.1, 5.0)
 
-    def update_advanced_params(self, eta_weight: float = None, speed_weight: float = None,
-                             congestion_sensitivity: float = None, fairness_factor: float = None):
-        """更新高级策略参数"""
+    def update_all_bid_params(self, bid_scale: float = None, eta_weight: float = None,
+                             speed_weight: float = None, congestion_sensitivity: float = None,
+                             platoon_bonus: float = None, junction_penalty: float = None,
+                             fairness_factor: float = None, urgency_threshold: float = None,
+                             proximity_bonus_weight: float = None):
+        """更新所有出价相关参数"""
+        if bid_scale is not None:
+            self.bid_scale = np.clip(bid_scale, 0.1, 5.0)
         if eta_weight is not None:
             self.eta_weight = np.clip(eta_weight, 0.5, 3.0)
         if speed_weight is not None:
             self.speed_weight = np.clip(speed_weight, 0.0, 1.0)
         if congestion_sensitivity is not None:
             self.congestion_sensitivity = np.clip(congestion_sensitivity, 0.0, 1.0)
+        if platoon_bonus is not None:
+            self.platoon_bonus = np.clip(platoon_bonus, 0.0, 2.0)
+        if junction_penalty is not None:
+            self.junction_penalty = np.clip(junction_penalty, 0.0, 1.0)
         if fairness_factor is not None:
             self.fairness_factor = np.clip(fairness_factor, 0.0, 0.5)
+        if urgency_threshold is not None:
+            self.urgency_threshold = np.clip(urgency_threshold, 1.0, 10.0)
+        if proximity_bonus_weight is not None:
+            self.proximity_bonus_weight = np.clip(proximity_bonus_weight, 0.0, 3.0)
 
-    def update_control_params(self, speed_diff_modifier: float = 0.0, 
-                            follow_distance_modifier: float = 0.0):
+    def update_control_params(self, speed_diff_modifier: float = None, 
+                            follow_distance_modifier: float = None):
         """更新控制参数修正值"""
-        self.speed_diff_modifier = np.clip(speed_diff_modifier, -20.0, 20.0)
-        self.follow_distance_modifier = np.clip(follow_distance_modifier, -1.0, 2.0)
+        if speed_diff_modifier is not None:
+            self.speed_diff_modifier = np.clip(speed_diff_modifier, -30.0, 30.0)
+        if follow_distance_modifier is not None:
+            self.follow_distance_modifier = np.clip(follow_distance_modifier, -2.0, 3.0)
+
+    def update_ignore_vehicles_params(self, ignore_vehicles_go: float = None,
+                                    ignore_vehicles_wait: float = None,
+                                    ignore_vehicles_platoon_leader: float = None,
+                                    ignore_vehicles_platoon_follower: float = None):
+        """更新ignore_vehicles相关参数"""
+        if ignore_vehicles_go is not None:
+            self.ignore_vehicles_go = np.clip(ignore_vehicles_go, 0.0, 100.0)
+        if ignore_vehicles_wait is not None:
+            self.ignore_vehicles_wait = np.clip(ignore_vehicles_wait, 0.0, 50.0)
+        if ignore_vehicles_platoon_leader is not None:
+            self.ignore_vehicles_platoon_leader = np.clip(ignore_vehicles_platoon_leader, 0.0, 80.0)
+        if ignore_vehicles_platoon_follower is not None:
+            self.ignore_vehicles_platoon_follower = np.clip(ignore_vehicles_platoon_follower, 50.0, 100.0)
 
     def calculate_bid(self, vehicle_state: Dict, is_platoon_leader: bool = False, 
                      platoon_size: int = 1, context: Dict = None) -> float:
@@ -180,10 +218,21 @@ class TrainableBidPolicy:
 
     def _calculate_proximity_bonus(self, vehicle_state: Dict) -> float:
         """计算接近路口的奖励"""
-        position = vehicle_state.get('position', [0, 0, 0])
+        # Handle both 'position' and 'location' keys, and both dict/tuple formats
+        position = vehicle_state.get('position') or vehicle_state.get('location', [0, 0, 0])
+        
+        if isinstance(position, dict):
+            pos_x = position.get('x', 0.0)
+            pos_y = position.get('y', 0.0)
+        elif isinstance(position, (list, tuple)) and len(position) >= 2:
+            pos_x = float(position[0])
+            pos_y = float(position[1])
+        else:
+            pos_x, pos_y = 0.0, 0.0
+        
         center = [-188.9, -89.7, 0.0]
         
-        distance = np.sqrt((position[0] - center[0])**2 + (position[1] - center[1])**2)
+        distance = np.sqrt((pos_x - center[0])**2 + (pos_y - center[1])**2)
         
         if distance < 50.0:  # 50米内
             return max(0.0, (50.0 - distance) / 50.0 * 3.0)
@@ -208,14 +257,26 @@ class TrainableBidPolicy:
             'context': context.copy()
         })
 
-    def get_control_params(self, action: str, is_platoon_member: bool = False, 
-                          is_leader: bool = False, vehicle_state: Dict = None) -> Dict[str, float]:
-        """获取增强的控制参数"""
+    def get_enhanced_control_params(self, action: str, is_platoon_member: bool = False, 
+                                  is_leader: bool = False, vehicle_state: Dict = None) -> Dict[str, float]:
+        """获取增强的控制参数，包含可训练的ignore_vehicles"""
         # 基础参数
         speed_diff = self.speed_diff_base + self.speed_diff_modifier
         follow_distance = self.follow_distance_base + self.follow_distance_modifier
         
-        # 根据动作调整
+        # 确定ignore_vehicles参数
+        if is_platoon_member:
+            if is_leader:
+                ignore_vehicles = self.ignore_vehicles_platoon_leader
+            else:
+                ignore_vehicles = self.ignore_vehicles_platoon_follower
+        else:
+            if action == 'go':
+                ignore_vehicles = self.ignore_vehicles_go
+            else:  # wait
+                ignore_vehicles = self.ignore_vehicles_wait
+        
+        # 根据动作调整基础参数
         if action == 'go':
             speed_diff = max(speed_diff, -30.0)  # 允许更积极的速度
             follow_distance = max(0.5, follow_distance - 0.2)
@@ -230,10 +291,11 @@ class TrainableBidPolicy:
                 speed_diff += 5.0  # 领队稍微积极
         
         return {
-            'speed_difference': float(speed_diff),
-            'distance_to_leading_vehicle': float(follow_distance),
-            'ignore_lights_percentage': 100.0,
-            'auto_lane_change': False
+            'speed_diff': float(speed_diff),           
+            'follow_distance': float(follow_distance), 
+            'ignore_lights': 100.0,                   
+            'ignore_signs': 100.0,                    
+            'ignore_vehicles': float(ignore_vehicles)  
         }
 
     def adapt_performance(self, performance_metrics: Dict):
@@ -280,17 +342,27 @@ class TrainableBidPolicy:
         """获取当前出价缩放因子"""
         return self.bid_scale
 
-    def get_policy_params(self) -> Dict[str, float]:
-        """获取所有策略参数"""
+    def get_all_trainable_params(self) -> Dict[str, float]:
+        """获取所有可训练参数"""
         return {
+            # 出价策略参数
             'bid_scale': self.bid_scale,
             'eta_weight': self.eta_weight,
             'speed_weight': self.speed_weight,
             'congestion_sensitivity': self.congestion_sensitivity,
             'platoon_bonus': self.platoon_bonus,
             'junction_penalty': self.junction_penalty,
+            'fairness_factor': self.fairness_factor,
+            'urgency_threshold': self.urgency_threshold,
+            'proximity_bonus_weight': self.proximity_bonus_weight,
+            
+            # 控制参数
             'speed_diff_modifier': self.speed_diff_modifier,
             'follow_distance_modifier': self.follow_distance_modifier,
-            'fairness_factor': self.fairness_factor,
-            'urgency_threshold': self.urgency_threshold
+            
+            # ignore_vehicles参数
+            'ignore_vehicles_go': self.ignore_vehicles_go,
+            'ignore_vehicles_wait': self.ignore_vehicles_wait,
+            'ignore_vehicles_platoon_leader': self.ignore_vehicles_platoon_leader,
+            'ignore_vehicles_platoon_follower': self.ignore_vehicles_platoon_follower
         }

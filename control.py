@@ -361,52 +361,64 @@ class TrafficController:
     def _get_control_params_by_rank_and_action(self, rank: int, action: str, 
                                          is_platoon_member: bool = False,
                                          is_leader: bool = False) -> Dict[str, float]:
-        """根据排名、动作和车队状态获取控制参数"""
+        """根据排名、动作和车队状态获取控制参数 - 集成bid_policy参数"""
+        
+        # 如果有bid_policy，使用其增强的控制参数
+        if hasattr(self, 'bid_policy') and self.bid_policy:
+            return self.bid_policy.get_enhanced_control_params(
+                action=action,
+                is_platoon_member=is_platoon_member,
+                is_leader=is_leader
+            )
+        
+        # 原有的fallback逻辑
         if action == 'wait':
             if is_platoon_member and not is_leader:
-                # Followers should wait more aggressively to maintain formation
                 return {
-                    'speed_diff': -75.0,      # Stronger speed reduction for platoon followers
-                    'follow_distance': 1.0,   # Very tight following for formation
-                    'ignore_lights': 0.0,     
-                    'ignore_signs': 0.0,      
-                    'ignore_vehicles': 20.0   # Allow some vehicle ignoring to follow leader
+                    'speed_diff': -75.0,
+                    'follow_distance': 1.0,
+                    'ignore_lights': 0.0,
+                    'ignore_signs': 0.0,
+                    'ignore_vehicles': 20.0
                 }
             else:
                 return {
-                    'speed_diff': -70.0,      # Strong speed reduction for waiting
+                    'speed_diff': -70.0,
                     'follow_distance': 2.5 if not is_platoon_member else 2.0,
-                    'ignore_lights': 0.0,     
-                    'ignore_signs': 0.0,      
-                    'ignore_vehicles': 0.0    
+                    'ignore_lights': 0.0,
+                    'ignore_signs': 0.0,
+                    'ignore_vehicles': 0.0
                 }
         elif action == 'go':
             if is_platoon_member and not is_leader:
-                # Followers should be very aggressive in following the leader
                 return {
-                    'speed_diff': -45.0,      # Less speed reduction to keep up with leader
-                    'follow_distance': 0.8,   # Very tight following distance
-                    'ignore_lights': 100.0,   
-                    'ignore_signs': 100.0,    
-                    'ignore_vehicles': 90.0   # Higher vehicle ignoring for aggressive following
+                    'speed_diff': -45.0,
+                    'follow_distance': 0.8,
+                    'ignore_lights': 100.0,
+                    'ignore_signs': 100.0,
+                    'ignore_vehicles': 90.0
                 }
             elif is_platoon_member and is_leader:
-                # Leaders should move smoothly but not too aggressively
                 return {
-                    'speed_diff': -50.0,      
-                    'follow_distance': 1.5,   # Normal following distance for leader
-                    'ignore_lights': 100.0,   
-                    'ignore_signs': 100.0,    
-                    'ignore_vehicles': 50.0   # Limited vehicle ignoring for leader
+                    'speed_diff': -50.0,
+                    'follow_distance': 1.5,
+                    'ignore_lights': 100.0,
+                    'ignore_signs': 100.0,
+                    'ignore_vehicles': 50.0
                 }
             else:
                 return {
-                    'speed_diff': -55.0,      
-                    'follow_distance': 1.2,   
-                    'ignore_lights': 100.0,   
-                    'ignore_signs': 100.0,    
+                    'speed_diff': -55.0,
+                    'follow_distance': 1.2,
+                    'ignore_lights': 100.0,
+                    'ignore_signs': 100.0,
                     'ignore_vehicles': 50.0
                 }
+
+    def set_bid_policy(self, bid_policy):
+        """设置bid_policy引用以使用其控制参数"""
+        self.bid_policy = bid_policy
+        print("🔗 Bid policy connected to traffic controller")
 
     def _restore_uncontrolled_vehicles(self, current_controlled: Set[str]):
         """恢复不再被控制的车辆，包括已离开路口的车辆"""
