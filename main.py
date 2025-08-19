@@ -284,11 +284,6 @@ finally:
         print(f"   • 平均负加速度: {avg_neg_accel:.3f} m/s² (绝对值: {avg_abs_neg_accel:.3f} m/s²) ({neg_samples} 样本, {neg_vehicles} 车辆)")
         print(f"   • 平均绝对加速度: {avg_abs_accel:.3f} m/s² ({abs_samples} 样本, {abs_vehicles} 车辆)")
     
-        if control_final_stats['total_vehicles_controlled'] > 0:
-            success_rate = (control_final_stats['vehicles_exited_intersection'] / 
-                          control_final_stats['total_vehicles_controlled']) * 100
-            print(f"   • 成功通过率: {success_rate:.1f}%")
-    
         # Print 单位时间通行数
         throughput = control_final_stats['vehicles_exited_intersection'] / sim_elapsed * 3600 if sim_elapsed > 0 else 0
         print(f"   • 单位时间通行数: {throughput:.1f} 辆/h")

@@ -42,6 +42,12 @@ class TrafficController:
             'negative': {},  # {vehicle_id: [negative_acceleration_values]}
             'absolute': {}   # {vehicle_id: [absolute_acceleration_values]} for backward compatibility
         }
+        # Archive completed vehicles' acceleration history so final stats keep samples
+        self.archived_acceleration_data = {
+            'positive': {},
+            'negative': {},
+            'absolute': {}
+        }
         self.previous_velocities = {}  # {vehicle_id: previous_velocity_vector}
         self.previous_sim_timestamps = {}  # {vehicle_id: previous_simulation_timestamp}
         
@@ -158,7 +164,8 @@ class TrafficController:
                             if truncated_acceleration > 0:
                                 self.acceleration_data['positive'][vehicle_id].append(truncated_acceleration)
                             elif truncated_acceleration < 0:
-                                self.acceleration_data['negative'][vehicle_id].append(abs(truncated_acceleration))
+                                # store negative accelerations as negative values so sign is preserved
+                                self.acceleration_data['negative'][vehicle_id].append(truncated_acceleration)
                             
                             # Also store absolute value for backward compatibility
                             self.acceleration_data['absolute'][vehicle_id].append(abs(truncated_acceleration))
@@ -211,7 +218,10 @@ class TrafficController:
         for accel_type in ['positive', 'negative', 'absolute']:
             all_accelerations = []
             
+            # include both currently tracked and archived samples
             for vehicle_id, accelerations in self.acceleration_data[accel_type].items():
+                all_accelerations.extend(accelerations)
+            for vehicle_id, accelerations in self.archived_acceleration_data[accel_type].items():
                 all_accelerations.extend(accelerations)
             
             if all_accelerations:
@@ -452,8 +462,12 @@ class TrafficController:
                 self.previous_sim_timestamps.pop(vehicle_id, None)  # Updated to use sim timestamps
                 
                 # Clean up acceleration data
+                # move the samples to archive so final stats include them
                 for accel_type in ['positive', 'negative', 'absolute']:
                     if vehicle_id in self.acceleration_data[accel_type]:
+                        self.archived_acceleration_data[accel_type].setdefault(vehicle_id, []).extend(
+                            self.acceleration_data[accel_type][vehicle_id]
+                        )
                         del self.acceleration_data[accel_type][vehicle_id]
                 
                 # 移除控制记录
@@ -550,18 +564,21 @@ class TrafficController:
                 carla_vehicle, params['ignore_vehicles']
             )
             
+            # If first time controlling this vehicle, increment total counter
+            if vehicle_id not in self.controlled_vehicles:
+                self.total_vehicles_controlled += 1
             # Record control state - USE SIMULATION TIME
             current_sim_time = self.world.get_snapshot().timestamp.elapsed_seconds
             self.controlled_vehicles[vehicle_id] = {
-                'rank': rank,
-                'bid_value': bid_value,
-                'action': action,
-                'params': params,
-                'is_platoon_member': False,
-                'is_leader': False,
-                'timestamp': time.time(),  # Keep wall-clock time for other purposes
-                'sim_timestamp': current_sim_time  # Add simulation time
-            }
+                 'rank': rank,
+                 'bid_value': bid_value,
+                 'action': action,
+                 'params': params,
+                 'is_platoon_member': False,
+                 'is_leader': False,
+                 'timestamp': time.time(),  # Keep wall-clock time for other purposes
+                 'sim_timestamp': current_sim_time  # Add simulation time
+             }
             
             return True
             
@@ -627,18 +644,21 @@ class TrafficController:
             )
         
             
+            # If first time controlling this vehicle, increment total counter
+            if vehicle_id not in self.controlled_vehicles:
+                self.total_vehicles_controlled += 1
             # Record control state - USE SIMULATION TIME
             current_sim_time = self.world.get_snapshot().timestamp.elapsed_seconds
             self.controlled_vehicles[vehicle_id] = {
-                'rank': rank,
-                'bid_value': bid_value,
-                'action': action,
-                'params': params,
-                'is_platoon_member': True,
-                'is_leader': is_leader,
-                'timestamp': time.time(),  # Keep wall-clock time for other purposes  
-                'sim_timestamp': current_sim_time  # Add simulation time
-            }
+                 'rank': rank,
+                 'bid_value': bid_value,
+                 'action': action,
+                 'params': params,
+                 'is_platoon_member': True,
+                 'is_leader': is_leader,
+                 'timestamp': time.time(),  # Keep wall-clock time for other purposes  
+                 'sim_timestamp': current_sim_time  # Add simulation time
+             }
             
             return True
             

@@ -263,7 +263,6 @@ class MWISSolver:
                 
                 # If vertex_j is in the adjacency list of vertex_i, there's a conflict
                 if vertex_j in adj[vertex_i]:
-                    print(f"❌ Independence violation: candidates {vertex_i} and {vertex_j} are in conflict")
                     return False
         
         return True

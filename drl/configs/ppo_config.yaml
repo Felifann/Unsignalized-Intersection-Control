@@ -1,0 +1,55 @@
+# PPO Training Configuration for Traffic Intersection DRL - DEBUG MODE
+
+# Training Parameters - REDUCED FOR DEBUGGING
+total_timesteps: 5000  # Reduced from 1000000
+eval_freq: 500         # Reduced from 5000
+checkpoint_freq: 500   # Reduced from 10000
+
+# PPO Algorithm Parameters - REDUCED FOR FASTER TRAINING
+learning_rate: 3e-4
+n_steps: 256          # Reduced from 2048
+batch_size: 32        # Reduced from 64
+n_epochs: 5           # Reduced from 10
+gamma: 0.99
+gae_lambda: 0.95
+clip_range: 0.2
+ent_coef: 0.0
+vf_coef: 0.5
+max_grad_norm: 0.5
+
+# Simulation Configuration - FASTER EPISODES
+sim_config:
+  map: 'Town05'
+  max_steps: 500      # Reduced from 2000
+  spawn_rate: 0.8
+  intersection_center: [-188.9, -89.7, 0.0]
+
+# Reward Configuration
+reward_config:
+  vehicle_exit_reward: 10.0
+  throughput_bonus: 0.01
+  acceleration_penalty_threshold: 3.0
+  acceleration_penalty_factor: 2.0
+  efficiency_bonus: 5.0
+  collision_penalty: 100.0
+  deadlock_penalty: 5000.0
+  step_penalty: 0.1
+
+# Training Schedule
+schedule:
+  warmup_steps: 50000
+  decay_steps: 100000
+  min_learning_rate: 1e-5
+
+# Evaluation
+evaluation:
+  n_eval_episodes: 5
+  eval_deterministic: true
+  eval_render: false
+
+# Logging
+logging:
+  tensorboard: true
+  csv: true
+  metrics_freq: 100
+  save_freq: 1000

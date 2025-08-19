@@ -56,9 +56,6 @@ class ConflictAnalyzer:
                 'predicted_path': path,
                 'is_platoon': agent.type == 'platoon' if hasattr(agent, 'type') else False
             })
-            
-            print(f"   Agent {i} ({agent.type if hasattr(agent, 'type') else 'unknown'} {getattr(agent, 'id', 'unknown')}): "
-                  f"turn={turn}, eta={eta:.1f}s, at_junction={state.get('is_junction', False) if state else False}")
 
         # Enhanced conflict detection
         conflicts_found = 0

@@ -405,6 +405,9 @@ class DecentralizedAuctionEngine:
         # Nash integration
         self.nash_controller = None
         
+        # DRL integration - trainable bid policy will be injected
+        self.bid_policy = None
+        
         limit_text = "unlimited" if max_go_agents is None else str(max_go_agents)
         print(f"🎯 增强拍卖引擎已初始化 - 支持车队、单车和Nash deadlock解决 (max go agents: {limit_text})")
 
@@ -435,8 +438,6 @@ class DecentralizedAuctionEngine:
         )
         
         print(f"\n🎯 Auction Update: Found {len(agents)} potential agents")
-        for agent in agents:
-            print(f"   - {agent.type} {agent.id}: distance to intersection = {_euclidean_2d(agent.location, self.intersection_center):.1f}m")
         
         # 2. Start new auction if needed
         if agents and not self.current_auction:
@@ -831,3 +832,41 @@ class DecentralizedAuctionEngine:
         except Exception as e:
             print(f"[Warning] Creating Nash agent from vehicle data failed: {e}")
             return None
+
+    def _calculate_vehicle_bid(self, vehicle_state: Dict, context: Dict = None) -> float:
+        """Calculate bid for individual vehicle using trainable policy if available"""
+        if self.bid_policy:
+            # Use trainable DRL policy
+            return self.bid_policy.calculate_bid(
+                vehicle_state=vehicle_state,
+                is_platoon_leader=False,
+                platoon_size=1,
+                context=context or {}
+            )
+        else:
+            # Fallback to original static calculation
+            # ...existing code...
+            pass
+
+    def _calculate_platoon_bid(self, platoon, vehicle_states: List[Dict], context: Dict = None) -> float:
+        """Calculate bid for platoon using trainable policy if available"""
+        if self.bid_policy and platoon.get_size() > 0:
+            # Get leader vehicle state
+            leader_id = platoon.get_leader_id()
+            leader_state = None
+            for vs in vehicle_states:
+                if str(vs['id']) == str(leader_id):
+                    leader_state = vs
+                    break
+            
+            if leader_state:
+                return self.bid_policy.calculate_bid(
+                    vehicle_state=leader_state,
+                    is_platoon_leader=True,
+                    platoon_size=platoon.get_size(),
+                    context=context or {}
+                )
+        
+        # Fallback to original static calculation
+        # ...existing code...
+        pass
