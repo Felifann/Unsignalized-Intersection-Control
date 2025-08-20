@@ -164,7 +164,7 @@ class EnhancedMetricsCallback(BaseCallback):
                 self._save_overflow_metrics(overflow)
             
             # Save frequently
-            if self.num_timesteps % 10 == 0:  # More frequent saves for debugging
+            if self.num_timesteps % 20 == 0:  # More frequent saves for debugging
                 self._save_metrics()
                     
             if self.verbose > 0 and self.num_timesteps % 5 == 0:  # More frequent logging for debugging

@@ -34,8 +34,8 @@ class SimulationEnv:
         self.current_step = 0
         
         # Performance settings
-        self.steps_per_action = self.sim_cfg.get('steps_per_action', 3)
-        self.observation_cache_steps = 5
+        self.steps_per_action = 1 if self.sim_cfg.get('training_mode') else 3
+        self.observation_cache_steps = 15
         self.last_observation = None
         self.last_obs_step = -1
         
