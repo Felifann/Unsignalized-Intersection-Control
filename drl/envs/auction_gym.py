@@ -16,46 +16,20 @@ class AuctionGymEnv(gym.Env):
         self.sim_cfg = sim_cfg or {}
         self.sim = SimulationEnv(self.sim_cfg)
         
-        # Define observation space - 确保与sim_wrapper一致
-        obs_dim = self.sim.observation_dim()
+        # FIXED observation space - ensure exact consistency
+        obs_dim = 195  # Fixed dimension matching sim_wrapper
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, 
+            low=-1000.0, high=1000.0,  # Reasonable bounds
             shape=(obs_dim,), dtype=np.float32
         )
         
-        # 扩展动作空间 - 包含所有14个可训练参数
+        # VALIDATED action space
         self.action_space = spaces.Box(
             low=np.array([
-                0.1,  # bid_scale
-                0.5,  # eta_weight
-                0.0,  # speed_weight
-                0.0,  # congestion_sensitivity
-                0.0,  # platoon_bonus
-                0.0,  # junction_penalty
-                0.0,  # fairness_factor
-                1.0,  # urgency_threshold
-                0.0,  # proximity_bonus_weight
-                -30.0, # speed_diff_modifier
-                -2.0, # follow_distance_modifier
-                0.0,  # ignore_vehicles_go
-                0.0,  # ignore_vehicles_wait
-                0.0   # avg_ignore_vehicles_platoon (leader+follower)/2
+                0.1, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -30.0, -2.0, 0.0, 0.0, 0.0
             ], dtype=np.float32),
             high=np.array([
-                5.0,  # bid_scale
-                3.0,  # eta_weight
-                1.0,  # speed_weight
-                1.0,  # congestion_sensitivity
-                2.0,  # platoon_bonus
-                1.0,  # junction_penalty
-                0.5,  # fairness_factor
-                10.0, # urgency_threshold
-                3.0,  # proximity_bonus_weight
-                30.0, # speed_diff_modifier
-                3.0,  # follow_distance_modifier
-                100.0, # ignore_vehicles_go
-                50.0, # ignore_vehicles_wait
-                100.0 # avg_ignore_vehicles_platoon
+                5.0, 3.0, 1.0, 1.0, 2.0, 1.0, 0.5, 10.0, 3.0, 30.0, 3.0, 100.0, 50.0, 100.0
             ], dtype=np.float32),
             shape=(14,), 
             dtype=np.float32
@@ -64,77 +38,86 @@ class AuctionGymEnv(gym.Env):
         self.current_obs = None
         self.render_mode = None
         
-        print("🎮 完全扩展的Auction Gym Environment初始化")
-        print(f"   观察空间: {self.observation_space.shape} (确保209维)")
-        print(f"   动作空间: {self.action_space.shape} (14个可训练参数)")
+        print("🎮 FIXED Auction Gym Environment initialized")
+        print(f"   观察空间: {self.observation_space.shape} (FIXED 195维)")
+        print(f"   动作空间: {self.action_space.shape} (14个参数)")
 
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None) -> np.ndarray:
-        """Reset environment"""
+        """FIXED reset with proper validation"""
         super().reset(seed=seed)
         obs = self.sim.reset(seed=seed)
-        self.current_obs = obs
         
-        # 验证观察维度
-        expected_shape = self.observation_space.shape[0]
+        # ENSURE exact dimension match
+        expected_shape = 195
         if obs.shape[0] != expected_shape:
-            print(f"⚠️ Reset观察维度不匹配: 期望 {expected_shape}, 实际 {obs.shape[0]}")
-            # 确保维度正确
+            print(f"⚠️ FIXING observation dimension: {obs.shape[0]} -> {expected_shape}")
             if obs.shape[0] < expected_shape:
                 padding = np.zeros(expected_shape - obs.shape[0], dtype=np.float32)
                 obs = np.concatenate([obs, padding])
             else:
                 obs = obs[:expected_shape]
         
-        return obs
+        # Validate data
+        obs = np.nan_to_num(obs, nan=0.0, posinf=100.0, neginf=-100.0)
+        self.current_obs = obs
+        
+        return obs.astype(np.float32)
 
     def step(self, action: np.ndarray) -> tuple:
-        """Enhanced step with all trainable parameters"""
-        # 解析所有14个参数
+        """FIXED step with validation"""
+        # VALIDATE action bounds
+        action = np.clip(action, self.action_space.low, self.action_space.high)
+        
+        # Parse parameters with validation
         action_params = {
-            'bid_scale': float(action[0]),
-            'eta_weight': float(action[1]),
-            'speed_weight': float(action[2]),
-            'congestion_sensitivity': float(action[3]),
-            'platoon_bonus': float(action[4]),
-            'junction_penalty': float(action[5]),
-            'fairness_factor': float(action[6]),
-            'urgency_threshold': float(action[7]),
-            'proximity_bonus_weight': float(action[8]),
-            'speed_diff_modifier': float(action[9]),
-            'follow_distance_modifier': float(action[10]),
-            'ignore_vehicles_go': float(action[11]),
-            'ignore_vehicles_wait': float(action[12]),
+            'bid_scale': float(np.clip(action[0], 0.1, 5.0)),
+            'eta_weight': float(np.clip(action[1], 0.5, 3.0)),
+            'speed_weight': float(np.clip(action[2], 0.0, 1.0)),
+            'congestion_sensitivity': float(np.clip(action[3], 0.0, 1.0)),
+            'platoon_bonus': float(np.clip(action[4], 0.0, 2.0)),
+            'junction_penalty': float(np.clip(action[5], 0.0, 1.0)),
+            'fairness_factor': float(np.clip(action[6], 0.0, 0.5)),
+            'urgency_threshold': float(np.clip(action[7], 1.0, 10.0)),
+            'proximity_bonus_weight': float(np.clip(action[8], 0.0, 3.0)),
+            'speed_diff_modifier': float(np.clip(action[9], -30.0, 30.0)),
+            'follow_distance_modifier': float(np.clip(action[10], -2.0, 3.0)),
+            'ignore_vehicles_go': float(np.clip(action[11], 0.0, 100.0)),
+            'ignore_vehicles_wait': float(np.clip(action[12], 0.0, 50.0)),
         }
         
-        # 处理车队的ignore_vehicles参数 (从平均值计算)
-        avg_platoon_ignore = float(action[13])
-        action_params['ignore_vehicles_platoon_leader'] = max(0.0, avg_platoon_ignore - 20.0)
-        action_params['ignore_vehicles_platoon_follower'] = min(100.0, avg_platoon_ignore + 20.0)
+        # FIXED platoon ignore vehicles calculation
+        avg_platoon_ignore = float(np.clip(action[13], 0.0, 100.0))
+        action_params['ignore_vehicles_platoon_leader'] = np.clip(avg_platoon_ignore - 20.0, 0.0, 80.0)
+        action_params['ignore_vehicles_platoon_follower'] = np.clip(avg_platoon_ignore + 20.0, 50.0, 100.0)
         
-        # 更新仿真
+        # Update simulation
         obs, reward, done, info = self.sim.step_with_all_params(action_params)
         
-        # 验证观察维度
-        expected_shape = self.observation_space.shape[0]
+        # ENSURE exact dimension match
+        expected_shape = 195
         if obs.shape[0] != expected_shape:
-            print(f"⚠️ Step观察维度不匹配: 期望 {expected_shape}, 实际 {obs.shape[0]}")
-            # 确保维度正确
+            print(f"⚠️ FIXING step observation: {obs.shape[0]} -> {expected_shape}")
             if obs.shape[0] < expected_shape:
                 padding = np.zeros(expected_shape - obs.shape[0], dtype=np.float32)
                 obs = np.concatenate([obs, padding])
             else:
                 obs = obs[:expected_shape]
         
+        # Validate all outputs
+        obs = np.nan_to_num(obs, nan=0.0, posinf=100.0, neginf=-100.0).astype(np.float32)
+        reward = np.clip(float(reward), -1000.0, 1000.0)
+        done = bool(done)
+        
         self.current_obs = obs
         
-        # 增强信息包含所有参数
+        # Enhanced info
         info.update({
             'action_params': action_params,
-            'total_trainable_params': 14,
+            'observation_validated': True,
             'observation_shape': obs.shape[0]
         })
         
-        return obs, float(reward), bool(done), info
+        return obs, reward, done, info
 
     def render(self, mode: str = 'human') -> Optional[np.ndarray]:
         """Enhanced render with visualization options"""
@@ -211,6 +194,22 @@ class AuctionGymEnv(gym.Env):
                 'safety_score': self._calculate_safety_score()
             }
         return {}
+
+    def _calculate_safety_score(self) -> float:
+        """Calculate overall safety score (0-1, higher is safer)"""
+        if not hasattr(self.sim, 'metrics'):
+            return 1.0
+        
+        collision_penalty = min(self.sim.metrics.get('collision_count', 0) * 0.1, 0.5)
+        deadlock_penalty = 0.0
+        
+        if hasattr(self.sim, 'deadlock_detector'):
+            deadlock_stats = self.sim.deadlock_detector.get_stats()
+            deadlock_penalty = min(deadlock_stats.get('deadlocks_detected', 0) * 0.2, 0.3)
+        
+        safety_score = max(0.0, 1.0 - collision_penalty - deadlock_penalty)
+        return safety_score
+
 
     def _calculate_safety_score(self) -> float:
         """Calculate overall safety score (0-1, higher is safer)"""

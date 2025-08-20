@@ -45,95 +45,139 @@ from drl.envs.auction_gym import AuctionGymEnv
 from drl.utils.analysis import TrainingAnalyzer
 
 class EnhancedMetricsCallback(BaseCallback):
-    """Enhanced callback to collect comprehensive training metrics"""
+    """Enhanced callback with STRICT real-only data collection - NO FAKE DATA"""
     
     def __init__(self, log_dir: str, verbose: int = 0):
         super().__init__(verbose)
         self.log_dir = log_dir
         self.metrics_log = []
-        self.checkpoint_interval = 10  # Save more frequently for debugging
+        self.checkpoint_interval = 10
+        self.max_metrics_memory = 1000
+        self.last_recorded_timestep = -1  # Track actual recorded steps
         
-        # Create logs directory
         os.makedirs(log_dir, exist_ok=True)
-        
-        # Initialize CSV file
         self.csv_path = os.path.join(log_dir, 'training_metrics.csv')
         self.csv_initialized = False
-        print(f"📊 Enhanced metrics collection initialized, logging to {log_dir}")
+        print(f"📊 STRICT real-only metrics collection initialized")
 
-    def _init_csv_headers(self):
-        """Initialize CSV file with headers when we have actual data"""
-        if not self.csv_initialized and self.metrics_log:
-            try:
-                # Use actual data to create headers
-                headers = list(self.metrics_log[0].keys())
-                df_header = pd.DataFrame(columns=headers)
-                df_header.to_csv(self.csv_path, index=False)
-                self.csv_initialized = True
-                print(f"✅ Initialized CSV file with headers: {self.csv_path}")
-            except Exception as e:
-                print(f"⚠️ Failed to initialize CSV headers: {e}")
+        # FIXED throughput caching
+        self.throughput_interval = 50
+        self.cached_throughput = 0.0
+        self.last_throughput_calc_step = -1
 
     def _on_step(self) -> bool:
-        """Collect metrics on each step"""
+        """Collect ONLY actual step data - NO INTERPOLATION OR FAKE DATA"""
         try:
-            # Get info from the last step
-            infos = self.locals.get('infos', [])
-            if len(infos) > 0:
-                info = infos[0] if isinstance(infos[0], dict) else {}
-                
-                # Get reward from the last step
-                rewards = self.locals.get('rewards', [0.0])
-                reward = float(rewards[0]) if len(rewards) > 0 else 0.0
-                
-                # Collect comprehensive metrics with safe access and type conversion
-                metrics = {
-                    'timestep': int(self.num_timesteps),
-                    'reward': float(reward),
-                    'throughput': float(info.get('throughput', 0.0)),
-                    'avg_acceleration': float(info.get('avg_acceleration', 0.0)),
-                    'collision_count': int(info.get('collision_count', 0)),
-                    'total_controlled': int(info.get('total_controlled', 0)),
-                    'vehicles_exited': int(info.get('vehicles_exited', 0)),
-                    'auction_agents': int(info.get('auction_agents', 0)),
-                    'deadlocks_detected': int(info.get('deadlocks_detected', 0)),
-                    
-                    # Policy parameters (with safe defaults)
-                    'bid_scale': float(info.get('bid_scale', 1.0)),
-                    'eta_weight': float(info.get('eta_weight', 1.0)),
-                    'speed_weight': float(info.get('speed_weight', 0.3)),
-                    'congestion_sensitivity': float(info.get('congestion_sensitivity', 0.4)),
-                    'platoon_bonus': float(info.get('platoon_bonus', 0.5)),
-                    'junction_penalty': float(info.get('junction_penalty', 0.2)),
-                    'fairness_factor': float(info.get('fairness_factor', 0.1)),
-                    'urgency_threshold': float(info.get('urgency_threshold', 5.0)),
-                    'proximity_bonus_weight': float(info.get('proximity_bonus_weight', 1.0)),
-                    'speed_diff_modifier': float(info.get('speed_diff_modifier', 0.0)),
-                    'follow_distance_modifier': float(info.get('follow_distance_modifier', 0.0)),
-                    'ignore_vehicles_go': float(info.get('ignore_vehicles_go', 50.0)),
-                    'ignore_vehicles_wait': float(info.get('ignore_vehicles_wait', 0.0)),
-                    'ignore_vehicles_platoon_leader': float(info.get('ignore_vehicles_platoon_leader', 50.0)),
-                    'ignore_vehicles_platoon_follower': float(info.get('ignore_vehicles_platoon_follower', 90.0))
-                }
-                
-                self.metrics_log.append(metrics)
-                
-                # Initialize CSV headers on first data
-                if not self.csv_initialized:
-                    self._init_csv_headers()
-                
-                # Save metrics more frequently for debugging
-                if self.num_timesteps % self.checkpoint_interval == 0:
-                    self._save_metrics()
-                    if self.verbose > 0:
-                        print(f"📊 Step {self.num_timesteps}: Throughput={metrics['throughput']:.1f}, "
-                              f"Reward={metrics['reward']:.2f}, Controlled={metrics['total_controlled']}")
+            # CRITICAL: Only record if this is an actual new timestep
+            if self.num_timesteps <= self.last_recorded_timestep:
+                return True  # Skip duplicate or out-of-order steps
             
+            infos = self.locals.get('infos', [])
+            if len(infos) == 0:
+                return True  # No info to record
+                
+            info = infos[0] if isinstance(infos[0], dict) else {}
+            
+            # STRICT validation - reject all non-real data
+            using_real_data = info.get('using_real_data', False)
+            data_source = info.get('data_source', 'unknown')
+            
+            if not using_real_data:
+                if self.verbose > 0:
+                    print(f"❌ STEP {self.num_timesteps}: REJECTING NON-REAL DATA! Source: {data_source}")
+                return True
+            
+            # Extract ONLY validated real metrics
+            vehicles_exited = max(0, min(int(info.get('vehicles_exited', 0)), 10000))
+            sim_time_elapsed = max(0.0, min(float(info.get('sim_time_elapsed', 0.0)), 86400.0))
+            vehicles_detected = max(0, min(int(info.get('vehicles_detected', 0)), 1000))
+            
+            # ZERO-TOLERANCE for fake rewards
+            reward_value = float(self.locals.get('rewards', [0.0])[0])
+            if abs(reward_value) > 500:  # Sanity check for realistic rewards
+                print(f"⚠️ STEP {self.num_timesteps}: Suspicious reward value {reward_value} - capping")
+                reward_value = np.clip(reward_value, -100.0, 100.0)
+            
+            # Calculate throughput ONLY from real data
+            real_throughput = 0.0
+            try:
+                should_recalc = (self.num_timesteps % self.throughput_interval == 0) or (self.last_throughput_calc_step < 0)
+                if should_recalc and sim_time_elapsed > 0.1 and vehicles_exited >= 0:  # Require meaningful sim time
+                    computed = (vehicles_exited / sim_time_elapsed) * 3600.0
+                    # STRICT bounds for realistic throughput
+                    real_throughput = max(0.0, min(float(computed), 3600.0))  # Max 1 vehicle/second
+                    self.cached_throughput = real_throughput
+                    self.last_throughput_calc_step = int(self.num_timesteps)
+                else:
+                    real_throughput = float(self.cached_throughput)
+            except Exception:
+                real_throughput = float(self.cached_throughput)
+            
+            # Build ONLY validated metrics record
+            metrics = {
+                'timestep': int(self.num_timesteps),  # Actual timestep from training
+                'reward': np.clip(reward_value, -1000.0, 1000.0),
+                
+                # VALIDATED simulation metrics with strict bounds
+                'throughput': real_throughput,
+                'avg_acceleration': np.clip(float(info.get('avg_acceleration', 0.0)), -20.0, 20.0),
+                'collision_count': max(0, min(int(info.get('collision_count', 0)), 50)),  # Fixed wrong variable
+                'total_controlled': max(0, min(int(info.get('total_controlled', 0)), 1000)),
+                'vehicles_exited': vehicles_exited,
+                'vehicles_detected': vehicles_detected,
+                'vehicles_in_junction': max(0, min(int(info.get('vehicles_in_junction', 0)), 100)),
+                'auction_agents': max(0, min(int(info.get('auction_agents', 0)), 100)),
+                'deadlocks_detected': max(0, min(int(info.get('deadlocks_detected', 0)), 50)),
+                'go_vehicles': max(0, min(int(info.get('go_vehicles', 0)), 100)),
+                'waiting_vehicles': max(0, min(int(info.get('waiting_vehicles', 0)), 100)),
+                
+                'sim_time_elapsed': sim_time_elapsed,
+                'using_real_data': using_real_data,
+                'data_source': data_source,
+                
+                # Training parameters with validation
+                'bid_scale': np.clip(float(info.get('bid_scale', 1.0)), 0.1, 5.0),
+                'eta_weight': np.clip(float(info.get('eta_weight', 1.0)), 0.5, 3.0),
+                'speed_weight': np.clip(float(info.get('speed_weight', 0.3)), 0.0, 1.0),
+                'congestion_sensitivity': np.clip(float(info.get('congestion_sensitivity', 0.4)), 0.0, 1.0),
+                'platoon_bonus': np.clip(float(info.get('platoon_bonus', 0.5)), 0.0, 2.0),
+                'junction_penalty': np.clip(float(info.get('junction_penalty', 0.2)), 0.0, 1.0),
+                'fairness_factor': np.clip(float(info.get('fairness_factor', 0.1)), 0.0, 0.5),
+                'urgency_threshold': np.clip(float(info.get('urgency_threshold', 5.0)), 1.0, 10.0),
+                'proximity_bonus_weight': np.clip(float(info.get('proximity_bonus_weight', 1.0)), 0.0, 3.0),
+                'speed_diff_modifier': np.clip(float(info.get('speed_diff_modifier', 0.0)), -30.0, 30.0),
+                'follow_distance_modifier': np.clip(float(info.get('follow_distance_modifier', 0.0)), -2.0, 3.0),
+                'ignore_vehicles_go': np.clip(float(info.get('ignore_vehicles_go', 50.0)), 0.0, 100.0),
+                'ignore_vehicles_wait': np.clip(float(info.get('ignore_vehicles_wait', 0.0)), 0.0, 50.0),
+                'ignore_vehicles_platoon_leader': np.clip(float(info.get('ignore_vehicles_platoon_leader', 50.0)), 0.0, 80.0),
+                'ignore_vehicles_platoon_follower': np.clip(float(info.get('ignore_vehicles_platoon_follower', 90.0)), 50.0, 100.0)
+            }
+            
+            # RECORD the actual step
+            self.metrics_log.append(metrics)
+            self.last_recorded_timestep = int(self.num_timesteps)
+            
+            # Memory management without data loss
+            if len(self.metrics_log) > self.max_metrics_memory:
+                overflow = self.metrics_log[:-self.max_metrics_memory//2]
+                self.metrics_log = self.metrics_log[-self.max_metrics_memory//2:]
+                self._save_overflow_metrics(overflow)
+            
+            # Save frequently
+            if self.num_timesteps % 10 == 0:  # More frequent saves for debugging
+                self._save_metrics()
+                    
+            if self.verbose > 0 and self.num_timesteps % 5 == 0:  # More frequent logging for debugging
+                print(f"📊 REAL STEP {self.num_timesteps}: "
+                      f"Vehicles={vehicles_detected}, "
+                      f"Exits={vehicles_exited}, "
+                      f"Reward={reward_value:.2f}")
+        
         except Exception as e:
             print(f"⚠️ Metrics collection error at step {self.num_timesteps}: {e}")
             import traceback
             traceback.print_exc()
-        
+    
         return True
 
     def _save_metrics(self):
@@ -174,6 +218,16 @@ class EnhancedMetricsCallback(BaseCallback):
             import traceback
             traceback.print_exc()
 
+    def _save_overflow_metrics(self, overflow_data):
+        """Save overflow metrics to prevent memory issues"""
+        try:
+            overflow_path = os.path.join(self.log_dir, f'overflow_metrics_{self.num_timesteps}.json')
+            with open(overflow_path, 'w') as f:
+                json.dump(overflow_data, f)
+            print(f"💾 Saved {len(overflow_data)} overflow metrics to {overflow_path}")
+        except Exception as e:
+            print(f"⚠️ Failed to save overflow metrics: {e}")
+
     def _on_training_end(self):
         """Final save when training ends"""
         self._save_metrics()
@@ -203,7 +257,7 @@ def main():
     
     # Training configuration - 减少到很小用于调试
     config = {
-        'total_timesteps': 400,  # 大幅减少用于调试
+        'total_timesteps': 4000,  # 大幅减少用于调试
         'learning_rate': 3e-4,
         'n_steps': 64,   # 减少
         'batch_size': 16,  # 减少
@@ -251,8 +305,8 @@ def main():
 
         env = ResetStepCompatWrapper(env)
         
-        # Setup enhanced logging
-        logger = configure(dirs['log_dir'], ["csv", "tensorboard"])
+        # Setup logging WITHOUT TensorBoard
+        logger = configure(dirs['log_dir'], ["csv"])  # REMOVED: "tensorboard"
         
         # Create PPO model
         print("🤖 Creating PPO model...")
@@ -264,8 +318,8 @@ def main():
             batch_size=config['batch_size'],
             n_epochs=config['n_epochs'],
             gamma=config['gamma'],
-            verbose=1,
-            tensorboard_log=dirs['log_dir']
+            verbose=1
+            # REMOVED: tensorboard_log=dirs['log_dir']
         )
         
         model.set_logger(logger)

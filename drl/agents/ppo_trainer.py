@@ -122,8 +122,8 @@ class PPOTrainer:
         train_env = self.create_env()
         eval_env = self.create_env()
         
-        # Setup logging
-        logger = configure(self.log_dir, ["csv", "tensorboard"])
+        # Setup logging WITHOUT TensorBoard
+        logger = configure(self.log_dir, ["csv"])  # REMOVED: "tensorboard"
         
         # Create PPO model
         model = PPO(
@@ -139,8 +139,8 @@ class PPOTrainer:
             ent_coef=self.config['ent_coef'],
             vf_coef=self.config['vf_coef'],
             max_grad_norm=self.config['max_grad_norm'],
-            verbose=1,
-            tensorboard_log=self.log_dir
+            verbose=1
+            # REMOVED: tensorboard_log=self.log_dir
         )
         
         model.set_logger(logger)
@@ -175,12 +175,14 @@ class PPOTrainer:
             model.save(final_model_path)
             print(f"✅ Training completed. Final model saved to {final_model_path}")
             
-            # Generate analysis
+            # Generate analysis ONLY at the end
             self.analyze_training()
             
         except KeyboardInterrupt:
             print("⚠️ Training interrupted by user")
             model.save(os.path.join(self.checkpoint_dir, "interrupted_model.zip"))
+            # Generate analysis even if interrupted
+            self.analyze_training()
         except Exception as e:
             print(f"❌ Training failed: {e}")
         finally:
@@ -195,7 +197,8 @@ class PPOTrainer:
             analyzer = TrainingAnalyzer(self.results_dir, self.plots_dir)
             analyzer.generate_all_plots()
             analyzer.generate_report()
-            print(f"✅ Analysis completed. Check {self.plots_dir} for plots")
+            analyzer.save_summary_json()
+            print(f"✅ Analysis completed. Check {self.plots_dir} for plots and reports")
         except Exception as e:
             print(f"❌ Analysis failed: {e}")
 

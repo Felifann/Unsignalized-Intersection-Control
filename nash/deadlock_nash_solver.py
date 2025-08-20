@@ -74,15 +74,7 @@ class DeadlockNashSolver:
     def resolve(self, auction_winners: List, vehicle_states: Dict[str, Dict], 
                 platoon_manager=None) -> List:
         """
-        Main resolution method - applies Nash conflict resolution to auction winners
-        
-        Args:
-            auction_winners: List of AuctionWinner objects from auction
-            vehicle_states: Dict of vehicle states {vehicle_id: state}
-            platoon_manager: Optional platoon manager for platoon handling
-            
-        Returns:
-            List of resolved AuctionWinner objects with conflict_action set
+        Main resolution method with enhanced deadlock handling
         """
         start_time = time.time()
         current_time = start_time
@@ -92,8 +84,8 @@ class DeadlockNashSolver:
         print(f"   🚗 Vehicle states: {len(vehicle_states)} vehicles")
         
         try:
-            # 1. Check for deadlock first
-            self._check_deadlock(vehicle_states, current_time)
+            # 1. Check for deadlock first with enhanced detection
+            self._check_deadlock_enhanced(vehicle_states, current_time)
             
             # 2. Convert auction winners to candidates
             candidates = self._convert_winners_to_candidates(auction_winners)
@@ -132,19 +124,28 @@ class DeadlockNashSolver:
             
         except DeadlockException as e:
             print(f"🚨 DEADLOCK DETECTED: {e}")
+            print(f"   Type: {getattr(e, 'deadlock_type', 'unknown')}")
+            print(f"   Affected vehicles: {getattr(e, 'affected_vehicles', 0)}")
+            
             self.stats['deadlocks_prevented'] += 1
-            # Return all winners with 'wait' action to clear deadlock
-            return self._create_deadlock_resolution(auction_winners)
+            
+            # Enhanced deadlock resolution based on type
+            return self._create_enhanced_deadlock_resolution(auction_winners, e)
             
         except Exception as e:
             print(f"❌ Nash resolution failed: {e}")
-            # Fallback: return original winners with conservative actions
             return self._create_conservative_fallback(auction_winners)
 
-    def _check_deadlock(self, vehicle_states: Dict[str, Dict], current_time: float):
-        """Check for deadlock and raise exception if detected"""
-        if self.deadlock_detector.detect_deadlock(vehicle_states, current_time):
-            self.deadlock_detector.handle_deadlock_detection()
+    def _check_deadlock_enhanced(self, vehicle_states: Dict[str, Dict], current_time: float):
+        """Enhanced deadlock checking with detailed exception info"""
+        try:
+            if self.deadlock_detector.detect_deadlock(vehicle_states, current_time):
+                self.deadlock_detector.handle_deadlock_detection()
+        except DeadlockException:
+            # Re-raise with additional context
+            raise
+        except Exception as e:
+            print(f"⚠️ Deadlock detection error: {e}")
 
     def _convert_winners_to_candidates(self, auction_winners: List) -> List:
         """Convert auction winners to Nash solver candidates"""

@@ -10,104 +10,85 @@ import glob
 import json
 
 class TrainingAnalyzer:
-    """Analyze and visualize training results with robust error handling"""
+    """Analyze and visualize training results with REAL DATA ONLY"""
     
     def __init__(self, results_dir: str, plots_dir: str):
         self.results_dir = results_dir
         self.plots_dir = plots_dir
         self.metrics_df = None
         
-        # Create plots directory if it doesn't exist
         os.makedirs(self.plots_dir, exist_ok=True)
-        
-        # Set style for better plots
         plt.style.use('default')
-        try:
-            sns.set_palette("husl")
-        except:
-            pass  # Skip if seaborn not available
         
-        # Load data from multiple possible sources
-        self.load_data()
+        # Load ONLY real data
+        self.load_real_data_only()
 
-    def load_data(self):
-        """Load training metrics data from multiple sources with better error handling"""
-        print(f"📊 Looking for training data in: {self.results_dir}")
+    def load_real_data_only(self):
+        """Load ONLY actual recorded training data - NO INTERPOLATION"""
+        print(f"📊 Loading STRICT real training data from: {self.results_dir}")
         
-        # Try multiple file patterns
-        possible_files = [
+        # Try to load real CSV data
+        csv_files = [
             os.path.join(self.results_dir, 'training_metrics.csv'),
             os.path.join(self.results_dir, 'metrics.csv'),
-            os.path.join(self.results_dir, 'progress.csv'),
-            # Also check in parent directories
-            os.path.join(os.path.dirname(self.results_dir), 'training_metrics.csv'),
-            # Check in logs directory
-            os.path.join(self.results_dir.replace('results', 'logs'), 'training_metrics.csv'),
-            os.path.join(self.results_dir.replace('results', 'logs'), 'progress.csv')
         ]
         
-        # Try to find CSV files with glob patterns
-        csv_patterns = [
-            os.path.join(self.results_dir, '*.csv'),
-            os.path.join(os.path.dirname(self.results_dir), '*.csv'),
-            os.path.join(self.results_dir.replace('results', 'logs'), '*.csv')
-        ]
-        
-        for pattern in csv_patterns:
-            try:
-                found_files = glob.glob(pattern)
-                possible_files.extend(found_files)
-            except:
-                continue
-        
-        # Remove duplicates
-        possible_files = list(set(possible_files))
-        
-        # Try to load each file
-        for file_path in possible_files:
-            if os.path.exists(file_path):
+        for csv_path in csv_files:
+            if os.path.exists(csv_path):
                 try:
-                    print(f"🔍 Trying to load: {file_path}")
-                    
-                    # Check if file has content
-                    if os.path.getsize(file_path) == 0:
-                        print(f"⚠️ File is empty: {file_path}")
-                        continue
-                    
-                    # Try to read with different options
-                    try:
-                        df = pd.read_csv(file_path)
-                    except pd.errors.EmptyDataError:
-                        print(f"⚠️ No data in file: {file_path}")
-                        continue
-                    except Exception as read_error:
-                        print(f"⚠️ Error reading {file_path}: {read_error}")
-                        # Try with different parameters
-                        try:
-                            df = pd.read_csv(file_path, header=0, sep=',')
-                        except:
-                            continue
-                    
-                    if len(df) > 0 and len(df.columns) > 1:
-                        print(f"✅ Loaded {len(df)} data points from {file_path}")
-                        print(f"   Columns: {list(df.columns)[:5]}...")  # Show first 5 columns
+                    df = pd.read_csv(csv_path)
+                    if len(df) > 0:
+                        # STRICT validation - only use validated real data
+                        if 'using_real_data' in df.columns:
+                            real_data_mask = df['using_real_data'] == True
+                            real_count = real_data_mask.sum()
+                            
+                            if real_count == 0:
+                                print(f"❌ NO REAL DATA in {csv_path} - all {len(df)} entries are fake!")
+                                continue
+                            elif real_count < len(df):
+                                print(f"⚠️ FILTERING fake data: {real_count}/{len(df)} real entries in {csv_path}")
+                                df = df[real_data_mask].copy()
+                            else:
+                                print(f"✅ All {len(df)} entries validated as real data")
+                        
+                        # Additional validation - check for unrealistic patterns
+                        if 'timestep' in df.columns:
+                            # Verify timesteps are actually from training (not interpolated)
+                            timestep_gaps = df['timestep'].diff().dropna()
+                            if len(timestep_gaps) > 0:
+                                avg_gap = timestep_gaps.mean()
+                                if avg_gap == 1.0 and len(df) > 20:
+                                    print(f"⚠️ SUSPICIOUS: Perfect 1-step gaps over {len(df)} points - may be interpolated")
+                        
+                        # Check for realistic reward ranges
+                        if 'reward' in df.columns:
+                            reward_range = df['reward'].max() - df['reward'].min()
+                            if reward_range > 1000:
+                                print(f"⚠️ UNREALISTIC reward range: {reward_range:.1f}")
+                        
                         self.metrics_df = df
                         self._standardize_columns()
-                        return
-                    else:
-                        print(f"⚠️ File has insufficient data: {file_path} (rows: {len(df)}, cols: {len(df.columns)})")
+                        print(f"✅ Loaded VERIFIED real training data: {len(df)} records")
                         
+                        # Show data summary
+                        if len(df) > 0:
+                            print(f"   Data spans timesteps: {df['timestep'].min()} to {df['timestep'].max()}")
+                            if 'reward' in df.columns:
+                                print(f"   Reward range: {df['reward'].min():.2f} to {df['reward'].max():.2f}")
+                        
+                        return
                 except Exception as e:
-                    print(f"⚠️ Could not load {file_path}: {e}")
-                    continue
+                    print(f"⚠️ Failed to load {csv_path}: {e}")
         
-        # Try to load from JSON backup
-        self._try_load_from_json()
-        
-        # If still no data, create synthetic data for demonstration
-        if self.metrics_df is None:
-            print("⚠️ No training data found, creating sample data for plotting")
-            self._create_sample_data()
+        # NO FALLBACK TO FAKE DATA
+        print("❌ NO VERIFIED REAL TRAINING DATA FOUND!")
+        print("   Possible causes:")
+        print("   1. Training hasn't run long enough to collect data")
+        print("   2. Metrics callback is not properly connected")
+        print("   3. Simulation is not generating real vehicle data")
+        print("   SOLUTION: Run actual DRL training with real CARLA simulation")
+        self.metrics_df = None
 
     def _try_load_from_json(self):
         """Try to load from JSON backup files"""
@@ -132,62 +113,14 @@ class TrainingAnalyzer:
                 except Exception as e:
                     print(f"⚠️ Could not load JSON {json_path}: {e}")
 
-    def _create_sample_data(self):
-        """Create sample data for demonstration when no real data is available"""
-        n_points = 100
-        timesteps = np.arange(0, n_points * 50, 50)  # Every 50 steps
-        
-        # Generate realistic-looking training curves
-        base_throughput = 100
-        throughput_trend = np.linspace(0, 50, n_points)  # Improving trend
-        throughput_noise = np.random.normal(0, 10, n_points)
-        throughput = base_throughput + throughput_trend + throughput_noise
-        throughput = np.clip(throughput, 50, 250)
-        
-        # Decreasing acceleration over time (learning to be smoother)
-        acceleration = 2.0 - 1.0 * np.arange(n_points) / n_points + np.random.normal(0, 0.2, n_points)
-        acceleration = np.clip(acceleration, 0.3, 3.0)
-        
-        # Increasing controlled vehicles
-        controlled = 10 + 15 * np.arange(n_points) / n_points + np.random.normal(0, 2, n_points)
-        controlled = np.clip(controlled, 5, 30).astype(int)
-        
-        # Learning bid scale
-        bid_scale = 1.0 + 0.5 * np.sin(np.arange(n_points) * 0.1) + np.random.normal(0, 0.1, n_points)
-        bid_scale = np.clip(bid_scale, 0.5, 2.0)
-        
-        # Generate reward curve
-        reward_trend = np.cumsum(np.random.normal(0.1, 2.0, n_points))  # Slowly improving
-        reward = reward_trend + np.random.normal(0, 5.0, n_points)
-        
-        self.metrics_df = pd.DataFrame({
-            'timestep': timesteps,
-            'reward': reward,
-            'throughput': throughput,
-            'avg_acceleration': acceleration,
-            'total_controlled': controlled,
-            'vehicles_exited': np.random.poisson(3, n_points),
-            'bid_scale': bid_scale,
-            'collision_count': np.random.poisson(0.5, n_points),
-            'auction_agents': np.random.randint(2, 8, n_points),
-            'deadlocks_detected': np.random.poisson(0.1, n_points),
-            # DRL训练参数
-            'eta_weight': 1.0 + 0.3 * np.sin(np.arange(n_points) * 0.05),
-            'speed_weight': 0.3 + 0.2 * np.cos(np.arange(n_points) * 0.03),
-            'congestion_sensitivity': 0.4 + 0.2 * np.sin(np.arange(n_points) * 0.07),
-            'platoon_bonus': 0.5 + 0.3 * np.cos(np.arange(n_points) * 0.04),
-            'ignore_vehicles_go': 50.0 + 20.0 * np.sin(np.arange(n_points) * 0.02),
-            'ignore_vehicles_wait': np.clip(10.0 * np.sin(np.arange(n_points) * 0.08), 0, 50)
-        })
-        
-        print(f"🎲 Created sample data with {len(self.metrics_df)} points for demonstration")
+
 
     def _standardize_columns(self):
-        """Standardize column names across different data sources"""
+        """Standardize column names across different data sources - NO THROUGHPUT"""
         if self.metrics_df is None:
             return
         
-        # Column mapping for different naming conventions
+        # Column mapping for different naming conventions - NO THROUGHPUT
         column_mapping = {
             'step': 'timestep',
             'steps': 'timestep',
@@ -195,8 +128,6 @@ class TrainingAnalyzer:
             'episode_reward': 'reward',
             'mean_reward': 'reward',
             'ep_rew_mean': 'reward',
-            'vehicles_per_hour': 'throughput',
-            'cars_per_hour': 'throughput',
             'acceleration': 'avg_acceleration',
             'mean_acceleration': 'avg_acceleration',
             'controlled': 'total_controlled',
@@ -210,22 +141,30 @@ class TrainingAnalyzer:
         # Rename columns
         self.metrics_df = self.metrics_df.rename(columns=column_mapping)
         
-        # Ensure required columns exist with default values
-        required_columns = {
-            'timestep': range(len(self.metrics_df)),
-            'reward': np.random.normal(0, 5, len(self.metrics_df)),
-            'throughput': np.random.uniform(50, 200, len(self.metrics_df)),
-            'avg_acceleration': np.random.uniform(0.5, 2.0, len(self.metrics_df)),
-            'total_controlled': np.random.randint(5, 25, len(self.metrics_df)),
-            'vehicles_exited': np.random.randint(0, 10, len(self.metrics_df)),
-            'bid_scale': np.random.uniform(0.8, 1.5, len(self.metrics_df)),
-            'collision_count': np.random.randint(0, 3, len(self.metrics_df))
-        }
+        # Ensure required columns exist - NO THROUGHPUT
+        required_columns = [
+            'timestep', 'reward', 'avg_acceleration',
+            'total_controlled', 'vehicles_exited', 'bid_scale', 'collision_count'
+        ]
         
-        for col, default_values in required_columns.items():
+        for col in required_columns:
             if col not in self.metrics_df.columns:
-                self.metrics_df[col] = default_values
-                print(f"🔧 Added missing column '{col}' with default values")
+                if col == 'timestep':
+                    # Use index as timestep if missing (deterministic)
+                    self.metrics_df['timestep'] = self.metrics_df.index.to_series().astype(int).values
+                    print(f"🔧 Added missing deterministic column 'timestep' (from index)")
+                else:
+                    # Do NOT fabricate values; insert NaN and warn
+                    self.metrics_df[col] = np.nan
+                    print(f"⚠️ Missing column '{col}' — filled with NaN (no synthetic data generated)")
+        
+        # Coerce numeric types where possible, keep NaNs for missing/invalid entries
+        for col in required_columns:
+            if col in self.metrics_df.columns:
+                try:
+                    self.metrics_df[col] = pd.to_numeric(self.metrics_df[col], errors='coerce')
+                except Exception:
+                    pass
 
     def _try_load_from_tensorboard(self):
         """Try to extract data from tensorboard logs"""
@@ -244,142 +183,179 @@ class TrainingAnalyzer:
                     continue
 
     def plot_training_progress(self):
-        """Plot training progress over time with threading fix"""
+        """Plot ACTUAL training progress - no interpolation for missing data"""
         if self.metrics_df is None or len(self.metrics_df) == 0:
-            print("⚠️ No data available for training progress plot")
+            print("⚠️ No real data available - cannot plot training progress")
+            # Create empty plot with explanation
+            fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+            ax.text(0.5, 0.5, 'NO REAL TRAINING DATA AVAILABLE\n\nRun DRL training first to collect data', 
+                   ha='center', va='center', fontsize=16, 
+                   bbox=dict(boxstyle="round,pad=0.3", facecolor="lightcoral"))
+            ax.set_xlim(0, 1)
+            ax.set_ylim(0, 1)
+            ax.set_title('Training Progress - No Data')
+            save_path = os.path.join(self.plots_dir, 'no_data_available.png')
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.close()
             return
         
         try:
-            # Use non-interactive backend
-            plt.ioff()  # Turn off interactive mode
+            plt.ioff()
             
-            fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-            fig.suptitle('Training Progress', fontsize=16, fontweight='bold')
+            # Determine subplot layout based on available data
+            available_metrics = []
+            if 'reward' in self.metrics_df.columns and not self.metrics_df['reward'].isna().all():
+                available_metrics.append('reward')
+            if 'throughput' in self.metrics_df.columns and not self.metrics_df['throughput'].isna().all():
+                available_metrics.append('throughput')
+            if 'avg_acceleration' in self.metrics_df.columns and not self.metrics_df['avg_acceleration'].isna().all():
+                available_metrics.append('acceleration')
+            if 'bid_scale' in self.metrics_df.columns and not self.metrics_df['bid_scale'].isna().all():
+                available_metrics.append('bid_scale')
             
-            # Reward curve
-            if 'reward' in self.metrics_df.columns:
-                axes[0, 0].plot(self.metrics_df['timestep'], self.metrics_df['reward'], 'b-', linewidth=2)
-                axes[0, 0].set_title('Training Reward')
-                axes[0, 0].set_xlabel('Training Steps')
-                axes[0, 0].set_ylabel('Reward')
-                axes[0, 0].grid(True, alpha=0.3)
-            else:
-                # Fallback to throughput
-                axes[0, 0].plot(self.metrics_df['timestep'], self.metrics_df['throughput'], 'b-', linewidth=2)
-                axes[0, 0].set_title('Throughput (vehicles/hour)')
-                axes[0, 0].set_xlabel('Training Steps')
-                axes[0, 0].set_ylabel('Vehicles/Hour')
-                axes[0, 0].grid(True, alpha=0.3)
+            if len(available_metrics) == 0:
+                print("⚠️ No plottable metrics found in real data")
+                return
             
-            # Average acceleration
-            axes[0, 1].plot(self.metrics_df['timestep'], self.metrics_df['avg_acceleration'], 
-                           'orange', linewidth=2)
-            axes[0, 1].set_title('Average Acceleration')
-            axes[0, 1].set_xlabel('Training Steps')
-            axes[0, 1].set_ylabel('Acceleration (m/s²)')
-            axes[0, 1].grid(True, alpha=0.3)
+            # Create subplots based on available metrics
+            n_plots = len(available_metrics)
+            fig, axes = plt.subplots(n_plots, 1, figsize=(12, 4*n_plots))
+            if n_plots == 1:
+                axes = [axes]
             
-            # Vehicles controlled
-            axes[1, 0].plot(self.metrics_df['timestep'], self.metrics_df['total_controlled'], 
-                           'green', linewidth=2)
-            axes[1, 0].set_title('Total Controlled Vehicles')
-            axes[1, 0].set_xlabel('Training Steps')
-            axes[1, 0].set_ylabel('Number of Vehicles')
-            axes[1, 0].grid(True, alpha=0.3)
+            fig.suptitle(f'REAL Training Progress ({len(self.metrics_df)} actual data points)', 
+                        fontsize=16, fontweight='bold')
             
-            # Bid scale
-            axes[1, 1].plot(self.metrics_df['timestep'], self.metrics_df['bid_scale'], 
-                           'red', linewidth=2)
-            axes[1, 1].set_title('Learned Bid Scale')
-            axes[1, 1].set_xlabel('Training Steps')
-            axes[1, 1].set_ylabel('Bid Scale')
-            axes[1, 1].grid(True, alpha=0.3)
+            plot_idx = 0
+            
+            # Plot only available metrics with actual data
+            if 'reward' in available_metrics:
+                reward_data = self.metrics_df[['timestep', 'reward']].dropna()
+                if len(reward_data) > 0:
+                    axes[plot_idx].plot(reward_data['timestep'], reward_data['reward'], 
+                                       'b-', linewidth=2, marker='o', markersize=3)
+                    axes[plot_idx].set_title(f'Reward Progress ({len(reward_data)} points)')
+                    axes[plot_idx].set_xlabel('Training Steps')
+                    axes[plot_idx].set_ylabel('Reward')
+                    axes[plot_idx].grid(True, alpha=0.3)
+                    plot_idx += 1
+            
+            if 'throughput' in available_metrics:
+                throughput_data = self.metrics_df[['timestep', 'throughput']].dropna()
+                if len(throughput_data) > 0:
+                    axes[plot_idx].plot(throughput_data['timestep'], throughput_data['throughput'], 
+                                       'orange', linewidth=2, marker='s', markersize=3)
+                    axes[plot_idx].set_title(f'Throughput ({len(throughput_data)} points)')
+                    axes[plot_idx].set_xlabel('Training Steps')
+                    axes[plot_idx].set_ylabel('Vehicles/hour')
+                    axes[plot_idx].grid(True, alpha=0.3)
+                    plot_idx += 1
+            
+            if 'acceleration' in available_metrics:
+                accel_data = self.metrics_df[['timestep', 'avg_acceleration']].dropna()
+                if len(accel_data) > 0:
+                    axes[plot_idx].plot(accel_data['timestep'], accel_data['avg_acceleration'], 
+                                       'green', linewidth=2, marker='^', markersize=3)
+                    axes[plot_idx].set_title(f'Acceleration ({len(accel_data)} points)')
+                    axes[plot_idx].set_xlabel('Training Steps')
+                    axes[plot_idx].set_ylabel('m/s²')
+                    axes[plot_idx].grid(True, alpha=0.3)
+                    plot_idx += 1
+            
+            if 'bid_scale' in available_metrics:
+                bid_data = self.metrics_df[['timestep', 'bid_scale']].dropna()
+                if len(bid_data) > 0:
+                    axes[plot_idx].plot(bid_data['timestep'], bid_data['bid_scale'], 
+                                       'red', linewidth=2, marker='d', markersize=3)
+                    axes[plot_idx].set_title(f'Bid Scale Learning ({len(bid_data)} points)')
+                    axes[plot_idx].set_xlabel('Training Steps')
+                    axes[plot_idx].set_ylabel('Bid Scale')
+                    axes[plot_idx].grid(True, alpha=0.3)
             
             plt.tight_layout()
-            save_path = os.path.join(self.plots_dir, 'training_progress.png')
+            save_path = os.path.join(self.plots_dir, 'real_training_progress.png')
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            plt.close()  # Important: close figure to free memory
-            print(f"✅ Training progress plot saved to {save_path}")
+            plt.close()
+            print(f"✅ REAL training progress plot saved to {save_path}")
             
         except Exception as e:
-            print(f"❌ Failed to create training progress plot: {e}")
+            print(f"❌ Failed to create real training progress plot: {e}")
             import traceback
             traceback.print_exc()
 
     def plot_performance_metrics(self):
-        """Plot key performance metrics"""
+        """Plot REAL performance metrics only"""
         if self.metrics_df is None or len(self.metrics_df) == 0:
-            print("⚠️ No data available for performance metrics plot")
+            print("⚠️ No REAL data available for performance metrics plot")
             return
         
         try:
             fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-            fig.suptitle('Performance Metrics Analysis', fontsize=16, fontweight='bold')
+            fig.suptitle('Real Performance Metrics Analysis', fontsize=16, fontweight='bold')
             
-            # Throughput distribution
-            axes[0, 0].hist(self.metrics_df['throughput'], bins=20, alpha=0.7, 
-                           color='skyblue', edgecolor='black')
-            axes[0, 0].set_title('Throughput Distribution')
-            axes[0, 0].set_xlabel('Vehicles/Hour')
-            axes[0, 0].set_ylabel('Frequency')
-            mean_throughput = self.metrics_df['throughput'].mean()
-            axes[0, 0].axvline(mean_throughput, color='red', 
-                              linestyle='--', label=f'Mean: {mean_throughput:.1f}')
-            axes[0, 0].legend()
+            # Real throughput distribution
+            if 'throughput' in self.metrics_df.columns:
+                throughput_data = self.metrics_df['throughput'].dropna()
+                if len(throughput_data) > 0:
+                    axes[0, 0].hist(throughput_data, bins=20, alpha=0.7, 
+                                   color='skyblue', edgecolor='black')
+                    axes[0, 0].set_title('Real Throughput Distribution')
+                    axes[0, 0].set_xlabel('Throughput (vehicles/h)')
+                    axes[0, 0].set_ylabel('Frequency')
+                    mean_throughput = throughput_data.mean()
+                    axes[0, 0].axvline(mean_throughput, color='red', 
+                                      linestyle='--', label=f'Mean: {mean_throughput:.1f}')
+                    axes[0, 0].legend()
             
-            # Reward vs Throughput scatter (if reward data exists)
-            if 'reward' in self.metrics_df.columns:
-                axes[0, 1].scatter(self.metrics_df['reward'], self.metrics_df['throughput'], 
-                                  alpha=0.6, color='orange')
-                axes[0, 1].set_title('Reward vs Throughput')
-                axes[0, 1].set_xlabel('Reward')
-                axes[0, 1].set_ylabel('Throughput (vehicles/h)')
-            else:
-                # Fallback: Acceleration vs Throughput
-                axes[0, 1].scatter(self.metrics_df['avg_acceleration'], self.metrics_df['throughput'], 
-                                  alpha=0.6, color='orange')
-                axes[0, 1].set_title('Acceleration vs Throughput')
-                axes[0, 1].set_xlabel('Average Acceleration (m/s²)')
-                axes[0, 1].set_ylabel('Throughput (vehicles/h)')
-            axes[0, 1].grid(True, alpha=0.3)
+            # Real reward vs throughput correlation
+            if 'reward' in self.metrics_df.columns and 'throughput' in self.metrics_df.columns:
+                valid_data = self.metrics_df[['reward', 'throughput']].dropna()
+                if len(valid_data) > 0:
+                    axes[0, 1].scatter(valid_data['reward'], valid_data['throughput'], 
+                                      alpha=0.6, color='orange')
+                    axes[0, 1].set_title('Reward vs Real Throughput')
+                    axes[0, 1].set_xlabel('Reward')
+                    axes[0, 1].set_ylabel('Throughput (vehicles/h)')
+                    axes[0, 1].grid(True, alpha=0.3)
             
-            # Rolling average throughput
-            window_size = max(5, len(self.metrics_df) // 10)
-            rolling_throughput = self.metrics_df['throughput'].rolling(window=window_size, center=True).mean()
-            axes[1, 0].plot(self.metrics_df['timestep'], rolling_throughput, 
-                           linewidth=2, color='green')
-            axes[1, 0].set_title(f'Rolling Average Throughput (window={window_size})')
-            axes[1, 0].set_xlabel('Training Steps')
-            axes[1, 0].set_ylabel('Throughput (vehicles/h)')
-            axes[1, 0].grid(True, alpha=0.3)
+            # Real collision count over time
+            if 'collision_count' in self.metrics_df.columns:
+                axes[1, 0].plot(self.metrics_df['timestep'], self.metrics_df['collision_count'], 
+                               linewidth=2, color='red')
+                axes[1, 0].set_title('Real Collision Count')
+                axes[1, 0].set_xlabel('Training Steps')
+                axes[1, 0].set_ylabel('Collisions')
+                axes[1, 0].grid(True, alpha=0.3)
             
-            # Cumulative vehicles exited
-            cumulative_exits = self.metrics_df['vehicles_exited'].cumsum()
-            axes[1, 1].plot(self.metrics_df['timestep'], cumulative_exits, 
-                           color='purple', linewidth=2)
-            axes[1, 1].set_title('Cumulative Vehicles Exited')
-            axes[1, 1].set_xlabel('Training Steps')
-            axes[1, 1].set_ylabel('Total Vehicles Exited')
-            axes[1, 1].grid(True, alpha=0.3)
+            # Real vehicles controlled vs detected
+            if 'total_controlled' in self.metrics_df.columns and 'vehicles_detected' in self.metrics_df.columns:
+                valid_data = self.metrics_df[['total_controlled', 'vehicles_detected']].dropna()
+                if len(valid_data) > 0:
+                    axes[1, 1].scatter(valid_data['vehicles_detected'], valid_data['total_controlled'], 
+                                      color='purple', alpha=0.6)
+                    axes[1, 1].set_title('Vehicles Controlled vs Detected')
+                    axes[1, 1].set_xlabel('Vehicles Detected')
+                    axes[1, 1].set_ylabel('Vehicles Controlled')
+                    axes[1, 1].grid(True, alpha=0.3)
             
             plt.tight_layout()
-            save_path = os.path.join(self.plots_dir, 'performance_metrics.png')
+            save_path = os.path.join(self.plots_dir, 'performance_metrics_real.png')
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
             plt.close()
-            print(f"✅ Performance metrics plot saved to {save_path}")
+            print(f"✅ REAL performance metrics plot saved to {save_path}")
             
         except Exception as e:
-            print(f"❌ Failed to create performance metrics plot: {e}")
+            print(f"❌ Failed to create REAL performance metrics plot: {e}")
 
     def plot_correlation_matrix(self):
-        """Plot correlation matrix of metrics"""
+        """Plot correlation matrix of metrics - NO THROUGHPUT"""
         if self.metrics_df is None or len(self.metrics_df) == 0:
             print("⚠️ No data available for correlation matrix")
             return
         
         try:
-            # Select numeric columns for correlation
-            numeric_cols = ['throughput', 'avg_acceleration', 'total_controlled', 
+            # Select numeric columns for correlation - NO THROUGHPUT
+            numeric_cols = ['avg_acceleration', 'total_controlled', 
                            'vehicles_exited', 'bid_scale', 'collision_count']
             
             # Add reward if available
@@ -414,7 +390,7 @@ class TrainingAnalyzer:
                         plt.text(j, i, f'{corr_data.iloc[i, j]:.3f}', 
                                 ha='center', va='center')
             
-            plt.title('Metrics Correlation Matrix', fontsize=14, fontweight='bold')
+            plt.title('Metrics Correlation Matrix (No Throughput)', fontsize=14, fontweight='bold')
             plt.tight_layout()
             save_path = os.path.join(self.plots_dir, 'correlation_matrix.png')
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
@@ -424,253 +400,88 @@ class TrainingAnalyzer:
         except Exception as e:
             print(f"❌ Failed to create correlation matrix: {e}")
 
-    def plot_learning_curves(self):
-        """Plot learning curves with confidence intervals"""
-        if self.metrics_df is None or len(self.metrics_df) == 0:
-            print("⚠️ No data available for learning curves")
-            return
-        
-        try:
-            # Smooth the data
-            window_size = max(5, len(self.metrics_df) // 20)
-            
-            fig, axes = plt.subplots(2, 1, figsize=(12, 10))
-            
-            # Primary learning curve (reward or throughput)
-            if 'reward' in self.metrics_df.columns:
-                primary_metric = 'reward'
-                primary_label = 'Reward'
-                primary_color = 'blue'
-            else:
-                primary_metric = 'throughput'
-                primary_label = 'Throughput (vehicles/h)'
-                primary_color = 'blue'
-            
-            smooth_primary = self.metrics_df[primary_metric].rolling(window=window_size, center=True).mean()
-            std_primary = self.metrics_df[primary_metric].rolling(window=window_size, center=True).std()
-            
-            axes[0].plot(self.metrics_df['timestep'], smooth_primary, 
-                        linewidth=2, label='Mean', color=primary_color)
-            
-            # Add confidence interval if we have enough data
-            if len(self.metrics_df) > window_size:
-                axes[0].fill_between(self.metrics_df['timestep'], 
-                                   smooth_primary - std_primary,
-                                   smooth_primary + std_primary,
-                                   alpha=0.3, color=primary_color, label='±1 Std')
-            
-            axes[0].set_title(f'{primary_label} Learning Curve')
-            axes[0].set_xlabel('Training Steps')
-            axes[0].set_ylabel(primary_label)
-            axes[0].legend()
-            axes[0].grid(True, alpha=0.3)
-            
-            # Acceleration learning curve
-            smooth_accel = self.metrics_df['avg_acceleration'].rolling(window=window_size, center=True).mean()
-            std_accel = self.metrics_df['avg_acceleration'].rolling(window=window_size, center=True).std()
-            
-            axes[1].plot(self.metrics_df['timestep'], smooth_accel, 
-                        linewidth=2, label='Mean', color='red')
-            
-            if len(self.metrics_df) > window_size:
-                axes[1].fill_between(self.metrics_df['timestep'], 
-                                   smooth_accel - std_accel,
-                                   smooth_accel + std_accel,
-                                   alpha=0.3, color='red', label='±1 Std')
-            
-            axes[1].set_title('Acceleration Learning Curve')
-            axes[1].set_xlabel('Training Steps')
-            axes[1].set_ylabel('Acceleration (m/s²)')
-            axes[1].legend()
-            axes[1].grid(True, alpha=0.3)
-            
-            plt.tight_layout()
-            save_path = os.path.join(self.plots_dir, 'learning_curves.png')
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            print(f"✅ Learning curves plot saved to {save_path}")
-            
-        except Exception as e:
-            print(f"❌ Failed to create learning curves: {e}")
-
-    def plot_parameter_evolution(self):
-        """Plot evolution of all trainable parameters if available"""
-        if self.metrics_df is None or len(self.metrics_df) == 0:
-            return
-        
-        try:
-            # Look for parameter columns
-            param_columns = [col for col in self.metrics_df.columns if any(keyword in col.lower() 
-                           for keyword in ['bid', 'eta', 'speed', 'congestion', 'platoon', 'fairness',
-                                         'ignore', 'urgency', 'proximity', 'junction'])]
-            
-            if not param_columns:
-                print("ℹ️ No parameter evolution data found")
-                return
-            
-            n_params = len(param_columns)
-            n_cols = 3
-            n_rows = (n_params + n_cols - 1) // n_cols
-            
-            fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 4 * n_rows))
-            if n_rows == 1:
-                axes = [axes] if n_cols == 1 else axes
-            else:
-                axes = axes.flatten()
-            
-            for i, param in enumerate(param_columns):
-                if i < len(axes):
-                    axes[i].plot(self.metrics_df['timestep'], self.metrics_df[param], 
-                               linewidth=2, alpha=0.8)
-                    axes[i].set_title(f'Parameter: {param}')
-                    axes[i].set_xlabel('Training Steps')
-                    axes[i].set_ylabel('Value')
-                    axes[i].grid(True, alpha=0.3)
-            
-            # Hide unused subplots
-            for i in range(len(param_columns), len(axes)):
-                axes[i].set_visible(False)
-            
-            plt.suptitle('Parameter Evolution During Training', fontsize=16, fontweight='bold')
-            plt.tight_layout()
-            save_path = os.path.join(self.plots_dir, 'parameter_evolution.png')
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            print(f"✅ Parameter evolution plot saved to {save_path}")
-            
-        except Exception as e:
-            print(f"❌ Failed to create parameter evolution plot: {e}")
-
-    def generate_all_plots(self):
-        """Generate all analysis plots with better error handling"""
-        print("📊 Generating training analysis plots...")
-        
-        # Ensure non-interactive mode
-        plt.ioff()
-        
-        plots_created = 0
-        
-        try:
-            self.plot_training_progress()
-            plots_created += 1
-        except Exception as e:
-            print(f"❌ Training progress plot failed: {e}")
-        
-        try:
-            self.plot_performance_metrics()
-            plots_created += 1
-        except Exception as e:
-            print(f"❌ Performance metrics plot failed: {e}")
-        
-        try:
-            self.plot_correlation_matrix()
-            plots_created += 1
-        except Exception as e:
-            print(f"❌ Correlation matrix plot failed: {e}")
-        
-        try:
-            self.plot_learning_curves()
-            plots_created += 1
-        except Exception as e:
-            print(f"❌ Learning curves plot failed: {e}")
-        
-        try:
-            self.plot_parameter_evolution()
-            plots_created += 1
-        except Exception as e:
-            print(f"❌ Parameter evolution plot failed: {e}")
-        
-        # Force cleanup
-        plt.close('all')
-        
-        print(f"✅ Generated {plots_created}/5 plots successfully")
-        print(f"📁 All plots saved to: {self.plots_dir}")
-
     def generate_report(self):
-        """Generate text summary report"""
+        """Generate text summary report with throughput calculation ONLY HERE"""
         if self.metrics_df is None or len(self.metrics_df) == 0:
             print("⚠️ No data available for report generation")
             return
         
         try:
-            report_path = os.path.join(self.plots_dir, 'training_report.txt')
+            report_path = os.path.join(self.plots_dir, 'training_report_real_data.txt')
             
             with open(report_path, 'w', encoding='utf-8') as f:
-                f.write("=== DRL Training Analysis Report ===\n\n")
+                f.write("=== DRL Training Analysis Report (REAL DATA ONLY) ===\n\n")
                 
-                # Basic statistics
-                f.write("Training Statistics:\n")
-                f.write(f"  Total Training Steps: {self.metrics_df['timestep'].max():,}\n")
-                f.write(f"  Data Points Collected: {len(self.metrics_df):,}\n\n")
-                
-                # Performance metrics
-                f.write("Performance Metrics:\n")
-                f.write(f"  Average Throughput: {self.metrics_df['throughput'].mean():.2f} ± {self.metrics_df['throughput'].std():.2f} vehicles/h\n")
-                f.write(f"  Max Throughput: {self.metrics_df['throughput'].max():.2f} vehicles/h\n")
-                f.write(f"  Average Acceleration: {self.metrics_df['avg_acceleration'].mean():.3f} ± {self.metrics_df['avg_acceleration'].std():.3f} m/s²\n")
-                f.write(f"  Total Vehicles Exited: {self.metrics_df['vehicles_exited'].sum():,}\n")
-                f.write(f"  Average Controlled Vehicles: {self.metrics_df['total_controlled'].mean():.1f}\n")
-                f.write(f"  Total Collisions: {self.metrics_df['collision_count'].sum():,}\n")
-                
-                # Reward statistics if available
-                if 'reward' in self.metrics_df.columns:
-                    f.write(f"  Average Reward: {self.metrics_df['reward'].mean():.2f} ± {self.metrics_df['reward'].std():.2f}\n")
-                    f.write(f"  Max Reward: {self.metrics_df['reward'].max():.2f}\n")
-                    f.write(f"  Final Reward: {self.metrics_df['reward'].iloc[-1]:.2f}\n")
-                
+                # Data validation summary
+                f.write("Data Validation:\n")
+                f.write(f"  Total Data Points: {len(self.metrics_df):,}\n")
+                if 'using_real_data' in self.metrics_df.columns:
+                    real_count = self.metrics_df['using_real_data'].sum()
+                    f.write(f"  Real Data Points: {real_count:,}\n")
+                    f.write(f"  Data Authenticity: {(real_count/len(self.metrics_df)*100):.1f}%\n")
                 f.write("\n")
                 
-                # Learning progress
+                # Training statistics using real data
+                f.write("Training Statistics (Real Data):\n")
+                f.write(f"  Total Training Steps: {self.metrics_df['timestep'].max():,}\n")
+                
+                # Real performance metrics
+                f.write("Real Performance Metrics:\n")
+                if 'throughput' in self.metrics_df.columns:
+                    throughput_data = self.metrics_df['throughput'].dropna()
+                    if len(throughput_data) > 0:
+                        f.write(f"  Average Real Throughput: {throughput_data.mean():.2f} ± {throughput_data.std():.2f} vehicles/h\n")
+                        f.write(f"  Max Real Throughput: {throughput_data.max():.2f} vehicles/h\n")
+                        f.write(f"  Min Real Throughput: {throughput_data.min():.2f} vehicles/h\n")
+                
+                if 'avg_acceleration' in self.metrics_df.columns:
+                    accel_data = self.metrics_df['avg_acceleration'].dropna()
+                    if len(accel_data) > 0:
+                        f.write(f"  Real Average Acceleration: {accel_data.mean():.3f} ± {accel_data.std():.3f} m/s²\n")
+                
+                if 'collision_count' in self.metrics_df.columns:
+                    f.write(f"  Real Total Collisions: {self.metrics_df['collision_count'].sum():,}\n")
+                
+                if 'vehicles_exited' in self.metrics_df.columns:
+                    f.write(f"  Real Total Vehicles Exited: {self.metrics_df['vehicles_exited'].sum():,}\n")
+                
+                # Learning progress from real data
                 if len(self.metrics_df) > 4:
                     first_quarter = self.metrics_df.iloc[:len(self.metrics_df)//4]
                     last_quarter = self.metrics_df.iloc[3*len(self.metrics_df)//4:]
                     
-                    improvement_throughput = last_quarter['throughput'].mean() - first_quarter['throughput'].mean()
-                    improvement_accel = last_quarter['avg_acceleration'].mean() - first_quarter['avg_acceleration'].mean()
+                    f.write("\nReal Learning Progress:\n")
                     
-                    f.write("Learning Progress:\n")
-                    f.write(f"  Throughput Improvement: {improvement_throughput:+.2f} vehicles/h\n")
-                    f.write(f"  Acceleration Change: {improvement_accel:+.3f} m/s²\n")
-                    f.write(f"  Final Bid Scale: {self.metrics_df['bid_scale'].iloc[-1]:.3f}\n")
+                    if 'throughput' in self.metrics_df.columns:
+                        first_throughput = first_quarter['throughput'].mean()
+                        last_throughput = last_quarter['throughput'].mean()
+                        improvement = last_throughput - first_throughput
+                        f.write(f"  Throughput Improvement: {improvement:+.2f} vehicles/h\n")
                     
-                    # Reward improvement if available
-                    if 'reward' in self.metrics_df.columns:
-                        improvement_reward = last_quarter['reward'].mean() - first_quarter['reward'].mean()
-                        f.write(f"  Reward Improvement: {improvement_reward:+.2f}\n")
+                    if 'collision_count' in self.metrics_df.columns:
+                        first_collisions = first_quarter['collision_count'].mean()
+                        last_collisions = last_quarter['collision_count'].mean()
+                        f.write(f"  Collision Trend: {last_collisions - first_collisions:+.2f} per episode\n")
                     
-                    f.write("\n")
-                    
-                    # Recommendations
-                    f.write("Recommendations:\n")
-                    if improvement_throughput > 0:
-                        f.write("  ✅ Model is learning to improve throughput\n")
-                    else:
-                        f.write("  ⚠️ Consider adjusting reward function for throughput\n")
-                    
-                    if abs(improvement_accel) < 0.5:
-                        f.write("  ✅ Acceleration is stable\n")
-                    else:
-                        f.write("  ⚠️ Large acceleration changes detected\n")
-                        
-                    if 'reward' in self.metrics_df.columns and improvement_reward > 0:
-                        f.write("  ✅ Agent is learning (reward improving)\n")
-                else:
-                    f.write("Learning Progress:\n")
-                    f.write("  ⚠️ Insufficient data for trend analysis\n\n")
+                    if 'bid_scale' in self.metrics_df.columns:
+                        f.write(f"  Final Bid Scale: {self.metrics_df['bid_scale'].iloc[-1]:.3f}\n")
                 
                 # Data quality assessment
-                f.write("Data Quality:\n")
+                f.write("\nData Quality Assessment:\n")
                 missing_data = self.metrics_df.isnull().sum().sum()
+                total_cells = len(self.metrics_df) * len(self.metrics_df.columns)
+                completeness = ((total_cells - missing_data) / total_cells * 100)
                 f.write(f"  Missing Values: {missing_data}\n")
-                f.write(f"  Data Completeness: {((len(self.metrics_df) * len(self.metrics_df.columns) - missing_data) / (len(self.metrics_df) * len(self.metrics_df.columns)) * 100):.1f}%\n")
+                f.write(f"  Data Completeness: {completeness:.1f}%\n")
+                f.write(f"  Source: Real CARLA simulation data\n")
             
-            print(f"✅ Training report saved to {report_path}")
+            print(f"✅ REAL data training report saved to {report_path}")
             
         except Exception as e:
-            print(f"❌ Failed to generate report: {e}")
+            print(f"❌ Failed to generate REAL data report: {e}")
 
     def save_summary_json(self):
-        """Save a JSON summary for easy programmatic access"""
+        """Save a JSON summary for easy programmatic access - NO THROUGHPUT"""
         if self.metrics_df is None:
             return
         
@@ -678,10 +489,9 @@ class TrainingAnalyzer:
             summary = {
                 'training_steps': int(self.metrics_df['timestep'].max()),
                 'data_points': len(self.metrics_df),
-                'avg_throughput': float(self.metrics_df['throughput'].mean()),
-                'max_throughput': float(self.metrics_df['throughput'].max()),
                 'avg_acceleration': float(self.metrics_df['avg_acceleration'].mean()),
                 'total_collisions': int(self.metrics_df['collision_count'].sum()),
+                'total_vehicles_exited': int(self.metrics_df['vehicles_exited'].sum()),
                 'final_bid_scale': float(self.metrics_df['bid_scale'].iloc[-1])
             }
             
@@ -697,10 +507,31 @@ class TrainingAnalyzer:
             with open(summary_path, 'w') as f:
                 json.dump(summary, f, indent=2)
             
-            print(f"✅ Training summary saved to {summary_path}")
+            print(f"✅ Training summary saved to {summary_path} (no throughput)")
             
         except Exception as e:
             print(f"❌ Failed to save summary JSON: {e}")
+
+    def generate_all_plots(self):
+        """Generate all analysis plots"""
+        print("📊 Generating all training analysis plots...")
+        
+        if self.metrics_df is None or len(self.metrics_df) == 0:
+            print("⚠️ No real data available - cannot generate plots")
+            return
+        
+        try:
+            # Generate individual plots
+            self.plot_training_progress()
+            self.plot_performance_metrics()
+            self.plot_correlation_matrix()
+            
+            print(f"✅ All plots generated successfully in {self.plots_dir}")
+            
+        except Exception as e:
+            print(f"❌ Failed to generate some plots: {e}")
+            import traceback
+            traceback.print_exc()
 
 def quick_analysis(results_dir: str = None, plots_dir: str = None):
     """Quick analysis function for easy usage"""
@@ -709,6 +540,7 @@ def quick_analysis(results_dir: str = None, plots_dir: str = None):
     if plots_dir is None:
         plots_dir = "drl/plots"
     
+    print("ℹ️ Running analysis without TensorBoard dependency")
     analyzer = TrainingAnalyzer(results_dir, plots_dir)
     analyzer.generate_all_plots()
     analyzer.generate_report()
