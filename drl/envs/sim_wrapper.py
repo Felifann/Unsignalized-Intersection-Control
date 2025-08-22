@@ -8,9 +8,12 @@ from typing import Dict, List, Tuple, Any, Optional
 base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, base_dir)
 
+# Import unified configuration
+from config.unified_config import UnifiedConfig, get_config
+
 # Import CARLA after adding egg to path
 try:
-    import carla
+    import carla  # type: ignore
 except ImportError:
     print("⚠️ CARLA not found - make sure CARLA egg is properly installed")
     carla = None
@@ -22,20 +25,40 @@ from platooning.platoon_manager import PlatoonManager
 from auction.auction_engine import DecentralizedAuctionEngine
 from control import TrafficController
 from nash.deadlock_nash_solver import DeadlockNashSolver
+from nash.deadlock_detector import DeadlockException
 from drl.policies.bid_policy import TrainableBidPolicy
 from drl.envs.metrics_manager import SimulationMetricsManager
 
 class SimulationEnv:
     """Streamlined simulation environment wrapper"""
     
-    def __init__(self, sim_cfg: dict = None):
-        self.sim_cfg = sim_cfg or {}
-        self.max_steps = self.sim_cfg.get('max_steps', 2000)
-        self.current_step = 0
+    def __init__(self, sim_cfg: dict = None, unified_config: UnifiedConfig = None):
+        # Use unified config or get global config
+        if unified_config is None:
+            unified_config = get_config()
         
-        # Performance settings
-        self.steps_per_action = 1 if self.sim_cfg.get('training_mode') else 3
-        self.observation_cache_steps = 15
+        self.unified_config = unified_config
+        self.sim_cfg = sim_cfg or {}
+        
+        # Update unified config with sim_cfg if provided
+        if 'training_mode' in self.sim_cfg:
+            self.unified_config.system.training_mode = self.sim_cfg['training_mode']
+        
+        # Generate sim config from unified config
+        unified_sim_cfg = self.unified_config.to_sim_config()
+        # Override with any explicit sim_cfg values
+        unified_sim_cfg.update(self.sim_cfg)
+        self.sim_cfg = unified_sim_cfg
+        
+        # CORRECTED: Track actions vs simulation steps separately 
+        self.max_actions = self.sim_cfg.get('max_steps', 2000)  # This is actually max actions
+        self.current_action = 0  # Track actions taken by DRL agent
+        self.current_step = 0    # Track simulation steps (for internal use)
+        
+        # BALANCED Performance settings for DRL training - from unified config
+        training_mode = self.unified_config.system.training_mode
+        self.steps_per_action = self.unified_config.system.steps_per_action
+        self.observation_cache_steps = self.unified_config.system.observation_cache_steps if training_mode else 15
         self.last_observation = None
         self.last_obs_step = -1
         
@@ -45,13 +68,33 @@ class SimulationEnv:
         # Dedicated metrics manager
         self.metrics_manager = SimulationMetricsManager()
         
+        # Deadlock timeout and reset configuration - from unified config
+        self.deadlock_reset_enabled = self.sim_cfg.get('deadlock_reset_enabled', True)
+        self.deadlock_timeout_duration = self.unified_config.deadlock.deadlock_timeout_duration
+        self.deadlock_first_detected_time = None
+        self.deadlock_consecutive_detections = 0
+        self.deadlock_reset_count = 0
+        self.max_deadlock_resets = self.unified_config.deadlock.max_deadlock_resets
+        
+        # Severe deadlock (severity 1.0) immediate reset configuration - from unified config
+        self.severe_deadlock_reset_enabled = self.unified_config.system.severe_deadlock_reset_enabled
+        self.severe_deadlock_punishment = self.unified_config.system.severe_deadlock_punishment
+        self.severe_deadlock_reset_count = 0
+        
         # Initialize simulation components
         self._init_simulation()
         
         # Trainable policy
         self.bid_policy = TrainableBidPolicy()
         
-        print(f"🤖 Streamlined Simulation Environment initialized")
+        print(f"🤖 Streamlined Simulation Environment initialized with UNIFIED CONFIG")
+        print(f"   🔧 Config - Conflict window: {self.unified_config.conflict.conflict_time_window}s")
+        print(f"   🔧 Config - Safe distance: {self.unified_config.conflict.min_safe_distance}m")
+        print(f"   🔧 Config - Deadlock threshold: {self.unified_config.deadlock.deadlock_speed_threshold} m/s")
+        if self.deadlock_reset_enabled:
+            print(f"   🔄 Deadlock auto-reset: ON (timeout: {self.deadlock_timeout_duration}s, max resets: {self.max_deadlock_resets})")
+        if self.severe_deadlock_reset_enabled:
+            print(f"   ⚡ Severe deadlock reset: ON (punishment: {self.severe_deadlock_punishment})")
 
     def observation_dim(self) -> int:
         """Return fixed observation space dimension"""
@@ -78,14 +121,19 @@ class SimulationEnv:
             # Create other components
             self.auction_engine = DecentralizedAuctionEngine(
                 state_extractor=self.state_extractor,
-                max_go_agents=None
+                max_go_agents=None,
+                max_participants_per_auction=self.unified_config.auction.max_participants_per_auction
+            )
+            
+            # Set unified auction interval
+            self.auction_engine.set_auction_interval_from_config(
+                self.unified_config.auction.auction_interval
             )
             
             self.nash_solver = DeadlockNashSolver(
-                max_exact=15,
-                conflict_time_window=3.0,
-                intersection_center=(-188.9, -89.7, 0.0),
-                max_go_agents=None
+                unified_config=self.unified_config,
+                intersection_center=self.unified_config.system.intersection_center,
+                max_go_agents=self.unified_config.mwis.max_go_agents
             )
             
             self.traffic_controller = TrafficController(
@@ -101,14 +149,21 @@ class SimulationEnv:
             print("✅ Core simulation components initialized")
             
         except Exception as e:
-            print(f"❌ Simulation initialization failed: {e}")
+            print(f"❌ Simulation initialization failed: {str(e)}")
             raise
 
     def reset(self, seed: Optional[int] = None) -> np.ndarray:
         """Reset environment with improved stability"""
         try:
-            self.current_step = 0
+            self.current_step = 0      # Reset simulation steps
+            self.current_action = 0    # Reset action counter
             self.metrics_manager.reset_metrics()
+            
+            # Reset deadlock tracking
+            self.deadlock_first_detected_time = None
+            self.deadlock_consecutive_detections = 0
+            self.deadlock_reset_count = 0
+            self.severe_deadlock_reset_count = 0
             
             # Reset observation cache
             self.last_observation = None
@@ -131,14 +186,19 @@ class SimulationEnv:
             
             self.auction_engine = DecentralizedAuctionEngine(
                 state_extractor=self.state_extractor,
-                max_go_agents=None
+                max_go_agents=None,
+                max_participants_per_auction=self.unified_config.auction.max_participants_per_auction
+            )
+            
+            # Set unified auction interval
+            self.auction_engine.set_auction_interval_from_config(
+                self.unified_config.auction.auction_interval
             )
             
             self.nash_solver = DeadlockNashSolver(
-                max_exact=15,
-                conflict_time_window=3.0,
-                intersection_center=(-188.9, -89.7, 0.0),
-                max_go_agents=None
+                unified_config=self.unified_config,
+                intersection_center=self.unified_config.system.intersection_center,
+                max_go_agents=self.unified_config.mwis.max_go_agents
             )
             
             # Reconnect components
@@ -165,7 +225,7 @@ class SimulationEnv:
             return obs
             
         except Exception as e:
-            print(f"❌ Reset failed: {e}")
+            print(f"❌ Reset failed: {str(e)}")
             return np.zeros(195, dtype=np.float32)
 
     def step_with_all_params(self, action_params: Dict) -> Tuple[np.ndarray, float, bool, Dict]:
@@ -173,6 +233,9 @@ class SimulationEnv:
         step_start = time.time()
         
         try:
+            # Increment action counter
+            self.current_action += 1
+            
             # Update trainable parameters
             self._update_policy_parameters(action_params)
             
@@ -182,29 +245,61 @@ class SimulationEnv:
             
             # Run simulation steps
             initial_vehicle_count = len(self.state_extractor.get_vehicle_states())
+            severe_deadlock_occurred = False
             
+            # EXACT main.py pattern: Only update on final frame (unified_update_interval behavior)
             for i in range(self.steps_per_action):
-                # Advance simulation
+                # Advance simulation (every frame like main.py)
                 self.scenario.carla.world.tick()
                 self.current_step += 1
                 
-                # Update system components
-                vehicle_states = self.state_extractor.get_vehicle_states()
+                # Update system components ONLY on final frame (exactly like main.py)
+                if i == self.steps_per_action - 1:  # Only on final frame
+                    vehicle_states = self.state_extractor.get_vehicle_states()
+                    
+                    if vehicle_states:
+                        try:
+                            self.platoon_manager.update()
+                            auction_winners = self.auction_engine.update(vehicle_states, self.platoon_manager)
+                            self.traffic_controller.update_control(
+                                self.platoon_manager, self.auction_engine, auction_winners
+                            )
+                        except Exception as update_error:
+                            print(f"⚠️ Update error: {update_error}")
+                            continue
                 
-                if vehicle_states:
-                    try:
-                        self.platoon_manager.update()
-                        auction_winners = self.auction_engine.update(vehicle_states, self.platoon_manager)
-                        self.traffic_controller.update_control(
-                            self.platoon_manager, self.auction_engine, auction_winners
-                        )
-                    except Exception as update_error:
-                        print(f"⚠️ Update error: {update_error}")
-                        continue
-                
-                # Early termination check
-                if self._check_collision() or self._check_deadlock():
-                    break
+                # Only check for deadlocks/collisions on final frame (performance optimization)
+                if i == self.steps_per_action - 1:  # Only on final frame
+                    # Check for severe deadlock (severity 1.0) first - immediate action needed
+                    if self._check_severe_deadlock():
+                        print(f"🚨 SEVERE DEADLOCK (severity 1.0) detected at step {self.current_step}")
+                        severe_deadlock_occurred = True
+                        if self.severe_deadlock_reset_enabled:
+                            print(f"⚡ Performing immediate severe deadlock reset")
+                            if self._perform_severe_deadlock_reset():
+                                break  # Exit loop to apply punishment and continue
+                            else:
+                                print(f"❌ Severe deadlock reset failed - terminating episode")
+                                break
+                        else:
+                            break
+                    
+                    # Check for regular deadlock
+                    deadlock_detected = self._check_deadlock()
+                    collision_detected = self._check_collision()
+                    
+                    if collision_detected:
+                        print(f"💥 Collision detected at step {self.current_step}")
+                        break
+                        
+                    # For regular deadlock: only break if not using auto-reset or reset failed
+                    if deadlock_detected:
+                        # If deadlock reset is disabled or we're out of resets, break
+                        if (not self.deadlock_reset_enabled or 
+                            self.deadlock_reset_count >= self.max_deadlock_resets):
+                            print(f"🚨 Deadlock detected at step {self.current_step} - episode terminating")
+                            break
+                        # Otherwise, deadlock handling may have performed a reset, continue
             
             # Calculate reward using metrics manager
             reward = self.metrics_manager.calculate_reward(
@@ -212,19 +307,29 @@ class SimulationEnv:
                 self.scenario, self.nash_solver, self.current_step
             )
             
+            # Apply severe deadlock punishment if occurred
+            if severe_deadlock_occurred:
+                reward += self.severe_deadlock_punishment
+                print(f"⚡ Applied severe deadlock punishment: {self.severe_deadlock_punishment} (total reward: {reward})")
+            
             # Get observation
             obs = self._get_observation_cached()
             
-            # Check episode termination
-            done = (self.current_step >= self.max_steps or 
+            # Check episode termination based on ACTIONS, not simulation steps
+            # For deadlock: only terminate if reset is disabled or max resets exceeded
+            deadlock_should_terminate = (self._check_deadlock() and 
+                                       (not self.deadlock_reset_enabled or 
+                                        self.deadlock_reset_count >= self.max_deadlock_resets))
+            
+            done = (self.current_action >= self.max_actions or 
                    self._check_collision() or 
-                   self._check_deadlock())
+                   deadlock_should_terminate)
             
             # Generate info using metrics manager
             info = self.metrics_manager.get_info_dict(
                 self.traffic_controller, self.auction_engine, self.nash_solver,
                 self.scenario, self.state_extractor, self.bid_policy,
-                self.current_step, self.max_steps
+                self.current_action, self.max_actions  # Report actions, not sim steps
             )
             
             # Add validation info
@@ -234,6 +339,22 @@ class SimulationEnv:
                     'vehicles_stable': abs(current_vehicles - initial_vehicle_count) <= 3,
                     'reward_realistic': abs(reward) <= 50.0,
                     'observation_valid': len(obs) == 195
+                },
+                'action_info': {
+                    'current_action': self.current_action,
+                    'max_actions': self.max_actions,
+                    'sim_steps_taken': self.current_step,
+                    'steps_per_action': self.steps_per_action
+                },
+                'deadlock_reset_info': {
+                    'deadlock_reset_enabled': self.deadlock_reset_enabled,
+                    'deadlock_reset_count': self.deadlock_reset_count,
+                    'max_deadlock_resets': self.max_deadlock_resets,
+                    'deadlock_timeout_duration': self.deadlock_timeout_duration,
+                    'deadlock_currently_detected': self.deadlock_first_detected_time is not None,
+                    'deadlock_consecutive_detections': self.deadlock_consecutive_detections,
+                    'severe_deadlock_reset_count': self.severe_deadlock_reset_count,
+                    'severe_deadlock_occurred_this_step': severe_deadlock_occurred
                 }
             })
             
@@ -244,7 +365,7 @@ class SimulationEnv:
             return obs, reward, done, info
             
         except Exception as e:
-            print(f"❌ Step failed: {e}")
+            print(f"❌ Step failed: {str(e)}")
             return (np.zeros(195, dtype=np.float32), -10.0, True, 
                    {'error': str(e), 'using_real_data': False})
 
@@ -273,6 +394,33 @@ class SimulationEnv:
             ignore_vehicles_platoon_leader=action_params.get('ignore_vehicles_platoon_leader'),
             ignore_vehicles_platoon_follower=action_params.get('ignore_vehicles_platoon_follower')
         )
+        
+        # Update auction engine parameters
+        if 'max_participants_per_auction' in action_params:
+            self.auction_engine.update_max_participants_per_auction(
+                action_params['max_participants_per_auction']
+            )
+        
+        # Update Nash solver parameters via unified config
+        nash_params = {}
+        if 'path_intersection_threshold' in action_params:
+            nash_params['path_intersection_threshold'] = action_params['path_intersection_threshold']
+        if 'platoon_conflict_distance' in action_params:
+            nash_params['platoon_conflict_distance'] = action_params['platoon_conflict_distance']
+        
+        if nash_params:
+            # Update unified config and recreate Nash solver for new parameters
+            self.unified_config.update_from_drl_params(**nash_params)
+            
+            # Recreate Nash solver with updated config
+            self.nash_solver = DeadlockNashSolver(
+                unified_config=self.unified_config,
+                intersection_center=self.unified_config.system.intersection_center,
+                max_go_agents=self.unified_config.mwis.max_go_agents
+            )
+            
+            # Reconnect to systems
+            self.auction_engine.set_nash_controller(self.nash_solver)
 
     def _get_observation_cached(self) -> np.ndarray:
         """Get observation with caching"""
@@ -310,43 +458,66 @@ class SimulationEnv:
             self._obs_array[9] = min(self.metrics_manager.metrics.get('collision_count', 0), 100)
             
             # Vehicle states (indices 10-169, 20 vehicles × 8 features each)
-            active_controls = control_stats.get('active_controls', [])
-            for i, vehicle_state in enumerate(vehicle_states[:20]):
-                base_idx = 10 + i * 8
-                
-                # Location
-                loc = vehicle_state.get('location', {})
-                if isinstance(loc, dict):
-                    self._obs_array[base_idx] = float(loc.get('x', 0.0))
-                    self._obs_array[base_idx + 1] = float(loc.get('y', 0.0))
-                elif isinstance(loc, (list, tuple)) and len(loc) >= 2:
-                    self._obs_array[base_idx] = float(loc[0])
-                    self._obs_array[base_idx + 1] = float(loc[1])
-                
-                # Velocity
-                vel = vehicle_state.get('velocity', {})
-                if isinstance(vel, dict):
-                    speed = np.sqrt(vel.get('x', 0)**2 + vel.get('y', 0)**2 + vel.get('z', 0)**2)
-                    self._obs_array[base_idx + 2] = min(speed, 50.0)
-                elif isinstance(vel, (list, tuple)) and len(vel) >= 3:
-                    speed = np.sqrt(vel[0]**2 + vel[1]**2 + vel[2]**2)
-                    self._obs_array[base_idx + 2] = min(speed, 50.0)
-                
-                # Other features
-                self._obs_array[base_idx + 3] = np.clip(vehicle_state.get('eta_to_intersection', 0), 0, 100)
-                self._obs_array[base_idx + 4] = float(vehicle_state.get('is_junction', False))
-                self._obs_array[base_idx + 5] = float(str(vehicle_state['id']) in active_controls)
-                self._obs_array[base_idx + 6] = np.clip(vehicle_state.get('lane_id', 0), 0, 10)
-                # index 7 reserved
+            try:
+                active_controls = control_stats.get('active_controls', [])
+                for i, vehicle_state in enumerate(vehicle_states[:20]):
+                    try:
+                        base_idx = 10 + i * 8
+                        
+                        # Location
+                        loc = vehicle_state.get('location', {})
+                        if isinstance(loc, dict):
+                            self._obs_array[base_idx] = float(loc.get('x', 0.0))
+                            self._obs_array[base_idx + 1] = float(loc.get('y', 0.0))
+                        elif isinstance(loc, (list, tuple)) and len(loc) >= 2:
+                            self._obs_array[base_idx] = float(loc[0])
+                            self._obs_array[base_idx + 1] = float(loc[1])
+                        
+                        # Velocity
+                        vel = vehicle_state.get('velocity', {})
+                        if isinstance(vel, dict):
+                            speed = np.sqrt(vel.get('x', 0)**2 + vel.get('y', 0)**2 + vel.get('z', 0)**2)
+                            self._obs_array[base_idx + 2] = min(speed, 50.0)
+                        elif isinstance(vel, (list, tuple)) and len(vel) >= 3:
+                            speed = np.sqrt(vel[0]**2 + vel[1]**2 + vel[2]**2)
+                            self._obs_array[base_idx + 2] = min(speed, 50.0)
+                        
+                        # Other features
+                        self._obs_array[base_idx + 3] = np.clip(vehicle_state.get('eta_to_intersection', 0), 0, 100)
+                        self._obs_array[base_idx + 4] = float(vehicle_state.get('is_junction', False))
+                        vehicle_id = vehicle_state.get('id', 0)
+                        self._obs_array[base_idx + 5] = float(str(vehicle_id) in active_controls)
+                        self._obs_array[base_idx + 6] = np.clip(vehicle_state.get('lane_id', 0), 0, 10)
+                        # index 7 reserved
+                    except Exception as vehicle_error:
+                        print(f"⚠️ Vehicle {i} observation error: {str(vehicle_error)}")
+                        # Fill this vehicle's section with zeros
+                        base_idx = 10 + i * 8
+                        self._obs_array[base_idx:base_idx + 8] = 0.0
+            except Exception as vehicles_error:
+                print(f"⚠️ Vehicle states observation error: {str(vehicles_error)}")
+                # Fill entire vehicle section with zeros
+                self._obs_array[10:170] = 0.0
             
             # Platoon info (indices 170-189, 5 platoons × 4 features each)
-            platoons = self.platoon_manager.get_all_platoons()
-            for i, platoon in enumerate(platoons[:5]):
-                base_idx = 170 + i * 4
-                self._obs_array[base_idx] = min(platoon.get_size(), 20)
-                self._obs_array[base_idx + 1] = float(platoon.get_leader_id() % 10000)
-                self._obs_array[base_idx + 2] = min(len(platoon.get_follower_ids()), 15)
-                # index 3 reserved
+            try:
+                platoons = self.platoon_manager.get_all_platoons()
+                for i, platoon in enumerate(platoons[:5]):
+                    base_idx = 170 + i * 4
+                    self._obs_array[base_idx] = min(platoon.get_size(), 20)
+                    leader_id = platoon.get_leader_id()
+                    if leader_id is not None and isinstance(leader_id, (int, float)):
+                        self._obs_array[base_idx + 1] = float(leader_id % 10000)
+                    else:
+                        self._obs_array[base_idx + 1] = 0.0
+                    self._obs_array[base_idx + 2] = min(len(platoon.get_follower_ids()), 15)
+                    # index 3 reserved
+            except Exception as platoon_error:
+                print(f"⚠️ Platoon observation error: {str(platoon_error)}")
+                # Fill platoon section with zeros if error occurs
+                for i in range(5):
+                    base_idx = 170 + i * 4
+                    self._obs_array[base_idx:base_idx + 4] = 0.0
             
             # Auction info (indices 190-194)
             priority_order = self.auction_engine.get_current_priority_order()
@@ -362,12 +533,15 @@ class SimulationEnv:
             return self._obs_array.copy()
             
         except Exception as e:
-            print(f"❌ Observation generation failed: {e}")
+            print(f"❌ Observation generation failed: {str(e)}")
             return np.zeros(195, dtype=np.float32)
 
     def _cleanup_existing_vehicles(self):
         """Clean up existing vehicles"""
         try:
+            # Safeguard when CARLA is not available
+            if carla is None or not hasattr(self, 'scenario') or not hasattr(self.scenario, 'carla'):
+                return
             world = self.scenario.carla.world
             vehicles = world.get_actors().filter('vehicle.*')
             
@@ -378,36 +552,59 @@ class SimulationEnv:
                 world.tick()
             
         except Exception as e:
-            print(f"⚠️ Cleanup failed: {e}")
+            print(f"⚠️ Cleanup failed: {str(e)}")
 
-    def _safe_reset_scenario(self, max_attempts: int = 3) -> bool:
-        """Safe scenario reset with stability checks"""
-        for attempt in range(max_attempts):
-            try:
-                print(f"🎯 Reset attempt {attempt + 1}/{max_attempts}")
+    def _safe_reset_scenario(self) -> bool:
+        """Simplified single-attempt scenario reset"""
+        try:
+            print("🎯 Resetting scenario...")
+            
+            # FIXED: Use only scenario manager's cleanup to avoid double-destruction
+            # Don't call _cleanup_existing_vehicles() here since scenario.reset_scenario() handles it
+            
+            # Reset scenario and generate new traffic
+            self.scenario.reset_scenario()
+            
+            # Give time for vehicles to spawn and register
+            initial_wait = 0.5 if self.sim_cfg.get('training_mode', False) else 1.5
+            time.sleep(initial_wait)
+            
+            # Force world tick to ensure all actors are registered
+            self.scenario.carla.world.tick()
+            time.sleep(0.1)
+            
+            # Verify vehicles were spawned successfully
+            vehicles = self.state_extractor.get_vehicle_states(include_all_vehicles=True)
+            if len(vehicles) > 0:
+                print(f"✅ Reset successful: {len(vehicles)} vehicles spawned globally")
                 
-                if attempt == 0:
-                    self._cleanup_existing_vehicles()
-                    time.sleep(0.5)
+                # Show context about intersection occupancy
+                intersection_vehicles = self.state_extractor.get_vehicle_states(include_all_vehicles=False)
+                print(f"   ({len(intersection_vehicles)} vehicles currently in intersection area)")
                 
-                self.scenario.reset_scenario()
-                time.sleep(3.0 + attempt * 1.0)
-                
-                # Verify stability
-                vehicles = self.state_extractor.get_vehicle_states()
-                if len(vehicles) > 0:
-                    time.sleep(2.0)
-                    vehicles_after = self.state_extractor.get_vehicle_states()
+                return True
+            else:
+                print(f"⚠️ No vehicles detected after reset")
+                # Debug: check CARLA world state
+                try:
+                    carla_vehicles = list(self.scenario.carla.world.get_actors().filter('vehicle.*'))
+                    alive_count = sum(1 for v in carla_vehicles if v.is_alive)
+                    print(f"   Debug: CARLA world has {len(carla_vehicles)} vehicle actors, {alive_count} alive")
                     
-                    if len(vehicles_after) > 0:
-                        print(f"✅ Stable reset: {len(vehicles_after)} vehicles")
-                        return True
-                        
-            except Exception as e:
-                print(f"⚠️ Reset attempt {attempt + 1} failed: {e}")
-                continue
-        
-        return False
+                    # Additional debug: check traffic generator state
+                    if hasattr(self.scenario, 'traffic_gen') and hasattr(self.scenario.traffic_gen, 'vehicles'):
+                        traffic_vehicles = len(self.scenario.traffic_gen.vehicles)
+                        print(f"   Debug: Traffic generator has {traffic_vehicles} vehicles in list")
+                except Exception as debug_e:
+                    print(f"   Debug check failed: {debug_e}")
+                
+                return False
+                
+        except Exception as e:
+            print(f"❌ Reset failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return False
 
     def _check_collision(self) -> bool:
         """Check for collisions"""
@@ -430,7 +627,7 @@ class SimulationEnv:
             return False
 
     def _check_deadlock(self) -> bool:
-        """Check for deadlocks"""
+        """Check for deadlocks with proper error handling and timeout management"""
         try:
             if (hasattr(self, 'nash_solver') and 
                 hasattr(self.nash_solver, 'deadlock_detector')):
@@ -442,7 +639,194 @@ class SimulationEnv:
             
             return False
             
-        except Exception:
+        except DeadlockException as e:
+            # Deadlock detected - handle with timeout logic
+            return self._handle_deadlock_detection(e)
+        except Exception as e:
+            # Other errors - log but don't fail
+            print(f"⚠️ Deadlock detection error: {str(e)}")
+            return False
+
+    def _handle_deadlock_detection(self, deadlock_exception: DeadlockException) -> bool:
+        """Handle deadlock detection with timeout and auto-reset logic"""
+        current_time = self.scenario.carla.world.get_snapshot().timestamp.elapsed_seconds
+        
+        # Track deadlock duration
+        if self.deadlock_first_detected_time is None:
+            self.deadlock_first_detected_time = current_time
+            self.deadlock_consecutive_detections = 1
+            print(f"🚨 DEADLOCK FIRST DETECTED: {deadlock_exception.deadlock_type} affecting {deadlock_exception.affected_vehicles} vehicles")
+            print(f"   ⏱️ Starting deadlock timer - will auto-reset in {self.deadlock_timeout_duration}s if persists")
+        else:
+            self.deadlock_consecutive_detections += 1
+            deadlock_duration = current_time - self.deadlock_first_detected_time
+            
+            # Check if deadlock has persisted for timeout duration
+            if (self.deadlock_reset_enabled and 
+                deadlock_duration >= self.deadlock_timeout_duration and 
+                self.deadlock_reset_count < self.max_deadlock_resets):
+                
+                print(f"⏰ DEADLOCK TIMEOUT: {deadlock_duration:.1f}s >= {self.deadlock_timeout_duration}s")
+                print(f"🔄 Initiating automatic scenario reset ({self.deadlock_reset_count + 1}/{self.max_deadlock_resets})")
+                
+                # Perform immediate scenario reset
+                if self._perform_deadlock_reset():
+                    self.deadlock_reset_count += 1
+                    self.deadlock_first_detected_time = None
+                    self.deadlock_consecutive_detections = 0
+                    return False  # Reset successful, continue without episode termination
+                else:
+                    print("❌ Deadlock reset failed - terminating episode")
+                    return True  # Reset failed, terminate episode
+            
+            elif deadlock_duration >= self.deadlock_timeout_duration:
+                # Max resets exceeded
+                print(f"🚫 Max deadlock resets exceeded ({self.max_deadlock_resets}) - terminating episode")
+                return True
+            
+            else:
+                # Still within timeout period
+                print(f"⏳ Deadlock persisting: {deadlock_duration:.1f}s / {self.deadlock_timeout_duration}s")
+        
+        # Return True to indicate deadlock (will cause negative reward but not episode termination if reset is available)
+        return True
+
+    def _perform_deadlock_reset(self) -> bool:
+        """Perform scenario reset to resolve deadlock situation"""
+        try:
+            print("🔄 Performing deadlock resolution reset...")
+            
+            # Clean up current state
+            self._cleanup_existing_vehicles()
+            time.sleep(0.5)
+            
+            # Reset scenario
+            self.scenario.reset_scenario()
+            
+            # Shorter wait for deadlock reset (faster recovery)
+            wait_time = 1.0 if self.sim_cfg.get('training_mode', False) else 2.0
+            time.sleep(wait_time)
+            
+            # Reinitialize components with fresh state
+            self.platoon_manager = PlatoonManager(self.state_extractor)
+            
+            self.auction_engine = DecentralizedAuctionEngine(
+                state_extractor=self.state_extractor,
+                max_go_agents=None
+            )
+            
+            self.nash_solver = DeadlockNashSolver(
+                unified_config=self.unified_config,
+                intersection_center=self.unified_config.system.intersection_center,
+                max_go_agents=self.unified_config.mwis.max_go_agents
+            )
+            
+            # Reconnect components
+            self.traffic_controller.set_platoon_manager(self.platoon_manager)
+            self.auction_engine.set_nash_controller(self.nash_solver)
+            self.traffic_controller.set_bid_policy(self.bid_policy)
+            self.auction_engine.set_bid_policy(self.bid_policy)
+            
+            # Verify reset success - use include_all_vehicles for comprehensive check
+            new_vehicles = self.state_extractor.get_vehicle_states(include_all_vehicles=True)
+            if len(new_vehicles) > 0:
+                # Initial system update
+                self.platoon_manager.update()
+                winners = self.auction_engine.update(new_vehicles, self.platoon_manager)
+                self.traffic_controller.update_control(
+                    self.platoon_manager, self.auction_engine, winners
+                )
+                
+                print(f"✅ Deadlock reset successful - {len(new_vehicles)} new vehicles spawned")
+                return True
+            else:
+                print("⚠️ No vehicles after deadlock reset - scenario may not have reset properly")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Deadlock reset failed: {str(e)}")
+            return False
+
+    def _check_severe_deadlock(self) -> bool:
+        """Check for severe deadlock (severity 1.0) requiring immediate reset"""
+        try:
+            if (hasattr(self, 'nash_solver') and 
+                hasattr(self.nash_solver, 'deadlock_detector')):
+                
+                # Get current deadlock severity
+                severity = self.nash_solver.deadlock_detector.get_deadlock_severity()
+                
+                # Check if severity is 1.0 (complete deadlock)
+                if severity >= 0.99:  # Use 0.99 to account for floating point precision
+                    print(f"⚡ SEVERE DEADLOCK: severity {severity:.2f} >= 0.99")
+                    return True
+                    
+            return False
+            
+        except Exception as e:
+            print(f"⚠️ Severe deadlock detection error: {str(e)}")
+            return False
+
+    def _perform_severe_deadlock_reset(self) -> bool:
+        """Perform immediate scenario reset for severe deadlock (severity 1.0)"""
+        try:
+            print("⚡ Performing SEVERE deadlock resolution reset...")
+            self.severe_deadlock_reset_count += 1
+            
+            # Clean up current state immediately
+            self._cleanup_existing_vehicles()
+            time.sleep(0.3)  # Shorter wait for immediate response
+            
+            # Reset scenario
+            self.scenario.reset_scenario()
+            
+            # Very fast reset for severe deadlock
+            wait_time = 0.8 if self.sim_cfg.get('training_mode', False) else 1.5
+            time.sleep(wait_time)
+            
+            # Reinitialize components with fresh state
+            self.platoon_manager = PlatoonManager(self.state_extractor)
+            
+            self.auction_engine = DecentralizedAuctionEngine(
+                state_extractor=self.state_extractor,
+                max_go_agents=None
+            )
+            
+            self.nash_solver = DeadlockNashSolver(
+                unified_config=self.unified_config,
+                intersection_center=self.unified_config.system.intersection_center,
+                max_go_agents=self.unified_config.mwis.max_go_agents
+            )
+            
+            # Reconnect components
+            self.traffic_controller.set_platoon_manager(self.platoon_manager)
+            self.auction_engine.set_nash_controller(self.nash_solver)
+            self.traffic_controller.set_bid_policy(self.bid_policy)
+            self.auction_engine.set_bid_policy(self.bid_policy)
+            
+            # Reset deadlock tracking since we have a fresh scenario
+            self.deadlock_first_detected_time = None
+            self.deadlock_consecutive_detections = 0
+            
+            # Verify reset success - use include_all_vehicles for comprehensive check
+            new_vehicles = self.state_extractor.get_vehicle_states(include_all_vehicles=True)
+            if len(new_vehicles) > 0:
+                # Initial system update
+                self.platoon_manager.update()
+                winners = self.auction_engine.update(new_vehicles, self.platoon_manager)
+                self.traffic_controller.update_control(
+                    self.platoon_manager, self.auction_engine, winners
+                )
+                
+                print(f"✅ SEVERE deadlock reset successful - {len(new_vehicles)} new vehicles spawned")
+                print(f"⚡ Total severe deadlock resets this episode: {self.severe_deadlock_reset_count}")
+                return True
+            else:
+                print("⚠️ No vehicles after severe deadlock reset - scenario may not have reset properly")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Severe deadlock reset failed: {str(e)}")
             return False
 
     def close(self):
@@ -452,19 +836,19 @@ class SimulationEnv:
                 self.scenario.stop_time_counters()
             print("🏁 Environment closed")
         except Exception as e:
-            print(f"❌ Close error: {e}")
+            print(f"❌ Close error: {str(e)}")
 
     def get_performance_stats(self) -> Dict:
         """Get performance statistics"""
         return self.metrics_manager.get_performance_stats()
 
     def set_performance_mode(self, fast_mode: bool = True):
-        """Adjust performance settings"""
+        """Adjust performance settings for balanced speed vs quality"""
         if fast_mode:
-            self.steps_per_action = 2
+            self.steps_per_action = 2  # Very fast for quick training
             self.observation_cache_steps = 10
         else:
-            self.steps_per_action = 5
+            self.steps_per_action = 5  # Balanced approach
             self.observation_cache_steps = 5
         
-        print(f"🔧 Performance mode: {'fast' if fast_mode else 'normal'}")
+        print(f"🔧 Performance mode: {'fast' if fast_mode else 'normal'} (steps_per_action: {self.steps_per_action})")

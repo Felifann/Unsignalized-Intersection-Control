@@ -115,15 +115,9 @@ class MWISSolver:
         for rank, (candidate, weight, idx) in enumerate(all_candidates_with_weights, 1):
             agent = self._get_agent(candidate)
             
-            # PRIORITY CHECK: If agent is already in transit, ALWAYS assign 'go'
-            if self._is_agent_in_transit(agent, vehicle_states):
-                action = 'go'
-                go_count += 1
-                reason = "in transit (protected)"
-                print(f"   🟢 #{rank}: {getattr(agent, 'type', 'unknown')} {getattr(agent, 'id', 'unknown')}: GO ({reason})")
-            
             # STRICT RULE: Only MWIS-selected candidates can get 'go'
-            elif idx in mwis_selected:
+            # Note: Removed "in transit" bypass to ensure ALL conflicts are resolved via MWIS
+            if idx in mwis_selected:
                 # This candidate was selected by MWIS (no conflicts with other selected)
                 # Check traffic flow control
                 if self.region_entry_blocked and self._should_block_entry(agent, vehicle_states):

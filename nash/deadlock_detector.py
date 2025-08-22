@@ -32,7 +32,7 @@ class IntersectionDeadlockDetector:
         self.deadlock_min_vehicles = solver_config.get('deadlock_min_vehicles', 6)  # minimum vehicles for deadlock detection
         self.deadlock_history = []  # track intersection state over time
         self.last_deadlock_check = -math.inf
-        self.deadlock_check_interval = solver_config.get('deadlock_check_interval', 2.0)  # check every 2 seconds
+        self.deadlock_check_interval = solver_config.get('deadlock_check_interval', 1.0)  # check every 1 second - synchronized
         
         # Enhanced deadlock tracking
         self.deadlock_severity_threshold = solver_config.get('deadlock_severity_threshold', 0.8)  # 80% of vehicles stalled

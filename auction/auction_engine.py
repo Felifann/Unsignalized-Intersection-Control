@@ -374,11 +374,13 @@ class DecentralizedAuctionEngine:
     """Main auction engine managing the complete auction process - 支持车队和单车"""
     
     def __init__(self, intersection_center=(-188.9, -89.7, 0.0), 
-                 communication_range=50.0, state_extractor=None, max_go_agents: int = None):
+                 communication_range=50.0, state_extractor=None, max_go_agents: int = None,
+                 max_participants_per_auction: int = 4):
         self.intersection_center = intersection_center
         self.communication_range = communication_range
         self.state_extractor = state_extractor
         self.max_go_agents = max_go_agents  # Can be None for no limit
+        self.max_participants_per_auction = max_participants_per_auction  # Configurable max participants
         
         # Core components
         self.lane_grouper = LaneGrouper(state_extractor)
@@ -388,7 +390,7 @@ class DecentralizedAuctionEngine:
         # Auction management
         self.current_auction: Optional[Auction] = None
         self.auction_history: Dict[str, Auction] = {}
-        self.auction_interval = 2.0  # seconds between auctions
+        self.auction_interval = 1.0  # Default value, will be updated from unified config
         self.last_auction_time = 0
         
         # Communication simulation
@@ -404,7 +406,7 @@ class DecentralizedAuctionEngine:
         self.bid_policy = None
         
         limit_text = "unlimited" if max_go_agents is None else str(max_go_agents)
-        print(f"🎯 增强拍卖引擎已初始化 - 支持车队、单车和Nash deadlock解决 (max go agents: {limit_text})")
+        print(f"🎯 增强拍卖引擎已初始化 - 支持车队、单车和Nash deadlock解决 (max go agents: {limit_text}, max participants per auction: {self.max_participants_per_auction})")
 
     # Add method to update configuration
     def update_max_go_agents(self, max_go_agents: int = None):
@@ -413,6 +415,16 @@ class DecentralizedAuctionEngine:
         self.evaluator.max_go_agents = max_go_agents
         limit_text = "unlimited" if max_go_agents is None else str(max_go_agents)
         print(f"🔄 Auction engine: Updated MAX_GO_AGENTS to {limit_text}")
+
+    def update_max_participants_per_auction(self, max_participants: int):
+        """Update the maximum participants per auction limit"""
+        self.max_participants_per_auction = max_participants
+        print(f"🔄 Auction engine: Updated MAX_PARTICIPANTS_PER_AUCTION to {max_participants}")
+
+    def set_auction_interval_from_config(self, auction_interval: float):
+        """Set auction interval from unified config (unified with other system intervals)"""
+        self.auction_interval = auction_interval
+        print(f"🔗 Auction engine: Set AUCTION_INTERVAL to {auction_interval}s (unified with system)")
 
     def set_vehicle_enforcer(self, vehicle_enforcer):
         """Set vehicle control enforcer for integration"""
@@ -439,8 +451,14 @@ class DecentralizedAuctionEngine:
         
         print(f"\n🎯 Auction Update: Found {len(agents)} potential agents")
         
-        # 2. Start new auction if needed
+        # 2. Start new auction if needed (with participant limiting to prevent mass movement)
         if agents and not self.current_auction:
+            # ANTI-BATCHING: Limit auction participants to prevent simultaneous mass movement
+            max_participants = self.max_participants_per_auction  # Configurable max agents per auction round
+            if len(agents) > max_participants:
+                # Sort by urgency/priority and take top participants
+                agents = self._select_priority_agents(agents, max_participants)
+                print(f"🔒 Limited auction to {len(agents)} priority agents (preventing mass movement)")
             self._start_new_auction(agents, current_time)
         
         # 3. Process current auction
@@ -490,6 +508,78 @@ class DecentralizedAuctionEngine:
         
         print(f"🎯 Started auction {auction_id} with {len(agents)} agents")
     
+    def _select_priority_agents(self, agents: List[AuctionAgent], max_count: int) -> List[AuctionAgent]:
+        """Select priority agents to prevent mass simultaneous movement"""
+        try:
+            # Priority criteria (in order):
+            # 1. Agents already in transit (highest priority)
+            # 2. Agents closest to intersection center
+            # 3. Random selection for fairness
+            
+            in_transit = []
+            approaching = []
+            
+            for agent in agents:
+                if self._is_agent_in_transit(agent):
+                    in_transit.append(agent)
+                else:
+                    approaching.append(agent)
+            
+            # Sort approaching agents by distance to intersection (closest first)
+            approaching.sort(key=lambda a: self._calculate_distance_to_intersection(a))
+            
+            # Select up to max_count agents, prioritizing in-transit first
+            selected = in_transit[:max_count]
+            remaining_slots = max_count - len(selected)
+            
+            if remaining_slots > 0:
+                selected.extend(approaching[:remaining_slots])
+            
+            return selected
+            
+        except Exception as e:
+            print(f"[Warning] Priority agent selection failed: {e}")
+            # Fallback: return first max_count agents
+            return agents[:max_count]
+    
+    def _is_agent_in_transit(self, agent: AuctionAgent) -> bool:
+        """Check if agent is currently in transit through intersection"""
+        try:
+            if agent.type == 'vehicle':
+                return agent.data.get('is_junction', False)
+            elif agent.type == 'platoon':
+                # Platoon is in transit if any vehicle is in junction
+                vehicles = getattr(agent, 'vehicles', [])
+                for vehicle in vehicles:
+                    if vehicle.get('is_junction', False):
+                        return True
+            return False
+        except Exception:
+            return False
+    
+    def _calculate_distance_to_intersection(self, agent: AuctionAgent) -> float:
+        """Calculate agent's distance to intersection center"""
+        try:
+            if agent.type == 'vehicle':
+                location = agent.data.get('location', (0, 0, 0))
+            elif agent.type == 'platoon':
+                # Use platoon leader location
+                vehicles = getattr(agent, 'vehicles', [])
+                if vehicles:
+                    location = vehicles[0].get('location', (0, 0, 0))
+                else:
+                    return float('inf')
+            else:
+                return float('inf')
+            
+            # Calculate distance to intersection center
+            center = self.intersection_center
+            distance = ((location[0] - center[0])**2 + (location[1] - center[1])**2)**0.5
+            return distance
+            
+        except Exception:
+            return float('inf')
+
     def _process_current_auction(self, current_time: float) -> List[AuctionWinner]:
         """Process the current active auction"""
         if not self.current_auction:

@@ -15,6 +15,9 @@ else:
         "CARLA egg not found.\n"
     )
 
+# Import unified configuration
+from config.unified_config import UnifiedConfig, get_config, print_config_summary
+
 # ===== 环境相关模块 =====
 from env.scenario_manager import ScenarioManager
 from env.state_extractor import StateExtractor
@@ -32,6 +35,10 @@ from control import TrafficController
 # ===== Nash deadlock solver =====
 from nash.deadlock_nash_solver import DeadlockNashSolver
 
+# Initialize unified configuration
+unified_config = get_config()
+print_config_summary(unified_config)
+
 # 初始化环境模块
 scenario = ScenarioManager()
 state_extractor = StateExtractor(scenario.carla)
@@ -39,44 +46,51 @@ state_extractor = StateExtractor(scenario.carla)
 # 初始化车队管理 - 传入state_extractor用于导航
 platoon_manager = PlatoonManager(state_extractor)
 
-# ===== 可配置参数 (用于DRL训练) =====
-# 这些参数可以通过DRL训练进行优化
+# ===== UNIFIED Configuration Management =====
+# All parameters now managed through unified_config.py
 class DRLConfig:
-    """DRL可训练的配置参数"""
-    MAX_GO_AGENTS = None  # REMOVED: No limit on simultaneous go agents
-    CONFLICT_TIME_WINDOW = 3.0  # 冲突时间窗口 (可训练范围: 1.0-5.0)
+    """DRL parameter interface - now delegates to unified config"""
     
     @classmethod
-    def update_from_drl_params(cls, max_go_agents=None, conflict_time_window=None):
-        """从DRL训练参数更新配置"""
-        # max_go_agents parameter is now ignored
-        if conflict_time_window is not None:
-            cls.CONFLICT_TIME_WINDOW = max(1.0, min(5.0, float(conflict_time_window)))
+    def update_from_drl_params(cls, **kwargs):
+        """Update unified configuration from DRL training parameters"""
+        unified_config.update_from_drl_params(**kwargs)
         
-        print(f"🤖 DRL配置更新: NO GO LIMIT, CONFLICT_TIME_WINDOW={cls.CONFLICT_TIME_WINDOW}")
+        # Update all system components with new config
+        update_system_configuration()
+        
+        print(f"🤖 DRL配置更新 via UNIFIED CONFIG:")
+        print(f"   Conflict window: {unified_config.conflict.conflict_time_window}s")
+        print(f"   Max go agents: {'unlimited' if unified_config.mwis.max_go_agents is None else unified_config.mwis.max_go_agents}")
 
 # 初始化分布式拍卖引擎 - 传入state_extractor
 auction_engine = DecentralizedAuctionEngine(
     state_extractor=state_extractor, 
-    max_go_agents=None  # No limit
+    max_go_agents=unified_config.mwis.max_go_agents
 )
 
-# 初始化Nash deadlock solver
+# 初始化Nash deadlock solver with unified config
 nash_solver = DeadlockNashSolver(
-    max_exact=15,
-    conflict_time_window=DRLConfig.CONFLICT_TIME_WINDOW,
-    intersection_center=(-188.9, -89.7, 0.0),
-    max_go_agents=None  # No limit
+    unified_config=unified_config,
+    intersection_center=unified_config.system.intersection_center,
+    max_go_agents=unified_config.mwis.max_go_agents
 )
 
 # 在主循环开始前添加动态配置更新
 def update_system_configuration():
-    """Update all system components with current DRL configuration"""
-    # No more max_go_agents to update
-    print(f"🔄 System configuration updated: NO GO LIMIT")
+    """Update all system components with current unified configuration"""
+    # Update Nash solver with new config
+    nash_solver.update_config_params(
+        conflict_time_window=unified_config.conflict.conflict_time_window,
+        max_go_agents=unified_config.mwis.max_go_agents,
+        min_safe_distance=unified_config.conflict.min_safe_distance,
+        deadlock_speed_threshold=unified_config.deadlock.deadlock_speed_threshold
+    )
+    
+    print(f"🔄 System configuration updated via UNIFIED CONFIG")
 
 # 初始化交通控制器
-traffic_controller = TrafficController(scenario.carla, state_extractor, max_go_agents=None)
+traffic_controller = TrafficController(scenario.carla, state_extractor, max_go_agents=unified_config.mwis.max_go_agents)
 
 # REACTIVATED: Set platoon manager reference
 traffic_controller.set_platoon_manager(platoon_manager)

@@ -21,8 +21,37 @@ class ScenarioManager:
         self._sim_end = None
 
     def reset_scenario(self):
+        """Reset scenario with improved vehicle cleanup to prevent spawn collisions"""
+        # First destroy all vehicles
         self.carla.destroy_all_vehicles()
+        
+        # Wait for physics simulation to process destructions
+        world = self.carla.world
+        world.tick()  # Process one simulation tick
+        time.sleep(0.2)  # Longer wait for cleanup to complete
+        
+        # Verify vehicles are actually destroyed
+        remaining_vehicles = world.get_actors().filter('vehicle.*')
+        if len(remaining_vehicles) > 0:
+            print(f"⚠️ {len(remaining_vehicles)} vehicles still exist, forcing cleanup...")
+            for vehicle in remaining_vehicles:
+                try:
+                    vehicle.destroy()
+                except:
+                    pass
+            world.tick()
+            time.sleep(0.2)
+        
+        # Clear any cached vehicle lists in traffic generator
+        if hasattr(self.traffic_gen, 'vehicles'):
+            self.traffic_gen.vehicles = []
+        
+        # Generate new traffic
         self.traffic_gen.generate_traffic()
+        
+        # Ensure vehicles are properly registered
+        world.tick()
+        time.sleep(0.1)
     
     def update_vehicle_labels(self):
         """更新车辆标签显示"""

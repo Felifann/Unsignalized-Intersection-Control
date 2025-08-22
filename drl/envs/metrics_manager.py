@@ -9,12 +9,17 @@ class SimulationMetricsManager:
     def __init__(self, max_history: int = 1000):
         self.max_history = max_history
         
-        # Core metrics
+        # Core metrics with enhanced deadlock tracking
         self.metrics = {
             'avg_acceleration': 0.0,
             'collision_count': 0,
             'prev_vehicles_exited': 0,
             'prev_collision_count': 0,
+            'prev_deadlock_count': 0,
+            'current_deadlock_severity': 0.0,
+            'deadlock_threat_level': 'none',
+            'max_severity_seen': 0.0,
+            'severity_warnings': 0,
             'using_real_data': True,
             'throughput': 0.0,
             'last_throughput_calc_step': -1
@@ -34,13 +39,24 @@ class SimulationMetricsManager:
         
         print("📊 Metrics Manager initialized with memory-bounded tracking")
 
-    def reset_metrics(self):
+    def reset_metrics(self, nash_solver=None):
         """Reset all metrics for new episode"""
+        # FIXED: Initialize prev_deadlock_count with current detector state to prevent false positives
+        initial_deadlock_count = 0
+        if (nash_solver and hasattr(nash_solver, 'deadlock_detector') and 
+            hasattr(nash_solver.deadlock_detector, 'stats')):
+            initial_deadlock_count = nash_solver.deadlock_detector.stats.get('deadlocks_detected', 0)
+        
         self.metrics = {
             'avg_acceleration': 0.0,
             'collision_count': 0,
             'prev_vehicles_exited': 0,
             'prev_collision_count': 0,
+            'prev_deadlock_count': initial_deadlock_count,  # Initialize with current count
+            'current_deadlock_severity': 0.0,
+            'deadlock_threat_level': 'none',
+            'max_severity_seen': 0.0,
+            'severity_warnings': 0,
             'using_real_data': True,
             'throughput': 0.0,
             'last_throughput_calc_step': -1
@@ -57,7 +73,7 @@ class SimulationMetricsManager:
         print("🔄 Metrics reset with memory cleanup")
 
     def calculate_reward(self, traffic_controller, state_extractor, scenario, 
-                        nash_solver, current_step: int) -> float:
+                        nash_solver, current_step: int, actions_since_reset: int = 0) -> float:
         """Calculate validated reward from real simulation data"""
         reward = 0.0
         
@@ -87,8 +103,8 @@ class SimulationMetricsManager:
             
             self.metrics['prev_vehicles_exited'] = current_exited
             
-            # Acceleration penalty (periodic update)
-            if current_step % 20 == 0:
+            # OPTIMIZED: Acceleration penalty (less frequent update)
+            if current_step % 50 == 0:  # Less frequent calculation
                 real_avg_accel = final_stats.get('average_absolute_acceleration', 0.0)
                 self.metrics['avg_acceleration'] = real_avg_accel
                 
@@ -111,6 +127,20 @@ class SimulationMetricsManager:
                     reward -= new_collisions * 20.0
                     self.metrics['prev_collision_count'] = current_collisions
             
+            # Enhanced deadlock penalty system with severity-based punishment
+            # FIXED: Skip deadlock penalties during grace period after reset
+            if actions_since_reset > 10:  # Grace period of 10 actions
+                deadlock_penalty = self._calculate_deadlock_penalty(nash_solver)
+                reward += deadlock_penalty  # deadlock_penalty is negative
+                
+                # Near-deadlock warning system - penalize approaching deadlock situations
+                severity_penalty = self._calculate_severity_penalty(nash_solver)
+                reward += severity_penalty  # severity_penalty is negative
+            else:
+                # During grace period, no deadlock penalties
+                if actions_since_reset == 1:  # Only log once at start
+                    print(f"🕐 Grace period: Skipping deadlock penalties for first 10 actions")
+            
             # Small penalties and bonuses
             reward -= 0.01  # Step penalty
             
@@ -128,14 +158,14 @@ class SimulationMetricsManager:
             return reward
             
         except Exception as e:
-            print(f"❌ Reward calculation failed: {e}")
+            print(f"❌ Reward calculation failed: {str(e)}")
             return -1.0
 
     def calculate_throughput(self, scenario, current_step: int, 
                            vehicles_exited: int) -> float:
         """Calculate throughput with caching and validation"""
         try:
-            recalc_interval = 50
+            recalc_interval = 100  # OPTIMIZED: Less frequent throughput calculation
             should_recalc = (current_step % recalc_interval == 0) or (
                 self.metrics.get('last_throughput_calc_step', -1) < 0)
             
@@ -159,7 +189,7 @@ class SimulationMetricsManager:
             return float(self.metrics.get('throughput', 0.0))
             
         except Exception as e:
-            print(f"⚠️ Throughput calculation error: {e}")
+            print(f"⚠️ Throughput calculation error: {str(e)}")
             return float(self.metrics.get('throughput', 0.0))
 
     def get_info_dict(self, traffic_controller, auction_engine, nash_solver,
@@ -189,7 +219,11 @@ class SimulationMetricsManager:
                 collision_count = scenario.traffic_generator.collision_count
             
             deadlocks_detected = 0
-            if hasattr(nash_solver, 'stats'):
+            if (hasattr(nash_solver, 'deadlock_detector') and 
+                hasattr(nash_solver.deadlock_detector, 'stats')):
+                deadlocks_detected = nash_solver.deadlock_detector.stats.get('deadlocks_detected', 0)
+            elif hasattr(nash_solver, 'stats'):
+                # Fallback to direct nash_solver stats if available
                 deadlocks_detected = nash_solver.stats.get('deadlocks_detected', 0)
             
             return {
@@ -201,6 +235,12 @@ class SimulationMetricsManager:
                 'vehicles_exited': int(vehicles_exited),
                 'auction_agents': int(auction_stats.get('current_agents', 0)),
                 'deadlocks_detected': int(deadlocks_detected),
+                
+                # Enhanced deadlock severity metrics
+                'deadlock_severity': float(self.metrics.get('current_deadlock_severity', 0.0)),
+                'deadlock_threat_level': str(self.metrics.get('deadlock_threat_level', 'none')),
+                'max_severity_seen': float(self.metrics.get('max_severity_seen', 0.0)),
+                'severity_warnings': int(self.metrics.get('severity_warnings', 0)),
                 
                 # Real-time state
                 'vehicles_detected': len(current_vehicles),
@@ -243,7 +283,7 @@ class SimulationMetricsManager:
             }
             
         except Exception as e:
-            print(f"❌ Failed to get info: {e}")
+            print(f"❌ Failed to get info: {str(e)}")
             return {
                 'using_real_data': False,
                 'data_source': 'error_fallback',
@@ -260,6 +300,89 @@ class SimulationMetricsManager:
             self.perf_stats['reward_times'].append(reward_time)
         self.perf_stats['total_ticks'] += 1
 
+    def _calculate_deadlock_penalty(self, nash_solver) -> float:
+        """Calculate penalty based on actual deadlocks detected with severity"""
+        penalty = 0.0
+        
+        try:
+            if (hasattr(nash_solver, 'deadlock_detector') and 
+                hasattr(nash_solver.deadlock_detector, 'stats')):
+                current_deadlocks = nash_solver.deadlock_detector.stats.get('deadlocks_detected', 0)
+                prev_deadlocks = self.metrics.get('prev_deadlock_count', 0)
+                new_deadlocks = current_deadlocks - prev_deadlocks
+                
+                if new_deadlocks > 0:
+                    # Get severity for graduated penalty
+                    severity = nash_solver.deadlock_detector.get_deadlock_severity()
+                    
+                    # Base penalty for deadlock occurrence
+                    base_penalty = new_deadlocks * 50.0
+                    
+                    # Severity multiplier (1.0 to 3.0 based on severity)
+                    severity_multiplier = 1.0 + (severity * 2.0)
+                    
+                    # Affected vehicles consideration
+                    affected_vehicles = nash_solver.deadlock_detector.stats.get('total_affected_vehicles', 0)
+                    vehicle_factor = min(2.0, 1.0 + (affected_vehicles / 10.0))  # More vehicles = higher penalty
+                    
+                    total_penalty = base_penalty * severity_multiplier * vehicle_factor
+                    penalty = -min(total_penalty, 500.0)  # Cap maximum penalty
+                    
+                    self.metrics['prev_deadlock_count'] = current_deadlocks
+                    print(f"🚨 Deadlock penalty: {penalty:.1f} points (severity: {severity:.2f}, vehicles: {affected_vehicles})")
+                    
+        except Exception as e:
+            print(f"⚠️ Deadlock penalty calculation error: {str(e)}")
+            
+        return penalty
+    
+    def _calculate_severity_penalty(self, nash_solver) -> float:
+        """Calculate penalty for approaching deadlock situations (severity-based early warning)"""
+        penalty = 0.0
+        
+        try:
+            if (hasattr(nash_solver, 'deadlock_detector') and 
+                hasattr(nash_solver.deadlock_detector, 'get_deadlock_severity')):
+                current_severity = nash_solver.deadlock_detector.get_deadlock_severity()
+                
+                # Apply graduated penalties for different severity levels
+                if current_severity > 0.1:  # Any severity above 10%
+                    if current_severity >= 0.8:  # Critical: 80%+ stalled
+                        penalty = -20.0
+                        self.metrics['deadlock_threat_level'] = 'critical'
+                    elif current_severity >= 0.6:  # High: 60-79% stalled
+                        penalty = -10.0  
+                        self.metrics['deadlock_threat_level'] = 'high'
+                    elif current_severity >= 0.4:  # Medium: 40-59% stalled
+                        penalty = -5.0
+                        self.metrics['deadlock_threat_level'] = 'medium'
+                    elif current_severity >= 0.2:  # Low: 20-39% stalled
+                        penalty = -2.0
+                        self.metrics['deadlock_threat_level'] = 'low'
+                    else:  # Very low: 10-19% stalled
+                        penalty = -0.5
+                        self.metrics['deadlock_threat_level'] = 'very_low'
+                        
+                    # Store current severity for monitoring
+                    self.metrics['current_deadlock_severity'] = current_severity
+                    
+                    # Track maximum severity seen
+                    if current_severity > self.metrics.get('max_severity_seen', 0.0):
+                        self.metrics['max_severity_seen'] = current_severity
+                    
+                    # Count severity warnings
+                    if penalty < -1.0:
+                        self.metrics['severity_warnings'] = self.metrics.get('severity_warnings', 0) + 1
+                        print(f"⚠️ Near-deadlock penalty: {penalty:.1f} (severity: {current_severity:.2f}, level: {self.metrics['deadlock_threat_level']})")
+                else:
+                    self.metrics['deadlock_threat_level'] = 'none'
+                    self.metrics['current_deadlock_severity'] = 0.0
+                    
+        except Exception as e:
+            print(f"⚠️ Severity penalty calculation error: {str(e)}")
+            
+        return penalty
+    
     def get_performance_stats(self) -> Dict:
         """Get performance statistics"""
         if not self.perf_stats['step_times']:

@@ -60,7 +60,7 @@ class Platoon:
         # Performance tracking
         self.metrics_history: List[PlatoonMetrics] = []
         self._last_metrics_update = 0
-        self._metrics_update_interval = 2.0
+        self._metrics_update_interval = 1.0  # synchronized with other system intervals
     
     def _determine_initial_direction(self, provided_direction: Optional[str]) -> str:
         """Determine initial platoon direction from various sources"""

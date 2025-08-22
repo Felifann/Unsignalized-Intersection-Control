@@ -50,6 +50,7 @@ class TrafficGenerator:
             return False
 
     def generate_traffic(self):
+        """Generate traffic with improved spawn collision handling"""
         spawn_points = self.carla.world.get_map().get_spawn_points()
         num_vehicles = min(self.max_vehicles, len(spawn_points))
         random.shuffle(spawn_points)
@@ -62,25 +63,78 @@ class TrafficGenerator:
         traffic_manager.set_global_distance_to_leading_vehicle(1.5)  # 跟车距离1.5米
 
         self.vehicles = []
+        spawn_attempts = 0
+        max_spawn_attempts = min(num_vehicles * 3, len(spawn_points))  # Allow more attempts than target vehicles
+        successful_spawns = 0
+        
+        print(f"🚗 Attempting to spawn {num_vehicles} vehicles...")
+        
         for i in range(num_vehicles):
-            transform = spawn_points[i]
-            vehicle = self.carla.spawn_vehicle(transform=transform)
-            if vehicle is not None:
-                vehicle.set_autopilot(True, traffic_manager.get_port())
+            spawned = False
+            # Try multiple spawn points if needed
+            for attempt in range(min(3, len(spawn_points) - i)):
+                if spawn_attempts >= max_spawn_attempts:
+                    break
+                    
+                spawn_point_idx = (i + attempt) % len(spawn_points)
+                transform = spawn_points[spawn_point_idx]
+                spawn_attempts += 1
                 
-                # 设置每辆车的 ignore_vehicles_percentage
-                traffic_manager.ignore_vehicles_percentage(vehicle, 10.0)
+                try:
+                    vehicle = self.carla.spawn_vehicle(transform=transform)
+                    if vehicle is not None:
+                        vehicle.set_autopilot(True, traffic_manager.get_port())
+                        
+                        # 设置每辆车的 ignore_vehicles_percentage
+                        traffic_manager.ignore_vehicles_percentage(vehicle, 10.0)
 
-                self.vehicles.append(vehicle)
+                        self.vehicles.append(vehicle)
+                        successful_spawns += 1
 
-                # 新增：为每辆车添加碰撞传感器
-                collision_sensor = self.carla.world.spawn_actor(
-                    self.carla.blueprint_library.find('sensor.other.collision'),
-                    carla.Transform(),
-                    attach_to=vehicle
-                )
-                self.collision_sensors[vehicle.id] = collision_sensor
-                collision_sensor.listen(lambda event, vid=vehicle.id: self._on_collision(event, vid))
+                        # 新增：为每辆车添加碰撞传感器
+                        try:
+                            collision_sensor = self.carla.world.spawn_actor(
+                                self.carla.blueprint_library.find('sensor.other.collision'),
+                                carla.Transform(),
+                                attach_to=vehicle
+                            )
+                            self.collision_sensors[vehicle.id] = collision_sensor
+                            collision_sensor.listen(lambda event, vid=vehicle.id: self._on_collision(event, vid))
+                        except:
+                            # Collision sensor creation failed, but vehicle is fine
+                            pass
+                        
+                        spawned = True
+                        break
+                except Exception as e:
+                    # Spawn failed, try next location
+                    if "collision" in str(e).lower():
+                        continue
+                    else:
+                        print(f"⚠️ Spawn error (non-collision): {e}")
+                        continue
+            
+            if not spawned and spawn_attempts < max_spawn_attempts:
+                # If normal attempts failed, try a random unused spawn point
+                unused_points = [sp for j, sp in enumerate(spawn_points) 
+                               if j not in range(i + 3)]
+                if unused_points:
+                    random_point = random.choice(unused_points)
+                    try:
+                        vehicle = self.carla.spawn_vehicle(transform=random_point)
+                        if vehicle is not None:
+                            vehicle.set_autopilot(True, traffic_manager.get_port())
+                            traffic_manager.ignore_vehicles_percentage(vehicle, 10.0)
+                            self.vehicles.append(vehicle)
+                            successful_spawns += 1
+                            spawned = True
+                    except:
+                        pass
+        
+        print(f"✅ Successfully spawned {successful_spawns}/{num_vehicles} vehicles (attempts: {spawn_attempts})")
+        
+        if successful_spawns < num_vehicles * 0.5:  # Less than 50% success rate
+            print(f"⚠️ Low spawn success rate: {successful_spawns}/{num_vehicles} = {successful_spawns/num_vehicles*100:.1f}%")
 
     def _on_collision(self, event, vehicle_id):
         """Enhanced collision event callback with detailed incident logging.

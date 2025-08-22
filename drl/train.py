@@ -51,17 +51,17 @@ class EnhancedMetricsCallback(BaseCallback):
         super().__init__(verbose)
         self.log_dir = log_dir
         self.metrics_log = []
-        self.checkpoint_interval = 10
-        self.max_metrics_memory = 1000
+        self.checkpoint_interval = 200  # BALANCED: Even less frequent checkpoints
+        self.max_metrics_memory = 200  # BALANCED: Minimal memory usage
         self.last_recorded_timestep = -1  # Track actual recorded steps
         
         os.makedirs(log_dir, exist_ok=True)
         self.csv_path = os.path.join(log_dir, 'training_metrics.csv')
         self.csv_initialized = False
-        print(f"📊 STRICT real-only metrics collection initialized")
+        print(f"📊 BALANCED metrics collection initialized")
 
-        # FIXED throughput caching
-        self.throughput_interval = 50
+        # BALANCED throughput caching
+        self.throughput_interval = 500  # Much less frequent calculations
         self.cached_throughput = 0.0
         self.last_throughput_calc_step = -1
 
@@ -128,6 +128,19 @@ class EnhancedMetricsCallback(BaseCallback):
                 'vehicles_in_junction': max(0, min(int(info.get('vehicles_in_junction', 0)), 100)),
                 'auction_agents': max(0, min(int(info.get('auction_agents', 0)), 100)),
                 'deadlocks_detected': max(0, min(int(info.get('deadlocks_detected', 0)), 50)),
+                
+                # Enhanced deadlock severity metrics
+                'deadlock_severity': np.clip(float(info.get('deadlock_severity', 0.0)), 0.0, 1.0),
+                'deadlock_threat_level': str(info.get('deadlock_threat_level', 'none')),
+                'max_severity_seen': np.clip(float(info.get('max_severity_seen', 0.0)), 0.0, 1.0),
+                'severity_warnings': max(0, min(int(info.get('severity_warnings', 0)), 1000)),
+                
+                # Deadlock reset tracking
+                'deadlock_reset_count': max(0, min(int(info.get('deadlock_reset_info', {}).get('deadlock_reset_count', 0)), 10)),
+                'deadlock_consecutive_detections': max(0, min(int(info.get('deadlock_reset_info', {}).get('deadlock_consecutive_detections', 0)), 100)),
+                'deadlock_currently_detected': bool(info.get('deadlock_reset_info', {}).get('deadlock_currently_detected', False)),
+                'severe_deadlock_reset_count': max(0, min(int(info.get('deadlock_reset_info', {}).get('severe_deadlock_reset_count', 0)), 20)),
+                'severe_deadlock_occurred_this_step': bool(info.get('deadlock_reset_info', {}).get('severe_deadlock_occurred_this_step', False)),
                 'go_vehicles': max(0, min(int(info.get('go_vehicles', 0)), 100)),
                 'waiting_vehicles': max(0, min(int(info.get('waiting_vehicles', 0)), 100)),
                 
@@ -163,18 +176,18 @@ class EnhancedMetricsCallback(BaseCallback):
                 self.metrics_log = self.metrics_log[-self.max_metrics_memory//2:]
                 self._save_overflow_metrics(overflow)
             
-            # Save frequently
-            if self.num_timesteps % 20 == 0:  # More frequent saves for debugging
+            # ULTRA-FAST: Save less frequently but not too rare
+            if self.num_timesteps % 100 == 0:  # Moderate saves for debugging
                 self._save_metrics()
                     
-            if self.verbose > 0 and self.num_timesteps % 5 == 0:  # More frequent logging for debugging
-                print(f"📊 REAL STEP {self.num_timesteps}: "
+            if self.verbose > 0 and self.num_timesteps % 50 == 0:  # More frequent logging for debugging
+                print(f"📊 STEP {self.num_timesteps}: "
                       f"Vehicles={vehicles_detected}, "
                       f"Exits={vehicles_exited}, "
                       f"Reward={reward_value:.2f}")
         
         except Exception as e:
-            print(f"⚠️ Metrics collection error at step {self.num_timesteps}: {e}")
+            print(f"⚠️ Metrics collection error at step {self.num_timesteps}: {str(e)}")
             import traceback
             traceback.print_exc()
     
@@ -197,7 +210,10 @@ class EnhancedMetricsCallback(BaseCallback):
                              'urgency_threshold', 'proximity_bonus_weight', 
                              'speed_diff_modifier', 'follow_distance_modifier',
                              'ignore_vehicles_go', 'ignore_vehicles_wait',
-                             'ignore_vehicles_platoon_leader', 'ignore_vehicles_platoon_follower']
+                             'ignore_vehicles_platoon_leader', 'ignore_vehicles_platoon_follower',
+                             'deadlock_severity', 'max_severity_seen', 'severity_warnings',
+                             'deadlock_reset_count', 'deadlock_consecutive_detections',
+                             'severe_deadlock_reset_count']
             
             for col in numeric_columns:
                 if col in df.columns:
@@ -214,7 +230,7 @@ class EnhancedMetricsCallback(BaseCallback):
             print(f"📊 Saved {len(self.metrics_log)} metrics records to {self.csv_path}")
             
         except Exception as e:
-            print(f"⚠️ Failed to save metrics: {e}")
+            print(f"⚠️ Failed to save metrics: {str(e)}")
             import traceback
             traceback.print_exc()
 
@@ -226,7 +242,7 @@ class EnhancedMetricsCallback(BaseCallback):
                 json.dump(overflow_data, f)
             print(f"💾 Saved {len(overflow_data)} overflow metrics to {overflow_path}")
         except Exception as e:
-            print(f"⚠️ Failed to save overflow metrics: {e}")
+            print(f"⚠️ Failed to save overflow metrics: {str(e)}")
 
     def _on_training_end(self):
         """Final save when training ends"""
@@ -255,29 +271,42 @@ def main():
     # Create directories
     dirs = create_directories()
     
-    # Training configuration - 减少到很小用于调试
+    # BALANCED Training configuration for speed vs quality
     config = {
-        'total_timesteps': 4000,  # 大幅减少用于调试
+        'total_timesteps': 4000,  # Keep same for comparison
         'learning_rate': 3e-4,
-        'n_steps': 64,   # 减少
-        'batch_size': 16,  # 减少
-        'n_epochs': 3,     # 减少
+        'n_steps': 64,    # Smaller batches for faster processing
+        'batch_size': 16,  # Smaller batch size for speed
+        'n_epochs': 1,     # Minimal epochs for maximum speed
         'gamma': 0.99,
-        'checkpoint_freq': 100
-    }
+        'checkpoint_freq': 1000  # Very infrequent saves
+        }
     
-    print(f"Configuration (DEBUG MODE):")
+    print(f"Configuration (ULTRA-FAST DEBUG MODE):")
     for key, value in config.items():
         print(f"  {key}: {value}")
+    print("🚀 PERFORMANCE OPTIMIZATIONS:")
+    print("  - Reduced steps per action: 10 → 3")
+    print("  - Shorter episodes: 200 → 50 actions")
+    print("  - Minimal training steps: 1000")
+    print("  - Aggressive caching enabled")
     print()
     
     training_success = False
     model = None
     
     try:
-        # Create environment
-        print("🎯 Creating enhanced training environment...")
-        env = AuctionGymEnv(sim_cfg={'max_steps': 200})  # 减少最大步数
+        # Create OPTIMIZED environment for fast training with deadlock auto-reset
+        print("🎯 Creating optimized training environment...")
+        env = AuctionGymEnv(sim_cfg={
+            'max_steps': 200,  # Balanced episode length (200 actions = 2000 sim steps with 10 steps/action)
+            'training_mode': True,  # Enable performance optimizations
+            'deadlock_reset_enabled': True,  # Enable automatic deadlock reset
+            'deadlock_timeout_duration': 15.0,  # Reset after 15 seconds of deadlock
+            'max_deadlock_resets': 3,  # Allow up to 3 resets per episode
+            'severe_deadlock_reset_enabled': True,  # Enable immediate reset for severity 1.0
+            'severe_deadlock_punishment': -200.0  # Much bigger punishment for severe deadlock
+        })
         print("✅ Environment created successfully")
 
         # Compatibility wrapper
@@ -332,10 +361,10 @@ def main():
             name_prefix="ppo_traffic"
         )
         
-        # Enhanced metrics callback
+        # OPTIMIZED metrics callback for performance
         metrics_callback = EnhancedMetricsCallback(
             log_dir=dirs['results_dir'],
-            verbose=1
+            verbose=0  # Disable verbose logging for speed
         )
         
         # Start training
@@ -372,7 +401,7 @@ def main():
             print(f"❌ Could not save interrupted model: {save_error}")
     
     except Exception as e:
-        print(f"\n❌ Training failed: {e}")
+        print(f"\n❌ Training failed: {str(e)}")
         import traceback
         traceback.print_exc()
     

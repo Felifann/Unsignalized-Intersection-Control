@@ -1,7 +1,13 @@
 import time
 import math
+import sys
+import os
 from typing import List, Dict, Tuple, Optional, Any
 from dataclasses import dataclass
+
+# Add project root to path for config import
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config.unified_config import UnifiedConfig, get_config
 
 from .conflict_analyzer import ConflictAnalyzer
 from .mwis_solver import MWISSolver  
@@ -24,25 +30,32 @@ class DeadlockNashSolver:
     Integrates conflict analysis, MWIS solving, and deadlock detection.
     """
     
-    def __init__(self, intersection_center=(-188.9, -89.7, 0.0), 
-                 max_go_agents: int = None, **kwargs):
-        """Initialize Nash solver with configurable parameters"""
+    def __init__(self, intersection_center=None, 
+                 max_go_agents: int = None, unified_config: UnifiedConfig = None, **kwargs):
+        """Initialize Nash solver with unified configuration"""
         
-        # Core configuration
-        self.intersection_center = intersection_center
-        self.max_go_agents = max_go_agents  # Can be None for no limit
+        # Use unified config or get global config
+        if unified_config is None:
+            unified_config = get_config()
         
-        # Solver configuration with defaults
-        self.solver_config = {
-            'intersection_center': intersection_center,
-            'intersection_radius': kwargs.get('intersection_radius', 15.0),
-            'min_safe_distance': kwargs.get('min_safe_distance', 4.0),
-            'conflict_time_window': kwargs.get('conflict_time_window', 8.0),
-            'speed_prediction_horizon': kwargs.get('speed_prediction_horizon', 10.0),
-            'max_exact': kwargs.get('max_exact', 12),
-            'max_go_agents': max_go_agents,  # Can be None
-            'deadlock_core_half_size': kwargs.get('deadlock_core_half_size', 5.0)
-        }
+        # Override intersection center if provided
+        if intersection_center is not None:
+            unified_config.system.intersection_center = intersection_center
+        
+        # Override max_go_agents if provided
+        if max_go_agents is not None:
+            unified_config.mwis.max_go_agents = max_go_agents
+        
+        # Update config with any additional kwargs
+        unified_config.update_from_drl_params(**kwargs)
+        
+        # Store references
+        self.unified_config = unified_config
+        self.intersection_center = unified_config.system.intersection_center
+        self.max_go_agents = unified_config.mwis.max_go_agents
+        
+        # Generate solver config from unified config
+        self.solver_config = unified_config.to_solver_config()
         
         # Initialize components
         self.conflict_analyzer = ConflictAnalyzer(self.solver_config)
@@ -58,18 +71,33 @@ class DeadlockNashSolver:
             'avg_processing_time': 0.0
         }
         
-        print(f"🧠 Nash Deadlock Solver initialized:")
-        print(f"   📍 Intersection: {intersection_center}")
-        print(f"   🚦 Max go agents: {'unlimited' if max_go_agents is None else max_go_agents}")
-        print(f"   ⚡ Conflict time window: {self.solver_config['conflict_time_window']}s")
-        print(f"   🎯 MWIS threshold: {self.solver_config['max_exact']} vehicles")
+        print(f"🧠 Nash Deadlock Solver initialized with UNIFIED CONFIG:")
+        print(f"   📍 Intersection: {self.intersection_center}")
+        print(f"   🚦 Max go agents: {'unlimited' if self.max_go_agents is None else self.max_go_agents}")
+        print(f"   ⚡ Conflict time window: {unified_config.conflict.conflict_time_window}s")
+        print(f"   🎯 MWIS threshold: {unified_config.mwis.max_exact} vehicles")
+        print(f"   🚨 Deadlock speed threshold: {unified_config.deadlock.deadlock_speed_threshold} m/s")
+        print(f"   📏 Safe distance: {unified_config.conflict.min_safe_distance}m")
 
     def update_max_go_agents(self, max_go_agents: int = None):
         """Update the maximum go agents limit"""
         self.max_go_agents = max_go_agents
+        self.unified_config.mwis.max_go_agents = max_go_agents
         self.solver_config['max_go_agents'] = max_go_agents
         limit_text = "unlimited" if max_go_agents is None else str(max_go_agents)
         print(f"🔄 Nash solver: Updated MAX_GO_AGENTS to {limit_text}")
+    
+    def update_config_params(self, **kwargs):
+        """Update configuration parameters dynamically"""
+        self.unified_config.update_from_drl_params(**kwargs)
+        self.solver_config = self.unified_config.to_solver_config()
+        
+        # Update component configs
+        self.conflict_analyzer = ConflictAnalyzer(self.solver_config)
+        self.mwis_solver = MWISSolver(self.solver_config)
+        self.deadlock_detector = IntersectionDeadlockDetector(self.solver_config)
+        
+        print(f"🔄 Nash solver: Configuration updated with {len(kwargs)} parameters")
 
     def resolve(self, auction_winners: List, vehicle_states: Dict[str, Dict], 
                 platoon_manager=None) -> List:

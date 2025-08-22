@@ -1,19 +1,19 @@
-# PPO Training Configuration for Traffic Intersection DRL - DEBUG MODE
+# PPO Training Configuration for Traffic Intersection DRL - OPTIMIZED MODE
 
-# Training Parameters - REDUCED FOR DEBUGGING
-total_timesteps: 5000  # Reduced from 1000000
-eval_freq: 500         # Reduced from 5000
-checkpoint_freq: 500   # Reduced from 10000
+# Training Parameters - OPTIMIZED FOR QUANTIZED PARAMETERS
+total_timesteps: 10000  # Increased due to faster convergence with quantized params
+eval_freq: 1000         # Less frequent evaluation for speed
+checkpoint_freq: 1000   # Less frequent checkpoints
 
-# PPO Algorithm Parameters - REDUCED FOR FASTER TRAINING
-learning_rate: 3e-4
-n_steps: 256          # Reduced from 2048
-batch_size: 32        # Reduced from 64
-n_epochs: 5           # Reduced from 10
+# PPO Algorithm Parameters - OPTIMIZED FOR QUANTIZED ACTION SPACE
+learning_rate: 5e-4     # Higher LR for quantized params
+n_steps: 512            # Increased for better exploration with discrete actions
+batch_size: 64          # Larger batch for stable training
+n_epochs: 8             # More epochs for quantized parameter learning
 gamma: 0.99
 gae_lambda: 0.95
 clip_range: 0.2
-ent_coef: 0.0
+ent_coef: 0.01          # Small entropy bonus for exploration
 vf_coef: 0.5
 max_grad_norm: 0.5
 
@@ -32,8 +32,19 @@ reward_config:
   acceleration_penalty_factor: 2.0
   efficiency_bonus: 5.0
   collision_penalty: 100.0
-  deadlock_penalty: 5000.0
+  deadlock_penalty: 800.0
   step_penalty: 0.1
+
+# NEW Nash Conflict Parameters (trainable via DRL)
+nash_hyperparams:
+  path_intersection_threshold:
+    range: [1.0, 5.0]  # Path intersection sensitivity (meters)
+    default: 2.5
+    description: "Distance threshold for detecting path intersections"
+  platoon_conflict_distance:
+    range: [5.0, 30.0]  # Platoon interaction distance (meters)  
+    default: 15.0
+    description: "Distance at which platoons are considered in conflict"
 
 # Training Schedule
 schedule:
@@ -49,7 +60,7 @@ evaluation:
 
 # Logging
 logging:
-  tensorboard: true
+  tensorboard: false
   csv: true
   metrics_freq: 100
   save_freq: 1000

@@ -27,7 +27,7 @@ def main():
         print("\n⚠️ Training interrupted by user")
         return 1
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"❌ Error: {str(e)}")
         return 1
 
 if __name__ == "__main__":

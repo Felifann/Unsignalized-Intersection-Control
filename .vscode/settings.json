@@ -3,7 +3,7 @@
   "python.terminal.activateEnvironment": false,
   "python-envs.defaultEnvManager": "ms-python.python:system",
   "python-envs.pythonProjects": [],
-  "python.languageServer": "Default",
+  "python.languageServer": "None",
   "python.testing.unittestArgs": [
     "-v",
     "-s",
