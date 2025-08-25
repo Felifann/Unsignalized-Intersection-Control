@@ -24,7 +24,7 @@ class SystemConfig:
     
     # Training and simulation modes
     training_mode: bool = False
-    steps_per_action: int = 10
+    steps_per_action: int = 1
     observation_cache_steps: int = 5
     
     # Deadlock handling
@@ -37,7 +37,7 @@ class SystemConfig:
     carla_port: int = 2000
     carla_timeout: float = 10.0
     synchronous_mode: bool = True
-    fixed_delta_seconds: float = 0.2
+    fixed_delta_seconds: float = 0.75
     
     # Traffic generation
     max_vehicles: int = 500
@@ -112,7 +112,7 @@ class DRLConfig:
     # Training schedule
     total_timesteps: int = 5000
     eval_freq: int = 500
-    checkpoint_freq: int = 500
+    checkpoint_freq: int = 1000
     warmup_steps: int = 50000
     decay_steps: int = 100000
     min_learning_rate: float = 1e-5
@@ -176,9 +176,6 @@ class UnifiedConfig:
                 section_obj = getattr(self, section)
                 setattr(section_obj, field_name, value)
                 updated_params.append(param_name)
-        
-        if updated_params:
-            print(f"🔧 UnifiedConfig updated: {', '.join(updated_params)}")
     
     def to_solver_config(self) -> Dict[str, Any]:
         """Convert to solver configuration dictionary"""
@@ -298,21 +295,6 @@ class UnifiedConfig:
     def copy(self) -> 'UnifiedConfig':
         """Create a deep copy of the configuration"""
         return copy.deepcopy(self)
-    
-    def summary(self) -> str:
-        """Generate a summary string of key configuration parameters"""
-        return f"""
-🔧 Unified Configuration Summary:
-   📍 Intersection: {self.system.intersection_center}
-   🚦 Max go agents: {'unlimited' if self.mwis.max_go_agents is None else self.mwis.max_go_agents}
-   ⚡ Conflict window: {self.conflict.conflict_time_window}s
-   📏 Safe distance: {self.conflict.min_safe_distance}m
-   🚨 Deadlock threshold: {self.deadlock.deadlock_speed_threshold} m/s
-   🎯 MWIS threshold: {self.mwis.max_exact} vehicles
-   🤖 Training mode: {'ON' if self.system.training_mode else 'OFF'}
-   🗺️  Map: {self.system.map_name}
-"""
-
 
 # Global configuration instance
 _global_config: Optional[UnifiedConfig] = None

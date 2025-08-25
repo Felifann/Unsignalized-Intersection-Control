@@ -9,7 +9,7 @@ class SimulationConfig:
     
     # ===== 仿真设置 =====
     SYNCHRONOUS_MODE = True
-    FIXED_DELTA_SECONDS = 0.2
+    FIXED_DELTA_SECONDS = 0.05  # SPEED UP: 4x faster for training
     
     # ===== 交通生成设置 =====
     MAX_VEHICLES = 500
@@ -38,7 +38,7 @@ class SimulationConfig:
     CONTROL_TARGET_INTERSECTION_ONLY = True
     
     # ===== 状态提取设置 =====
-    ACTOR_CACHE_INTERVAL = 1  # 改为1，每帧都更新
+    ACTOR_CACHE_INTERVAL = 5  # SPEED UP: Update every 5 steps instead of every step
     
     # ===== 打印设置 =====
     PRINT_INTERVAL = 30

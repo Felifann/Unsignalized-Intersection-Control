@@ -27,7 +27,7 @@ class MWISSolver:
     - Winner assembly with conflict resolution
     """
     
-    def __init__(self, solver_config):
+    def __init__(self, solver_config, training_mode=False):
         """Initialize with solver configuration"""
         self.max_exact = solver_config['max_exact']
         self.max_go_agents = solver_config['max_go_agents']
@@ -38,6 +38,9 @@ class MWISSolver:
         self.entry_block_check_interval = 1.0
         self.stalled_vehicles_threshold = 3
         self.deadlock_speed_threshold = 0.5
+        
+        # SPEED UP: Store training mode to disable verbose logging
+        self.training_mode = training_mode
         
         # Performance tracking
         self.stats = {
@@ -57,36 +60,43 @@ class MWISSolver:
         # Check if there are any conflicts
         total_conflicts = sum(conflict_analysis.values())
         if total_conflicts == 0:
-            print("🚀 No conflicts detected - all candidates can proceed")
+            if not self.training_mode:
+                print("🚀 No conflicts detected - all candidates can proceed")
             # No conflicts, return all candidates sorted by weight
             indexed_weights = [(i, weights[i]) for i in range(n)]
             indexed_weights.sort(key=lambda x: x[1], reverse=True)
             
             selected = [i for i, _ in indexed_weights]
-            print(f"✅ No conflicts: selected all {len(selected)} candidates")
+            if not self.training_mode:
+                print(f"✅ No conflicts: selected all {len(selected)} candidates")
             return selected
         
-        print(f"⚡ Conflicts detected ({total_conflicts}) - applying STRICT MWIS resolution")
+        if not self.training_mode:
+            print(f"⚡ Conflicts detected ({total_conflicts}) - applying STRICT MWIS resolution")
         
         # Use exact solver for small problems, greedy for large ones
         if n <= self.max_exact:
             self.stats['mwis_exact_calls'] += 1
             selected = self._solve_mwis_exact(weights, adj)
-            print(f"🎯 Exact MWIS: selected {len(selected)}/{n} candidates")
+            if not self.training_mode:
+                print(f"🎯 Exact MWIS: selected {len(selected)}/{n} candidates")
         else:
             self.stats['mwis_greedy_calls'] += 1
             selected = self._solve_mwis_greedy(weights, adj)
-            print(f"🎯 Greedy MWIS: selected {len(selected)}/{n} candidates")
+            if not self.training_mode:
+                print(f"🎯 Greedy MWIS: selected {len(selected)}/{n} candidates")
         
         # Verify the solution is actually independent
         if not self._is_independent_set(selected, adj):
-            print("❌ WARNING: MWIS solution is not independent! Falling back to single highest bidder")
+            if not self.training_mode:
+                print("❌ WARNING: MWIS solution is not independent! Falling back to single highest bidder")
             # Emergency fallback: select only the highest bidder
             if weights:
                 max_idx = max(range(len(weights)), key=lambda i: weights[i])
                 selected = [max_idx]
         
-        print(f"🔒 STRICT enforcement: {len(selected)} conflict-free candidates selected")
+        if not self.training_mode:
+            print(f"🔒 STRICT enforcement: {len(selected)} conflict-free candidates selected")
         return selected
 
     def assemble_winners_with_traffic_control(self, candidates: List, selected_idx: List[int], 
@@ -200,7 +210,8 @@ class MWISSolver:
         selected = []
         excluded = set()
         
-        print(f"🧮 Greedy MWIS processing {len(vertices)} candidates:")
+        if not self.training_mode:
+            print(f"🧮 Greedy MWIS processing {len(vertices)} candidates:")
         
         for v in vertices:
             if v not in excluded:
@@ -210,16 +221,20 @@ class MWISSolver:
                 excluded.update(neighbors_to_exclude)
                 excluded.add(v)  # Mark as processed
                 
-                print(f"   ✅ Selected candidate {v} (weight: {weights[v]:.1f}, excluded {len(neighbors_to_exclude)} neighbors)")
+                if not self.training_mode:
+                    print(f"   ✅ Selected candidate {v} (weight: {weights[v]:.1f}, excluded {len(neighbors_to_exclude)} neighbors)")
             else:
-                print(f"   ❌ Skipped candidate {v} (weight: {weights[v]:.1f}, conflicts with selected)")
+                if not self.training_mode:
+                    print(f"   ❌ Skipped candidate {v} (weight: {weights[v]:.1f}, conflicts with selected)")
         
         # Verify independence
         if not self._is_independent_set(selected, adj):
-            print("❌ ERROR: Greedy solution is not independent!")
+            if not self.training_mode:
+                print("❌ ERROR: Greedy solution is not independent!")
             return []
         
-        print(f"✅ Greedy MWIS completed: {len(selected)} independent candidates")
+        if not self.training_mode:
+            print(f"✅ Greedy MWIS completed: {len(selected)} independent candidates")
         return selected
 
     def _solve_mwis_brute_force(self, weights: List[float], adj: List[Set[int]]) -> List[int]:

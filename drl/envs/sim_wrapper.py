@@ -58,7 +58,7 @@ class SimulationEnv:
         # BALANCED Performance settings for DRL training - from unified config
         training_mode = self.unified_config.system.training_mode
         self.steps_per_action = self.unified_config.system.steps_per_action
-        self.observation_cache_steps = self.unified_config.system.observation_cache_steps if training_mode else 15
+        self.observation_cache_steps = 20 if training_mode else 15  # ULTRA-FAST: Longer caching
         self.last_observation = None
         self.last_obs_step = -1
         
@@ -103,9 +103,10 @@ class SimulationEnv:
     def _init_simulation(self):
         """Initialize core simulation components"""
         try:
-            # Core components
+            # Core components - SPEED UP: Pass training mode to state extractor
             self.scenario = ScenarioManager()
-            self.state_extractor = StateExtractor(self.scenario.carla)
+            training_mode = self.unified_config.system.training_mode
+            self.state_extractor = StateExtractor(self.scenario.carla, training_mode=training_mode)
             self.platoon_manager = PlatoonManager(self.state_extractor)
             
             # Clean and reset
@@ -157,7 +158,7 @@ class SimulationEnv:
         try:
             self.current_step = 0      # Reset simulation steps
             self.current_action = 0    # Reset action counter
-            self.metrics_manager.reset_metrics()
+            # Note: We'll sync metrics after components are ready
             
             # Reset deadlock tracking
             self.deadlock_first_detected_time = None
@@ -181,27 +182,30 @@ class SimulationEnv:
             if hasattr(self.scenario, 'start_time_counters'):
                 self.scenario.start_time_counters()
             
-            # Reinitialize components for clean state
-            self.platoon_manager = PlatoonManager(self.state_extractor)
+            # OPTIMIZED: Minimal component recreation - reuse existing objects
+            # Only create platoon manager if it doesn't exist
+            if not hasattr(self, 'platoon_manager') or self.platoon_manager is None:
+                self.platoon_manager = PlatoonManager(self.state_extractor)
             
-            self.auction_engine = DecentralizedAuctionEngine(
-                state_extractor=self.state_extractor,
-                max_go_agents=None,
-                max_participants_per_auction=self.unified_config.auction.max_participants_per_auction
-            )
+            # Keep existing auction engine and nash solver - avoid recreation
+            if not hasattr(self, 'auction_engine') or self.auction_engine is None:
+                self.auction_engine = DecentralizedAuctionEngine(
+                    state_extractor=self.state_extractor,
+                    max_go_agents=None,
+                    max_participants_per_auction=self.unified_config.auction.max_participants_per_auction
+                )
+                self.auction_engine.set_auction_interval_from_config(
+                    self.unified_config.auction.auction_interval
+                )
             
-            # Set unified auction interval
-            self.auction_engine.set_auction_interval_from_config(
-                self.unified_config.auction.auction_interval
-            )
+            if not hasattr(self, 'nash_solver') or self.nash_solver is None:
+                self.nash_solver = DeadlockNashSolver(
+                    unified_config=self.unified_config,
+                    intersection_center=self.unified_config.system.intersection_center,
+                    max_go_agents=self.unified_config.mwis.max_go_agents
+                )
             
-            self.nash_solver = DeadlockNashSolver(
-                unified_config=self.unified_config,
-                intersection_center=self.unified_config.system.intersection_center,
-                max_go_agents=self.unified_config.mwis.max_go_agents
-            )
-            
-            # Reconnect components
+            # Quick reconnect
             self.traffic_controller.set_platoon_manager(self.platoon_manager)
             self.auction_engine.set_nash_controller(self.nash_solver)
             
@@ -209,11 +213,34 @@ class SimulationEnv:
             self.traffic_controller.set_bid_policy(self.bid_policy)
             self.auction_engine.set_bid_policy(self.bid_policy)
             
-            # Initial system update
+            # CRITICAL: Reset episode state but preserve cumulative statistics
+            self.traffic_controller.reset_episode_state()
+            
+            # Reset auction engine state
+            if hasattr(self.auction_engine, 'reset_episode_state'):
+                self.auction_engine.reset_episode_state()
+            
+            # Reset Nash solver statistics  
+            if hasattr(self.nash_solver, 'reset_stats'):
+                self.nash_solver.reset_stats()
+            
+            # IMPORTANT: Reset metrics AFTER all component statistics are reset
+            self.metrics_manager.reset_metrics(
+                nash_solver=self.nash_solver,
+                traffic_controller=self.traffic_controller
+            )
+            
+            # CRITICAL: Allow time for vehicle stabilization before first update
+            time.sleep(0.1)  # Small delay to ensure vehicle physics are stable
+            
+            # Initial system update - now with properly registered vehicles
             initial_vehicles = self.state_extractor.get_vehicle_states()
+            print(f"🚗 First update after reset: {len(initial_vehicles)} vehicles detected")
+            
             if initial_vehicles:
                 self.platoon_manager.update()
                 winners = self.auction_engine.update(initial_vehicles, self.platoon_manager)
+                # First update after reset - TrafficController will skip exit tracking
                 self.traffic_controller.update_control(
                     self.platoon_manager, self.auction_engine, winners
                 )
@@ -259,7 +286,9 @@ class SimulationEnv:
                     
                     if vehicle_states:
                         try:
-                            self.platoon_manager.update()
+                            if self.current_action % 3 == 0:  # Only every 3rd action
+                                self.platoon_manager.update()
+                            
                             auction_winners = self.auction_engine.update(vehicle_states, self.platoon_manager)
                             self.traffic_controller.update_control(
                                 self.platoon_manager, self.auction_engine, auction_winners
@@ -301,16 +330,18 @@ class SimulationEnv:
                             break
                         # Otherwise, deadlock handling may have performed a reset, continue
             
-            # Calculate reward using metrics manager
+            # Calculate reward using metrics manager with action tracking
             reward = self.metrics_manager.calculate_reward(
                 self.traffic_controller, self.state_extractor, 
-                self.scenario, self.nash_solver, self.current_step
+                self.scenario, self.nash_solver, self.current_step,
+                actions_since_reset=self.current_action
             )
             
-            # Apply severe deadlock punishment if occurred
+            # Apply severe deadlock punishment if occurred (WITHIN THIS EPISODE)
             if severe_deadlock_occurred:
                 reward += self.severe_deadlock_punishment
-                print(f"⚡ Applied severe deadlock punishment: {self.severe_deadlock_punishment} (total reward: {reward})")
+                print(f"⚡ Applied EPISODE severe deadlock punishment: {self.severe_deadlock_punishment} (step reward: {reward})")
+                print(f"   Note: This punishment applies ONLY to this step, not carried to next episode")
             
             # Get observation
             obs = self._get_observation_cached()
@@ -489,9 +520,8 @@ class SimulationEnv:
                         self._obs_array[base_idx + 5] = float(str(vehicle_id) in active_controls)
                         self._obs_array[base_idx + 6] = np.clip(vehicle_state.get('lane_id', 0), 0, 10)
                         # index 7 reserved
-                    except Exception as vehicle_error:
-                        print(f"⚠️ Vehicle {i} observation error: {str(vehicle_error)}")
-                        # Fill this vehicle's section with zeros
+                    except Exception:
+
                         base_idx = 10 + i * 8
                         self._obs_array[base_idx:base_idx + 8] = 0.0
             except Exception as vehicles_error:
@@ -555,55 +585,37 @@ class SimulationEnv:
             print(f"⚠️ Cleanup failed: {str(e)}")
 
     def _safe_reset_scenario(self) -> bool:
-        """Simplified single-attempt scenario reset"""
+        """OPTIMIZED single-attempt scenario reset"""
         try:
-            print("🎯 Resetting scenario...")
-            
-            # FIXED: Use only scenario manager's cleanup to avoid double-destruction
-            # Don't call _cleanup_existing_vehicles() here since scenario.reset_scenario() handles it
+            print("🎯 Quick scenario reset...")
             
             # Reset scenario and generate new traffic
             self.scenario.reset_scenario()
             
-            # Give time for vehicles to spawn and register
-            initial_wait = 0.5 if self.sim_cfg.get('training_mode', False) else 1.5
-            time.sleep(initial_wait)
+            # OPTIMIZED: Much shorter wait time for training
+            if self.sim_cfg.get('training_mode', False):
+                time.sleep(0.2)  # Reduced from 0.5
+            else:
+                time.sleep(0.8)  # Reduced from 1.5
             
-            # Force world tick to ensure all actors are registered
+            # Single world tick - no extra sleep
             self.scenario.carla.world.tick()
-            time.sleep(0.1)
             
-            # Verify vehicles were spawned successfully
+            # Quick verification without extensive debugging
             vehicles = self.state_extractor.get_vehicle_states(include_all_vehicles=True)
             if len(vehicles) > 0:
-                print(f"✅ Reset successful: {len(vehicles)} vehicles spawned globally")
-                
-                # Show context about intersection occupancy
-                intersection_vehicles = self.state_extractor.get_vehicle_states(include_all_vehicles=False)
-                print(f"   ({len(intersection_vehicles)} vehicles currently in intersection area)")
-                
+                print(f"✅ Reset successful: {len(vehicles)} vehicles")
                 return True
             else:
-                print(f"⚠️ No vehicles detected after reset")
-                # Debug: check CARLA world state
-                try:
-                    carla_vehicles = list(self.scenario.carla.world.get_actors().filter('vehicle.*'))
-                    alive_count = sum(1 for v in carla_vehicles if v.is_alive)
-                    print(f"   Debug: CARLA world has {len(carla_vehicles)} vehicle actors, {alive_count} alive")
-                    
-                    # Additional debug: check traffic generator state
-                    if hasattr(self.scenario, 'traffic_gen') and hasattr(self.scenario.traffic_gen, 'vehicles'):
-                        traffic_vehicles = len(self.scenario.traffic_gen.vehicles)
-                        print(f"   Debug: Traffic generator has {traffic_vehicles} vehicles in list")
-                except Exception as debug_e:
-                    print(f"   Debug check failed: {debug_e}")
-                
-                return False
+                print(f"⚠️ No vehicles after reset - retrying once")
+                # One quick retry
+                time.sleep(0.3)
+                self.scenario.carla.world.tick()
+                vehicles = self.state_extractor.get_vehicle_states(include_all_vehicles=True)
+                return len(vehicles) > 0
                 
         except Exception as e:
             print(f"❌ Reset failed: {str(e)}")
-            import traceback
-            traceback.print_exc()
             return False
 
     def _check_collision(self) -> bool:
@@ -698,34 +710,34 @@ class SimulationEnv:
             
             # Clean up current state
             self._cleanup_existing_vehicles()
-            time.sleep(0.5)
+            time.sleep(0.3)  # Reduced wait time
             
             # Reset scenario
             self.scenario.reset_scenario()
             
-            # Shorter wait for deadlock reset (faster recovery)
-            wait_time = 1.0 if self.sim_cfg.get('training_mode', False) else 2.0
+            # OPTIMIZED: Much faster deadlock reset
+            wait_time = 0.3 if self.sim_cfg.get('training_mode', False) else 0.8
             time.sleep(wait_time)
             
-            # Reinitialize components with fresh state
+            # OPTIMIZED: Reuse existing components to prevent resource leaks
+            # Only recreate platoon manager (lightweight)
             self.platoon_manager = PlatoonManager(self.state_extractor)
             
-            self.auction_engine = DecentralizedAuctionEngine(
-                state_extractor=self.state_extractor,
-                max_go_agents=None
-            )
+            # Keep existing engines - DO NOT recreate to prevent file handle leaks
+            # Just ensure they exist, but don't recreate them unnecessarily
             
-            self.nash_solver = DeadlockNashSolver(
-                unified_config=self.unified_config,
-                intersection_center=self.unified_config.system.intersection_center,
-                max_go_agents=self.unified_config.mwis.max_go_agents
-            )
-            
-            # Reconnect components
+            # Quick reconnect
             self.traffic_controller.set_platoon_manager(self.platoon_manager)
             self.auction_engine.set_nash_controller(self.nash_solver)
             self.traffic_controller.set_bid_policy(self.bid_policy)
             self.auction_engine.set_bid_policy(self.bid_policy)
+            
+            # CRITICAL: Reset episode state after deadlock reset  
+            self.traffic_controller.reset_episode_state()
+            if hasattr(self.auction_engine, 'reset_episode_state'):
+                self.auction_engine.reset_episode_state()
+            if hasattr(self.nash_solver, 'reset_stats'):
+                self.nash_solver.reset_stats()
             
             # Verify reset success - use include_all_vehicles for comprehensive check
             new_vehicles = self.state_extractor.get_vehicle_states(include_all_vehicles=True)
@@ -775,34 +787,33 @@ class SimulationEnv:
             
             # Clean up current state immediately
             self._cleanup_existing_vehicles()
-            time.sleep(0.3)  # Shorter wait for immediate response
+            time.sleep(0.2)  # Even shorter wait for immediate response
             
             # Reset scenario
             self.scenario.reset_scenario()
             
-            # Very fast reset for severe deadlock
-            wait_time = 0.8 if self.sim_cfg.get('training_mode', False) else 1.5
+            # OPTIMIZED: Ultra-fast reset for severe deadlock
+            wait_time = 0.2 if self.sim_cfg.get('training_mode', False) else 0.5
             time.sleep(wait_time)
             
-            # Reinitialize components with fresh state
+            # OPTIMIZED: Minimal recreation to prevent resource leaks  
+            # Only recreate platoon manager (lightweight)
             self.platoon_manager = PlatoonManager(self.state_extractor)
             
-            self.auction_engine = DecentralizedAuctionEngine(
-                state_extractor=self.state_extractor,
-                max_go_agents=None
-            )
+            # Keep existing engines - DO NOT recreate to prevent file handle accumulation
             
-            self.nash_solver = DeadlockNashSolver(
-                unified_config=self.unified_config,
-                intersection_center=self.unified_config.system.intersection_center,
-                max_go_agents=self.unified_config.mwis.max_go_agents
-            )
-            
-            # Reconnect components
+            # Ultra-quick reconnect
             self.traffic_controller.set_platoon_manager(self.platoon_manager)
             self.auction_engine.set_nash_controller(self.nash_solver)
             self.traffic_controller.set_bid_policy(self.bid_policy)
             self.auction_engine.set_bid_policy(self.bid_policy)
+            
+            # CRITICAL: Reset episode state after severe deadlock reset
+            self.traffic_controller.reset_episode_state()
+            if hasattr(self.auction_engine, 'reset_episode_state'):
+                self.auction_engine.reset_episode_state()
+            if hasattr(self.nash_solver, 'reset_stats'):
+                self.nash_solver.reset_stats()
             
             # Reset deadlock tracking since we have a fresh scenario
             self.deadlock_first_detected_time = None
@@ -832,6 +843,11 @@ class SimulationEnv:
     def close(self):
         """Clean up environment"""
         try:
+            # CRITICAL: Clean up collision sensors to prevent file handle leaks
+            if hasattr(self, 'scenario') and hasattr(self.scenario, 'traffic_gen'):
+                if hasattr(self.scenario.traffic_gen, 'cleanup_sensors'):
+                    self.scenario.traffic_gen.cleanup_sensors()
+            
             if hasattr(self.scenario, 'stop_time_counters'):
                 self.scenario.stop_time_counters()
             print("🏁 Environment closed")

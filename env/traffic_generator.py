@@ -9,6 +9,7 @@ class TrafficGenerator:
         self.max_vehicles = max_vehicles or SimulationConfig.MAX_VEHICLES
         self.vehicle_labels = {}
         self.collision_sensors = {}  # 新增：存储每辆车的碰撞传感器
+        self.vehicles = []  # Track vehicles for cleanup
         
         # Collision tracking
         self.collision_incidents = []  # List of collision incidents with details
@@ -23,6 +24,20 @@ class TrafficGenerator:
         # New clustering parameters to collapse repeated incidents over short time/space
         self._cluster_time_window = 2.0        # seconds: incidents within this are candidates for merging
         self._cluster_distance_threshold = 2.0 # meters: incidents within this distance are considered same event
+
+    def cleanup_sensors(self):
+        """Clean up all collision sensors to prevent file handle leaks"""
+        print(f"🧹 Cleaning up {len(self.collision_sensors)} collision sensors...")
+        for vehicle_id, sensor in self.collision_sensors.items():
+            try:
+                if sensor is not None:
+                    sensor.stop()  # Stop listening
+                    sensor.destroy()  # Destroy the sensor
+            except Exception as e:
+                print(f"⚠️ Error destroying sensor for vehicle {vehicle_id}: {e}")
+        
+        self.collision_sensors.clear()
+        print("✅ All collision sensors cleaned up")
 
     def _create_vehicle_label(self, vehicle):
         """为车辆创建ID标签"""
@@ -51,6 +66,10 @@ class TrafficGenerator:
 
     def generate_traffic(self):
         """Generate traffic with improved spawn collision handling"""
+        # CRITICAL: Clean up any existing sensors before creating new traffic
+        if len(self.collision_sensors) > 0:
+            self.cleanup_sensors()
+        
         spawn_points = self.carla.world.get_map().get_spawn_points()
         num_vehicles = min(self.max_vehicles, len(spawn_points))
         random.shuffle(spawn_points)

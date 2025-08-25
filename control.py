@@ -59,6 +59,10 @@ class TrafficController:
             'median_window_size': 5    # Window size for median filter
         }
         
+        # CRITICAL: Initialize reset tracking flags
+        self._just_reset = False
+        self._reset_update_count = 0
+        
         limit_text = "unlimited" if max_go_agents is None else str(max_go_agents)
         print(f"🎮 增强交通控制器初始化完成 - 支持车队、单车 (max go agents: {limit_text})")
 
@@ -79,6 +83,10 @@ class TrafficController:
         if platoon_manager:
             self.platoon_manager = platoon_manager
         
+        # CRITICAL: Track update calls after reset to prevent false exit rewards
+        if hasattr(self, '_just_reset'):
+            self._reset_update_count += 1
+        
         # 1. Maintain intersection vehicle control
         current_controlled = self._maintain_intersection_vehicle_control()
         
@@ -97,6 +105,7 @@ class TrafficController:
         self._update_acceleration_data(current_controlled)
         
         # 4. 恢复不再被控制的车辆 (using expanded vehicle state detection)
+        # CRITICAL: Skip exit tracking for first few updates after reset
         self._restore_uncontrolled_vehicles(current_controlled)
         
         # 5. 更新当前控制状态
@@ -422,6 +431,19 @@ class TrafficController:
 
     def _restore_uncontrolled_vehicles(self, current_controlled: Set[str]):
         """恢复不再被控制的车辆，包括已离开路口的车辆"""
+        # CRITICAL: Skip exit tracking immediately after reset to prevent false rewards
+        skip_exit_tracking = (hasattr(self, '_just_reset') and 
+                             self._just_reset and 
+                             self._reset_update_count <= 3)
+        
+        if skip_exit_tracking:
+            print(f"🔄 Skipping exit tracking (reset update #{self._reset_update_count})")
+            # Clear the reset flag after a few updates
+            if self._reset_update_count >= 3:
+                self._just_reset = False
+                print("✅ Reset grace period completed, normal exit tracking resumed")
+            return
+        
         previously_controlled = set(self.controlled_vehicles.keys())
         vehicles_to_restore = previously_controlled - current_controlled
         
@@ -527,6 +549,37 @@ class TrafficController:
             'vehicles_exited_intersection': self.vehicles_exited_intersection
         }
 
+    def reset_episode_state(self):
+        """Reset ONLY episode-specific state, PRESERVE cumulative statistics"""
+        print(f"🔄 Resetting episode state (preserving cumulative stats: {self.total_vehicles_controlled} controlled, {self.vehicles_exited_intersection} exits)")
+        
+        # PRESERVE cumulative statistics across episodes:
+        # - self.total_vehicles_controlled (keep for training analysis)
+        # - self.vehicles_exited_intersection (keep for overall throughput tracking)
+        
+        # Reset ONLY current episode state
+        self.controlled_vehicles = {}  # Current controlled vehicles
+        self.current_controlled_vehicles = set()  # Current set tracking
+        self.control_history = {}      # Episode-specific control history
+        
+        # Clear current episode acceleration tracking 
+        self.acceleration_data = {
+            'positive': {},
+            'negative': {},
+            'absolute': {}
+        }
+        # PRESERVE acceleration_archive for historical analysis
+        
+        # Clear current velocity tracking
+        self.previous_velocities = {}
+        self.previous_sim_timestamps = {}
+        
+        # CRITICAL: Set flag to prevent false exit detection after reset
+        self._just_reset = True
+        self._reset_update_count = 0
+        
+        print("✅ Episode state reset - cumulative statistics preserved")
+
     def get_final_statistics(self) -> Dict[str, Any]:
         """Get final simulation statistics with enhanced acceleration metrics"""
         accel_stats = self._calculate_average_acceleration()
@@ -542,9 +595,14 @@ class TrafficController:
         base_stats.update(accel_stats)
         
         # Add legacy field for backward compatibility
-        base_stats['average_absolute_acceleration'] = accel_stats['average_absolute_acceleration']
-        base_stats['total_acceleration_samples'] = accel_stats['absolute_acceleration_samples']
-        base_stats['vehicles_with_acceleration_data'] = accel_stats['absolute_acceleration_vehicles']
+        base_stats['average_absolute_acceleration'] = accel_stats.get('average_absolute_acceleration', 0.0)
+        
+        # FIXED: Calculate total acceleration samples from all types
+        total_samples = (accel_stats.get('absolute_acceleration_samples', 0) + 
+                        accel_stats.get('positive_acceleration_samples', 0) + 
+                        accel_stats.get('negative_acceleration_samples', 0))
+        base_stats['total_acceleration_samples'] = total_samples
+        base_stats['vehicles_with_acceleration_data'] = accel_stats.get('absolute_acceleration_vehicles', 0)
         
         return base_stats
 

@@ -54,12 +54,15 @@ class DeadlockNashSolver:
         self.intersection_center = unified_config.system.intersection_center
         self.max_go_agents = unified_config.mwis.max_go_agents
         
+        # SPEED UP: Check training mode for verbose logging
+        self.training_mode = unified_config.system.training_mode
+        
         # Generate solver config from unified config
         self.solver_config = unified_config.to_solver_config()
         
-        # Initialize components
+        # Initialize components - SPEED UP: Pass training mode
         self.conflict_analyzer = ConflictAnalyzer(self.solver_config)
-        self.mwis_solver = MWISSolver(self.solver_config)
+        self.mwis_solver = MWISSolver(self.solver_config, training_mode=self.training_mode)
         self.deadlock_detector = IntersectionDeadlockDetector(self.solver_config)
         
         # Performance tracking
@@ -70,14 +73,6 @@ class DeadlockNashSolver:
             'total_processing_time': 0.0,
             'avg_processing_time': 0.0
         }
-        
-        print(f"🧠 Nash Deadlock Solver initialized with UNIFIED CONFIG:")
-        print(f"   📍 Intersection: {self.intersection_center}")
-        print(f"   🚦 Max go agents: {'unlimited' if self.max_go_agents is None else self.max_go_agents}")
-        print(f"   ⚡ Conflict time window: {unified_config.conflict.conflict_time_window}s")
-        print(f"   🎯 MWIS threshold: {unified_config.mwis.max_exact} vehicles")
-        print(f"   🚨 Deadlock speed threshold: {unified_config.deadlock.deadlock_speed_threshold} m/s")
-        print(f"   📏 Safe distance: {unified_config.conflict.min_safe_distance}m")
 
     def update_max_go_agents(self, max_go_agents: int = None):
         """Update the maximum go agents limit"""
@@ -94,7 +89,7 @@ class DeadlockNashSolver:
         
         # Update component configs
         self.conflict_analyzer = ConflictAnalyzer(self.solver_config)
-        self.mwis_solver = MWISSolver(self.solver_config)
+        self.mwis_solver = MWISSolver(self.solver_config, training_mode=self.training_mode)
         self.deadlock_detector = IntersectionDeadlockDetector(self.solver_config)
         
         print(f"🔄 Nash solver: Configuration updated with {len(kwargs)} parameters")
@@ -107,9 +102,11 @@ class DeadlockNashSolver:
         start_time = time.time()
         current_time = start_time
         
-        print(f"\n🧠 Nash Conflict Resolution Starting:")
-        print(f"   📊 Input: {len(auction_winners)} auction winners")
-        print(f"   🚗 Vehicle states: {len(vehicle_states)} vehicles")
+        # SPEED UP: Skip verbose logging in training mode
+        if not self.training_mode:
+            print(f"\n🧠 Nash Conflict Resolution Starting:")
+            print(f"   📊 Input: {len(auction_winners)} auction winners")
+            print(f"   🚗 Vehicle states: {len(vehicle_states)} vehicles")
         
         try:
             # 1. Check for deadlock first with enhanced detection
@@ -118,10 +115,12 @@ class DeadlockNashSolver:
             # 2. Convert auction winners to candidates
             candidates = self._convert_winners_to_candidates(auction_winners)
             if not candidates:
-                print("❌ No valid candidates for Nash resolution")
+                if not self.training_mode:
+                    print("❌ No valid candidates for Nash resolution")
                 return auction_winners
             
-            print(f"   🎯 Converted to {len(candidates)} Nash candidates")
+            if not self.training_mode:
+                print(f"   🎯 Converted to {len(candidates)} Nash candidates")
             
             # 3. Build conflict graph
             adj, conflict_analysis = self.conflict_analyzer.build_enhanced_conflict_graph(

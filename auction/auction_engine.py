@@ -414,17 +414,14 @@ class DecentralizedAuctionEngine:
         self.max_go_agents = max_go_agents
         self.evaluator.max_go_agents = max_go_agents
         limit_text = "unlimited" if max_go_agents is None else str(max_go_agents)
-        print(f"🔄 Auction engine: Updated MAX_GO_AGENTS to {limit_text}")
 
     def update_max_participants_per_auction(self, max_participants: int):
         """Update the maximum participants per auction limit"""
         self.max_participants_per_auction = max_participants
-        print(f"🔄 Auction engine: Updated MAX_PARTICIPANTS_PER_AUCTION to {max_participants}")
 
     def set_auction_interval_from_config(self, auction_interval: float):
         """Set auction interval from unified config (unified with other system intervals)"""
         self.auction_interval = auction_interval
-        print(f"🔗 Auction engine: Set AUCTION_INTERVAL to {auction_interval}s (unified with system)")
 
     def set_vehicle_enforcer(self, vehicle_enforcer):
         """Set vehicle control enforcer for integration"""
@@ -433,12 +430,10 @@ class DecentralizedAuctionEngine:
     def set_nash_controller(self, nash_controller):
         """Set Nash controller for deadlock resolution"""
         self.nash_controller = nash_controller
-        print("🔗 Nash deadlock controller已连接到拍卖引擎")
 
     def set_bid_policy(self, bid_policy):
         """Set trainable DRL bid policy"""
         self.bid_policy = bid_policy
-        print("🔗 Trainable bid policy connected to auction engine")
 
     def update(self, vehicle_states: List[Dict], platoon_manager=None) -> List[AuctionWinner]:
         """Main update loop with Nash deadlock support"""
@@ -724,6 +719,24 @@ class DecentralizedAuctionEngine:
         
         return []
     
+    def reset_episode_state(self):
+        """CRITICAL: Reset auction engine state for fresh episode start"""
+        print(f"🔄 Resetting AuctionEngine state (prev auctions: {len(self.auction_history)})")
+        
+        # Clear auction history and current state
+        self.current_auction = None
+        self.auction_history = {}
+        self.last_auction_time = 0
+        
+        # Clear message queue
+        self.message_queue = []
+        
+        # Reset evaluator state
+        self.evaluator.protected_agents = set()
+        self.evaluator.agents_in_transit = {}
+        
+        print("✅ AuctionEngine state reset complete")
+
     def get_auction_stats(self) -> Dict[str, Any]:
         """Get comprehensive auction statistics - 支持车队统计"""
         current_agents = 0

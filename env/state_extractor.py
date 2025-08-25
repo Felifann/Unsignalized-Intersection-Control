@@ -6,9 +6,10 @@ from agents.navigation.global_route_planner_dao import GlobalRoutePlannerDAO
 from agents.navigation.global_route_planner import GlobalRoutePlanner
 
 class StateExtractor:
-    def __init__(self, carla_wrapper):
+    def __init__(self, carla_wrapper, training_mode=False):
         self.carla = carla_wrapper
         self.world_map = self.carla.world.get_map()  # 缓存地图对象
+        self.training_mode = training_mode  # SPEED UP: Skip expensive ops in training
 
         # 初始化GlobalRoutePlannerDAO
         dao = GlobalRoutePlannerDAO(self.world_map, 2.0)  # 2.0米采样距离
@@ -25,17 +26,17 @@ class StateExtractor:
         # 新增：状态缓存机制
         self._vehicle_states_cache = []
         self._states_cache_timestamp = 0
-        self._states_cache_duration = 0.1  # 缓存持续时间（秒）
+        self._states_cache_duration = 0.5  # SPEED UP: Longer cache duration
         
-        # 新增：waypoint缓存
+        # 新增：waypoint缓存 - OPTIMIZED FOR TRAINING  
         self._waypoint_cache = {}
         self._waypoint_cache_timestamp = 0
-        self._waypoint_cache_duration = 0.1  # waypoint缓存持续时间
+        self._waypoint_cache_duration = 1.0  # SPEED UP: Much longer cache
         
-        # 新增：车辆目标点缓存
+        # 新增：车辆目标点缓存 - OPTIMIZED FOR TRAINING
         self._vehicle_destinations = {}
         self._destination_cache_timestamp = 0
-        self._destination_cache_duration = 5.0  # 目标点缓存时间较长
+        self._destination_cache_duration = 10.0  # SPEED UP: Very long cache
         
         # 使用正方形检测区域
         self.intersection_half_size = SimulationConfig.INTERSECTION_HALF_SIZE
@@ -70,8 +71,6 @@ class StateExtractor:
             all_vehicles = list(self.carla.world.get_actors().filter('vehicle.*'))
             simple_states = []
             
-            print(f"🔍 Debug: Found {len(all_vehicles)} vehicle actors in CARLA world")
-            
             for vehicle in all_vehicles:
                 try:
                     # Test if vehicle is truly alive and accessible
@@ -100,7 +99,6 @@ class StateExtractor:
                     print(f"⚠️ Debug: Vehicle {getattr(vehicle, 'id', 'unknown')} access failed: {e}")
                     continue
             
-            print(f"✅ Debug: Successfully processed {len(simple_states)} accessible vehicles")
             return simple_states
         
         # Normal operation - only intersection vehicles with full processing

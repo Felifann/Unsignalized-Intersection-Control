@@ -1,20 +1,21 @@
-# rl/agents/ppo_trainer.py
+# rl/agents/sac_trainer.py
 import os
 import time
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
-from stable_baselines3 import PPO
+from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, BaseCallback
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.noise import NormalActionNoise, OrnsteinUhlenbeckActionNoise
 import yaml
 
 from drl.envs.auction_gym import AuctionGymEnv
 from drl.utils.analysis import TrainingAnalyzer
 
 class MetricsCallback(BaseCallback):
-    """Custom callback to log training metrics with proper file handle management"""
+    """Custom callback to log training metrics with proper file handle management for SAC"""
     
     def __init__(self, eval_env, log_dir: str, verbose: int = 0):
         super().__init__(verbose)
@@ -47,7 +48,9 @@ class MetricsCallback(BaseCallback):
                 'collision_count': info.get('collision_count', 0),
                 'total_controlled': info.get('total_controlled', 0),
                 'vehicles_exited': info.get('vehicles_exited', 0),
-                'bid_scale': info.get('bid_scale', 1.0)
+                'bid_scale': info.get('bid_scale', 1.0),
+                'deadlock_severity': info.get('deadlock_severity', 0.0),
+                'deadlock_threat_level': info.get('deadlock_threat_level', 'none')
             }
             
             self.metrics_log.append(metrics)
@@ -91,8 +94,8 @@ class MetricsCallback(BaseCallback):
         except Exception as e:
             print(f"⚠️ 清理文件句柄时出错: {e}")
 
-class PPOTrainer:
-    """PPO trainer for traffic intersection environment"""
+class SACTrainer:
+    """SAC trainer for traffic intersection environment"""
     
     def __init__(self, config_path: str = None):
         # Load configuration
@@ -106,24 +109,26 @@ class PPOTrainer:
         self.eval_freq = self.config.get('eval_freq', 5000)
         self.checkpoint_freq = self.config.get('checkpoint_freq', 10000)
         
-        print("🚀 PPO Trainer initialized")
+        print("🚀 SAC Trainer initialized")
 
     def _load_config(self, config_path: str) -> dict:
         """Load training configuration"""
         default_config = {
             'total_timesteps': 1_000_000,
             'eval_freq': 5000,
-            'checkpoint_freq': 1000,
+            'checkpoint_freq': 10000,
             'learning_rate': 3e-4,
-            'n_steps': 2048,
-            'batch_size': 64,
-            'n_epochs': 10,
+            'buffer_size': 1000000,
+            'batch_size': 256,
+            'tau': 0.005,
             'gamma': 0.99,
-            'gae_lambda': 0.95,
-            'clip_range': 0.2,
-            'ent_coef': 0.0,
-            'vf_coef': 0.5,
-            'max_grad_norm': 0.5,
+            'train_freq': 1,
+            'gradient_steps': 1,
+            'ent_coef': 'auto',
+            'target_update_interval': 1,
+            'learning_starts': 1000,
+            'use_sde': False,
+            'policy_kwargs': dict(log_std_init=-3, net_arch=[256, 256]),
             'sim_config': {'map': 'Town05', 'max_steps': 2000}
         }
         
@@ -153,8 +158,8 @@ class PPOTrainer:
         return AuctionGymEnv(sim_cfg=self.config.get('sim_config', {}))
 
     def train(self):
-        """Train PPO agent"""
-        print("🎯 Starting PPO training...")
+        """Train SAC agent"""
+        print("🎯 Starting SAC training...")
         
         # Create environments
         train_env = self.create_env()
@@ -163,20 +168,32 @@ class PPOTrainer:
         # Setup logging WITHOUT TensorBoard
         logger = configure(self.log_dir, ["csv"])  # REMOVED: "tensorboard"
         
-        # Create PPO model
-        model = PPO(
+        # Create action noise for exploration (optional for SAC)
+        n_actions = train_env.action_space.shape[-1]
+        action_noise = None
+        if self.config.get('use_action_noise', False):
+            action_noise = NormalActionNoise(
+                mean=np.zeros(n_actions), 
+                sigma=0.1 * np.ones(n_actions)
+            )
+        
+        # Create SAC model
+        model = SAC(
             'MlpPolicy',
             train_env,
             learning_rate=self.config['learning_rate'],
-            n_steps=self.config['n_steps'],
+            buffer_size=self.config['buffer_size'],
             batch_size=self.config['batch_size'],
-            n_epochs=self.config['n_epochs'],
+            tau=self.config['tau'],
             gamma=self.config['gamma'],
-            gae_lambda=self.config['gae_lambda'],
-            clip_range=self.config['clip_range'],
+            train_freq=self.config['train_freq'],
+            gradient_steps=self.config['gradient_steps'],
             ent_coef=self.config['ent_coef'],
-            vf_coef=self.config['vf_coef'],
-            max_grad_norm=self.config['max_grad_norm'],
+            target_update_interval=self.config['target_update_interval'],
+            learning_starts=self.config['learning_starts'],
+            use_sde=self.config['use_sde'],
+            policy_kwargs=self.config['policy_kwargs'],
+            action_noise=action_noise,
             verbose=1
             # REMOVED: tensorboard_log=self.log_dir
         )
@@ -184,12 +201,11 @@ class PPOTrainer:
         model.set_logger(logger)
         
         # Setup callbacks with reduced frequency to prevent file handle exhaustion
-        # 减少检查点保存频率以避免文件句柄耗尽
-        safe_checkpoint_freq = self.checkpoint_freq  # 最少2000步保存一次
+        safe_checkpoint_freq = self.checkpoint_freq
         checkpoint_callback = CheckpointCallback(
             save_freq=safe_checkpoint_freq,
             save_path=self.checkpoint_dir,
-            name_prefix="ppo_auction"
+            name_prefix="sac_auction"
         )
         
         eval_callback = EvalCallback(
@@ -211,7 +227,7 @@ class PPOTrainer:
             )
             
             # Save final model
-            final_model_path = os.path.join(self.checkpoint_dir, "final_ppo_model.zip")
+            final_model_path = os.path.join(self.checkpoint_dir, "final_sac_model.zip")
             model.save(final_model_path)
             print(f"✅ Training completed. Final model saved to {final_model_path}")
             
@@ -220,7 +236,7 @@ class PPOTrainer:
             
         except KeyboardInterrupt:
             print("⚠️ Training interrupted by user")
-            model.save(os.path.join(self.checkpoint_dir, "interrupted_model.zip"))
+            model.save(os.path.join(self.checkpoint_dir, "interrupted_sac_model.zip"))
             # Generate analysis even if interrupted
             self.analyze_training()
         except Exception as e:
@@ -244,10 +260,10 @@ class PPOTrainer:
 
     def load_and_test(self, model_path: str, num_episodes: int = 5):
         """Load trained model and test performance"""
-        print(f"🧪 Testing model: {model_path}")
+        print(f"🧪 Testing SAC model: {model_path}")
         
         try:
-            model = PPO.load(model_path)
+            model = SAC.load(model_path)
             test_env = self.create_env()
             
             episode_rewards = []
@@ -290,14 +306,14 @@ def main():
     """Main training function"""
     import argparse
     
-    parser = argparse.ArgumentParser(description='Train PPO for traffic intersection')
+    parser = argparse.ArgumentParser(description='Train SAC for traffic intersection')
     parser.add_argument('--config', type=str, help='Path to config file')
     parser.add_argument('--test', type=str, help='Path to model for testing')
     parser.add_argument('--episodes', type=int, default=5, help='Number of test episodes')
     
     args = parser.parse_args()
     
-    trainer = PPOTrainer(args.config)
+    trainer = SACTrainer(args.config)
     
     if args.test:
         trainer.load_and_test(args.test, args.episodes)

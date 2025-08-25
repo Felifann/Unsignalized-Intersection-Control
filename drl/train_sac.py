@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Enhanced DRL training script with comprehensive metrics collection and analysis
+Enhanced DRL training script with SAC for traffic intersection control
 """
 
 import os
@@ -40,15 +40,16 @@ if egg_candidates:
 else:
     print("Warning: CARLA egg not found. Ensure CARLA PythonAPI egg is available.")
 
-from stable_baselines3 import PPO
+from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 from stable_baselines3.common.logger import configure
+from stable_baselines3.common.noise import NormalActionNoise
 
 from drl.envs.auction_gym import AuctionGymEnv
 from drl.utils.analysis import TrainingAnalyzer
 
-class SimpleMetricsCallback(BaseCallback):
-    """Simplified callback for basic data collection"""
+class SimpleSACMetricsCallback(BaseCallback):
+    """Simplified callback for SAC data collection"""
     
     def __init__(self, log_dir: str, verbose: int = 0):
         super().__init__(verbose)
@@ -56,9 +57,9 @@ class SimpleMetricsCallback(BaseCallback):
         self.metrics_log = []
         self.collection_interval = 100  # Collect every 100 steps
         os.makedirs(log_dir, exist_ok=True)
-        self.csv_path = os.path.join(log_dir, 'training_metrics.csv')
+        self.csv_path = os.path.join(log_dir, 'sac_training_metrics.csv')
         
-        print(f"📊 Simple metrics collection initialized:")
+        print(f"📊 Simple SAC metrics collection initialized:")
         print(f"   Collection interval: every {self.collection_interval} steps")
 
     def _save_metrics(self):
@@ -70,12 +71,14 @@ class SimpleMetricsCallback(BaseCallback):
             import pandas as pd
             df = pd.DataFrame(self.metrics_log)
             df.to_csv(self.csv_path, index=False)
-            print(f"📊 Saved {len(self.metrics_log)} metrics records")
+            print(f"📊 Saved {len(self.metrics_log)} SAC metrics records")
         except Exception as e:
             print(f"⚠️ Save failed: {e}")
+            
+
 
     def _on_step(self) -> bool:
-        """Simple data collection every N steps"""
+        """Simple SAC data collection every N steps"""
         if self.num_timesteps % self.collection_interval != 0:
             return True
             
@@ -91,6 +94,7 @@ class SimpleMetricsCallback(BaseCallback):
             metrics = {
                 'timestep': int(self.num_timesteps),
                 'reward': reward_value,
+                'algorithm': 'SAC',
                 'throughput': float(info.get('throughput', 0.0)),
                 'avg_acceleration': float(info.get('avg_acceleration', 0.0)),
                 'collision_count': int(info.get('collision_count', 0)),
@@ -124,14 +128,16 @@ class SimpleMetricsCallback(BaseCallback):
                 self.metrics_log = []
                 
         except Exception as e:
-            print(f"⚠️ Metrics error: {e}")
+            print(f"⚠️ SAC Metrics error: {e}")
     
         return True
 
+
+
     def _on_training_end(self):
-        """Final save when training ends"""
+        """Final save when SAC training ends"""
         self._save_metrics()
-        print(f"✅ Final metrics saved")
+        print(f"✅ Final SAC metrics saved")
 
 # System resource monitoring functions removed - no longer needed
 
@@ -151,25 +157,27 @@ def create_directories():
     return dirs
 
 def main():
-    print("🚀 Starting DRL Training for Traffic Intersection Control")
+    print("🚀 Starting SAC Training for Traffic Intersection Control")
     print("=" * 70)
     
     # Create directories
     dirs = create_directories()
     
-    # DRL parameters
+    # SAC parameters
     config = {
-        'total_timesteps': 5000,
+        'total_timesteps': 4000,
         'learning_rate': 3e-4,
-        'n_steps': 512,
-        'batch_size': 64,
-        'n_epochs': 4,
+        'buffer_size': 100000,
+        'batch_size': 256,
+        'tau': 0.005,
         'gamma': 0.99,
-        'gae_lambda': 0.95,
-        'clip_range': 0.2,
-        'ent_coef': 0.01,
-        'vf_coef': 0.5,
-        'max_grad_norm': 0.5,
+        'train_freq': 1,
+        'gradient_steps': 4,
+        'ent_coef': 'auto',
+        'target_update_interval': 1,
+        'learning_starts': 1000,
+        'use_sde': False,
+        'policy_kwargs': dict(log_std_init=-3, net_arch=[256, 256]),
         'checkpoint_freq': 1000
         }
     
@@ -177,17 +185,17 @@ def main():
     model = None
     
     try:
-        print("🎯 Creating optimized training environment...")
+        print("🎯 Creating optimized SAC training environment...")
         env = AuctionGymEnv(sim_cfg={
-            'max_steps': 256,  # OPTIMAL: Aligned with n_steps=512 for 2 episodes per update
+            'max_steps': 400,  # Shorter episodes for SAC (off-policy can handle this)
             'training_mode': True,  # Enable performance optimizations
             'deadlock_reset_enabled': True,  # Enable automatic deadlock reset
-            'deadlock_timeout_duration': 15.0,  # Reset after 15 seconds of deadlock
+            'deadlock_timeout_duration': 12.0,  # Shorter timeout for SAC
             'max_deadlock_resets': 3,  # Allow up to 3 resets per episode
             'severe_deadlock_reset_enabled': True,  # Enable immediate reset for severity 1.0
-            'severe_deadlock_punishment': -200.0  # Proper punishment for learning
+            'severe_deadlock_punishment': -300.0  # Proper punishment for learning
         })
-        print("✅ Environment created successfully")
+        print("✅ SAC Environment created successfully")
 
         # Compatibility wrapper
         class ResetStepCompatWrapper(gym.Wrapper):
@@ -217,50 +225,57 @@ def main():
         # Setup logging WITHOUT TensorBoard
         logger = configure(dirs['log_dir'], ["csv"])  # REMOVED: "tensorboard"
         
-        # Create PPO model with OPTIMAL parameters
-        print("🤖 Creating PPO model...")
-        model = PPO(
+        # Create optional action noise for exploration
+        n_actions = env.action_space.shape[-1]
+        action_noise = None  # SAC has built-in exploration, noise not usually needed
+        
+        # Create SAC model with OPTIMAL parameters
+        print("🤖 Creating SAC model...")
+        model = SAC(
             'MlpPolicy',
             env,
             learning_rate=config['learning_rate'],
-            n_steps=config['n_steps'],
+            buffer_size=config['buffer_size'],
             batch_size=config['batch_size'],
-            n_epochs=config['n_epochs'],
+            tau=config['tau'],
             gamma=config['gamma'],
-            gae_lambda=config['gae_lambda'],
-            clip_range=config['clip_range'],
+            train_freq=config['train_freq'],
+            gradient_steps=config['gradient_steps'],
             ent_coef=config['ent_coef'],
-            vf_coef=config['vf_coef'],
-            max_grad_norm=config['max_grad_norm'],
+            target_update_interval=config['target_update_interval'],
+            learning_starts=config['learning_starts'],
+            use_sde=config['use_sde'],
+            policy_kwargs=config['policy_kwargs'],
+            action_noise=action_noise,
             verbose=1
             # REMOVED: tensorboard_log=dirs['log_dir']
         )
         
         model.set_logger(logger)
-        print("✅ PPO model created successfully")
+        print("✅ SAC model created successfully")
         
         # Setup callbacks
         checkpoint_callback = CheckpointCallback(
             save_freq=config['checkpoint_freq'],
             save_path=dirs['checkpoint_dir'],
-            name_prefix="ppo_traffic"
+            name_prefix="sac_traffic"
         )
         
         # Simple metrics callback
-        metrics_callback = SimpleMetricsCallback(
+        metrics_callback = SimpleSACMetricsCallback(
             log_dir=dirs['results_dir'],
             verbose=0
         )
         
-        # Start training
-        print(f"\n🎓 Starting DEBUG training for {config['total_timesteps']} timesteps...")
+        # Start SAC training
+        print(f"\n🎓 Starting SAC training for {config['total_timesteps']} timesteps...")
         print("Press Ctrl+C to stop training early")
         print("=" * 60)
         
         start_time = time.time()
         
-        # FIXED: Add explicit training termination check
-        print(f"🎓 Training will stop automatically at {config['total_timesteps']} timesteps")
+        # FIXED: Add explicit SAC training termination check
+        print(f"🎓 SAC Training will stop automatically at {config['total_timesteps']} timesteps")
         
         model.learn(
             total_timesteps=config['total_timesteps'],
@@ -268,30 +283,30 @@ def main():
             progress_bar=True
         )
         
-        print(f"🏁 Training COMPLETED - reached {config['total_timesteps']} timesteps")
+        print(f"🏁 SAC Training COMPLETED - reached {config['total_timesteps']} timesteps")
         
         # Save final model
-        final_model_path = os.path.join(dirs['checkpoint_dir'], "final_model.zip")
+        final_model_path = os.path.join(dirs['checkpoint_dir'], "final_sac_model.zip")
         model.save(final_model_path)
         
         elapsed_time = time.time() - start_time
-        print(f"\n✅ Training completed in {elapsed_time:.2f} seconds")
-        print(f"📁 Final model saved to: {final_model_path}")
+        print(f"\n✅ SAC Training completed in {elapsed_time:.2f} seconds")
+        print(f"📁 Final SAC model saved to: {final_model_path}")
         
         training_success = True
         
     except KeyboardInterrupt:
-        print("\n⚠️ Training interrupted by user")
+        print("\n⚠️ SAC Training interrupted by user")
         try:
             if model is not None:
-                interrupted_path = os.path.join(dirs['checkpoint_dir'], "interrupted_model.zip")
+                interrupted_path = os.path.join(dirs['checkpoint_dir'], "interrupted_sac_model.zip")
                 model.save(interrupted_path)
-                print(f"💾 Model saved to: {interrupted_path}")
+                print(f"💾 SAC Model saved to: {interrupted_path}")
         except Exception as save_error:
-            print(f"❌ Could not save interrupted model: {save_error}")
+            print(f"❌ Could not save interrupted SAC model: {save_error}")
     
     except Exception as e:
-        print(f"\n❌ Training failed: {str(e)}")
+        print(f"\n❌ SAC Training failed: {str(e)}")
         import traceback
         traceback.print_exc()
     
@@ -299,7 +314,7 @@ def main():
         try:
             if hasattr(env, 'close'):
                 env.close()
-            print("🏁 Environment closed")
+            print("🏁 SAC Environment closed")
             
             # Force garbage collection to clean up resources
             import gc
@@ -309,7 +324,7 @@ def main():
         
         # ALWAYS generate analysis plots (whether successful or interrupted)
         print("\n" + "=" * 70)
-        print("📊 GENERATING TRAINING ANALYSIS")
+        print("📊 GENERATING SAC TRAINING ANALYSIS")
         print("=" * 70)
         
         try:
@@ -319,25 +334,25 @@ def main():
             analyzer.generate_report()
             analyzer.save_summary_json()
             
-            print(f"\n✅ Analysis complete! Check these locations:")
+            print(f"\n✅ SAC Analysis complete! Check these locations:")
             print(f"   📊 Plots: {dirs['plots_dir']}")
             print(f"   📋 Report: {os.path.join(dirs['plots_dir'], 'training_report.txt')}")
-            print(f"   📈 Metrics: {os.path.join(dirs['results_dir'], 'training_metrics.csv')}")
+            print(f"   📈 Metrics: {os.path.join(dirs['results_dir'], 'sac_training_metrics.csv')}")
             
             # Display summary statistics if available
             if analyzer.metrics_df is not None and len(analyzer.metrics_df) > 0:
-                print(f"\n📈 Training Summary:")
+                print(f"\n📈 SAC Training Summary:")
                 print(f"   Steps completed: {analyzer.metrics_df['timestep'].max():,}")
                 print(f"   Average throughput: {analyzer.metrics_df['throughput'].mean():.1f} vehicles/h")
                 print(f"   Final bid scale: {analyzer.metrics_df['bid_scale'].iloc[-1]:.3f}")
                 print(f"   Total data points: {len(analyzer.metrics_df)}")
             
         except Exception as analysis_error:
-            print(f"❌ Analysis failed: {analysis_error}")
+            print(f"❌ SAC Analysis failed: {analysis_error}")
             print(f"   You can still run analysis manually:")
             print(f"   python -c \"from drl.utils.analysis import quick_analysis; quick_analysis('{dirs['results_dir']}', '{dirs['plots_dir']}')\"")
         
-        print(f"\n🏁 Training session complete!")
+        print(f"\n🏁 SAC Training session complete!")
 
 if __name__ == "__main__":
     main()

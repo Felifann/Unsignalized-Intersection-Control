@@ -22,7 +22,11 @@ class ScenarioManager:
 
     def reset_scenario(self):
         """Reset scenario with improved vehicle cleanup to prevent spawn collisions"""
-        # First destroy all vehicles
+        # CRITICAL: Clean up collision sensors first to prevent file handle leaks
+        if hasattr(self.traffic_gen, 'cleanup_sensors'):
+            self.traffic_gen.cleanup_sensors()
+        
+        # Then destroy all vehicles
         self.carla.destroy_all_vehicles()
         
         # Wait for physics simulation to process destructions
@@ -49,8 +53,14 @@ class ScenarioManager:
         # Generate new traffic
         self.traffic_gen.generate_traffic()
         
-        # Ensure vehicles are properly registered
-        world.tick()
+        # CRITICAL: Ensure vehicles are fully registered and stable
+        world.tick()  # First tick to register vehicles
+        time.sleep(0.1)  # Short wait for physics stabilization
+        world.tick()  # Second tick to ensure stability
+        
+        # Verify vehicle generation was successful
+        new_vehicles = world.get_actors().filter('vehicle.*')
+        print(f"✅ Scenario reset complete: {len(new_vehicles)} vehicles generated")
         time.sleep(0.1)
     
     def update_vehicle_labels(self):

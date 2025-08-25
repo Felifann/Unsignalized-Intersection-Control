@@ -1,555 +1,581 @@
+"""
+Simplified Training Analyzer - Focus on Parameter Trends and Safety Metrics Visualization
+"""
+
 import os
 import pandas as pd
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')  # Use non-interactive backend to avoid threading issues
 import matplotlib.pyplot as plt
 import seaborn as sns
-from typing import List, Dict, Optional
+from typing import Optional, Dict, List
 import glob
-import json
 
 class TrainingAnalyzer:
-    """Analyze and visualize training results with REAL DATA ONLY"""
+    """Simplified training analyzer focused on parameter trends and safety metrics"""
     
     def __init__(self, results_dir: str, plots_dir: str):
         self.results_dir = results_dir
         self.plots_dir = plots_dir
+        
+        # Create directories if they don't exist
+        os.makedirs(results_dir, exist_ok=True)
+        os.makedirs(plots_dir, exist_ok=True)
+        
+        # Initialize data containers
         self.metrics_df = None
         
-        os.makedirs(self.plots_dir, exist_ok=True)
-        plt.style.use('default')
+        # Set matplotlib style - use simple built-in style
+        try:
+            plt.style.use('seaborn-v0_8')
+        except:
+            try:
+                plt.style.use('seaborn')
+            except:
+                plt.style.use('default')
+        sns.set_palette("husl")
         
-        # Load ONLY real data
-        self.load_real_data_only()
+        print(f"📊 Training Analyzer initialized")
+        print(f"   Results directory: {results_dir}")
+        print(f"   Plots directory: {plots_dir}")
 
-    def load_real_data_only(self):
-        """Load ONLY actual recorded training data - NO INTERPOLATION"""
-        print(f"📊 Loading STRICT real training data from: {self.results_dir}")
-        
-        # Try to load real CSV data
-        csv_files = [
+    def _find_csv_files(self) -> List[str]:
+        """Find all training data CSV files"""
+        csv_patterns = [
             os.path.join(self.results_dir, 'training_metrics.csv'),
-            os.path.join(self.results_dir, 'metrics.csv'),
+            os.path.join(self.results_dir, 'sac_training_metrics.csv'),
+            os.path.join(self.results_dir, '*.csv')
         ]
         
-        for csv_path in csv_files:
-            if os.path.exists(csv_path):
-                try:
-                    df = pd.read_csv(csv_path)
-                    if len(df) > 0:
-                        # STRICT validation - only use validated real data
-                        if 'using_real_data' in df.columns:
-                            real_data_mask = df['using_real_data'] == True
-                            real_count = real_data_mask.sum()
-                            
-                            if real_count == 0:
-                                print(f"❌ NO REAL DATA in {csv_path} - all {len(df)} entries are fake!")
-                                continue
-                            elif real_count < len(df):
-                                print(f"⚠️ FILTERING fake data: {real_count}/{len(df)} real entries in {csv_path}")
-                                df = df[real_data_mask].copy()
-                            else:
-                                print(f"✅ All {len(df)} entries validated as real data")
-                        
-                        # Additional validation - check for unrealistic patterns
-                        if 'timestep' in df.columns:
-                            # Verify timesteps are actually from training (not interpolated)
-                            timestep_gaps = df['timestep'].diff().dropna()
-                            if len(timestep_gaps) > 0:
-                                avg_gap = timestep_gaps.mean()
-                                if avg_gap == 1.0 and len(df) > 20:
-                                    print(f"⚠️ SUSPICIOUS: Perfect 1-step gaps over {len(df)} points - may be interpolated")
-                        
-                        # Check for realistic reward ranges
-                        if 'reward' in df.columns:
-                            reward_range = df['reward'].max() - df['reward'].min()
-                            if reward_range > 1000:
-                                print(f"⚠️ UNREALISTIC reward range: {reward_range:.1f}")
-                        
-                        self.metrics_df = df
-                        self._standardize_columns()
-                        print(f"✅ Loaded VERIFIED real training data: {len(df)} records")
-                        
-                        # Show data summary
-                        if len(df) > 0:
-                            print(f"   Data spans timesteps: {df['timestep'].min()} to {df['timestep'].max()}")
-                            if 'reward' in df.columns:
-                                print(f"   Reward range: {df['reward'].min():.2f} to {df['reward'].max():.2f}")
-                        
-                        return
-                except Exception as e:
-                    print(f"⚠️ Failed to load {csv_path}: {e}")
+        csv_files = []
+        for pattern in csv_patterns:
+            csv_files.extend(glob.glob(pattern))
         
-        # NO FALLBACK TO FAKE DATA
-        print("❌ NO VERIFIED REAL TRAINING DATA FOUND!")
-        print("   Possible causes:")
-        print("   1. Training hasn't run long enough to collect data")
-        print("   2. Metrics callback is not properly connected")
-        print("   3. Simulation is not generating real vehicle data")
-        print("   SOLUTION: Run actual DRL training with real CARLA simulation")
-        self.metrics_df = None
+        # Remove duplicates and return
+        return list(set(csv_files))
 
-    def _try_load_from_json(self):
-        """Try to load from JSON backup files"""
-        json_files = [
-            os.path.join(self.results_dir, 'training_metrics.json'),
-            os.path.join(self.results_dir.replace('results', 'logs'), 'training_metrics.json')
-        ]
+    def load_data(self) -> bool:
+        """Load training data"""
+        csv_files = self._find_csv_files()
         
-        for json_path in json_files:
-            if os.path.exists(json_path):
-                try:
-                    print(f"🔍 Trying to load JSON: {json_path}")
-                    with open(json_path, 'r') as f:
-                        data = json.load(f)
-                    
-                    if isinstance(data, list) and len(data) > 0:
-                        self.metrics_df = pd.DataFrame(data)
-                        print(f"✅ Loaded {len(self.metrics_df)} data points from JSON")
-                        self._standardize_columns()
-                        return
-                        
-                except Exception as e:
-                    print(f"⚠️ Could not load JSON {json_path}: {e}")
+        if not csv_files:
+            print("❌ No training data CSV files found")
+            return False
+        
+        print(f"📂 Found {len(csv_files)} CSV files")
+        
+        # Read and merge all CSV files
+        dataframes = []
+        for csv_file in csv_files:
+            try:
+                df = pd.read_csv(csv_file)
+                if len(df) > 0:
+                    dataframes.append(df)
+                    print(f"   ✅ Loaded: {os.path.basename(csv_file)} ({len(df)} rows)")
+                else:
+                    print(f"   ⚠️ Empty file: {os.path.basename(csv_file)}")
+            except Exception as e:
+                print(f"   ❌ Failed to load: {os.path.basename(csv_file)} - {e}")
+        
+        if not dataframes:
+            print("❌ All CSV files failed to load")
+            return False
+        
+        # Merge data
+        self.metrics_df = pd.concat(dataframes, ignore_index=True)
+        
+        # Remove duplicates and sort by timestep
+        if 'timestep' in self.metrics_df.columns:
+            self.metrics_df = self.metrics_df.drop_duplicates(subset=['timestep'])
+            self.metrics_df = self.metrics_df.sort_values('timestep')
+        
+        print(f"✅ Data loading completed: {len(self.metrics_df)} rows, {len(self.metrics_df.columns)} columns")
+        return True
 
-
-
-    def _standardize_columns(self):
-        """Standardize column names across different data sources - NO THROUGHPUT"""
-        if self.metrics_df is None:
+    def plot_parameter_trends(self):
+        """Plot training parameter trend charts"""
+        if self.metrics_df is None or len(self.metrics_df) == 0:
+            print("❌ No data available for parameter trend plotting")
             return
         
-        # Column mapping for different naming conventions - NO THROUGHPUT
-        column_mapping = {
-            'step': 'timestep',
-            'steps': 'timestep',
-            'episode': 'timestep',
-            'episode_reward': 'reward',
-            'mean_reward': 'reward',
-            'ep_rew_mean': 'reward',
-            'acceleration': 'avg_acceleration',
-            'mean_acceleration': 'avg_acceleration',
-            'controlled': 'total_controlled',
-            'controlled_vehicles': 'total_controlled',
-            'exited': 'vehicles_exited',
-            'exits': 'vehicles_exited',
-            'scale': 'bid_scale',
-            'bid': 'bid_scale'
+        # Define parameter groups to plot
+        param_groups = {
+            'Bidding Strategy Parameters': {
+                'bid_scale': 'Bid Scale Factor',
+                'eta_weight': 'ETA Weight',
+                'speed_weight': 'Speed Weight',
+                'congestion_sensitivity': 'Congestion Sensitivity'
+            },
+            'Platoon and Fairness Parameters': {
+                'platoon_bonus': 'Platoon Bonus',
+                'junction_penalty': 'Junction Penalty',
+                'fairness_factor': 'Fairness Factor',
+                'urgency_threshold': 'Urgency Threshold'
+            },
+            'Control Parameters': {
+                'speed_diff_modifier': 'Speed Diff Modifier',
+                'follow_distance_modifier': 'Follow Distance Modifier',
+                'ignore_vehicles_go': 'Ignore Vehicles GO %',
+                'ignore_vehicles_wait': 'Ignore Vehicles WAIT %'
+            },
+            'Platoon Ignore Vehicle Parameters': {
+                'ignore_vehicles_platoon_leader': 'Platoon Leader Ignore Vehicles %',
+                'ignore_vehicles_platoon_follower': 'Platoon Follower Ignore Vehicles %'
+            }
         }
         
-        # Rename columns
-        self.metrics_df = self.metrics_df.rename(columns=column_mapping)
+        for group_name, params in param_groups.items():
+            self._plot_parameter_group(group_name, params)
+    
+    def _plot_parameter_group(self, group_name: str, params: Dict[str, str]):
+        """Plot parameter group trend chart"""
+        # Check which parameters exist in the data
+        available_params = {key: name for key, name in params.items() 
+                          if key in self.metrics_df.columns and not self.metrics_df[key].isna().all()}
         
-        # Ensure required columns exist - NO THROUGHPUT
-        required_columns = [
-            'timestep', 'reward', 'avg_acceleration',
-            'total_controlled', 'vehicles_exited', 'bid_scale', 'collision_count'
-        ]
+        if not available_params:
+            print(f"⚠️ {group_name}: No available parameter data")
+            return
         
-        for col in required_columns:
-            if col not in self.metrics_df.columns:
-                if col == 'timestep':
-                    # Use index as timestep if missing (deterministic)
-                    self.metrics_df['timestep'] = self.metrics_df.index.to_series().astype(int).values
-                    print(f"🔧 Added missing deterministic column 'timestep' (from index)")
+        # Create subplots
+        n_params = len(available_params)
+        fig, axes = plt.subplots(n_params, 1, figsize=(12, 4*n_params))
+        if n_params == 1:
+            axes = [axes]
+        
+        fig.suptitle(f'{group_name} Trends', fontsize=16, fontweight='bold')
+        
+        colors = sns.color_palette("husl", n_params)
+        
+        for idx, (param_key, param_name) in enumerate(available_params.items()):
+            # Get valid data points
+            valid_data = self.metrics_df[['timestep', param_key]].dropna()
+            
+            if len(valid_data) > 0:
+                axes[idx].plot(valid_data['timestep'], valid_data[param_key], 
+                             color=colors[idx], linewidth=2, marker='o', markersize=3)
+                axes[idx].set_title(f'{param_name} ({len(valid_data)} data points)')
+                axes[idx].set_xlabel('Training Steps')
+                axes[idx].set_ylabel('Parameter Value')
+                axes[idx].grid(True, alpha=0.3)
+                
+                # Add trend line
+                if len(valid_data) > 2:
+                    z = np.polyfit(valid_data['timestep'], valid_data[param_key], 1)
+                    p = np.poly1d(z)
+                    axes[idx].plot(valid_data['timestep'], p(valid_data['timestep']), 
+                                 "--", color='red', alpha=0.8, linewidth=1)
+        
+        plt.tight_layout()
+        
+        # Save chart
+        safe_group_name = group_name.replace('/', '_').replace(' ', '_')
+        save_path = os.path.join(self.plots_dir, f'parameter_trends_{safe_group_name}.png')
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"✅ {group_name} trend chart saved: {save_path}")
+
+    def plot_safety_metrics(self):
+        """Plot ENHANCED safety metrics chart with detailed deadlock statistics"""
+        if self.metrics_df is None or len(self.metrics_df) == 0:
+            print("❌ No data available for safety metrics plotting")
+            return
+        
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle('Enhanced Safety Metrics with Deadlock Analysis', fontsize=16, fontweight='bold')
+        
+        # 1. Collision count trend  
+        if 'collision_count' in self.metrics_df.columns:
+            collision_data = self.metrics_df[['timestep', 'collision_count']].dropna()
+            if len(collision_data) > 0:
+                axes[0, 0].plot(collision_data['timestep'], collision_data['collision_count'], 
+                               'r-', linewidth=2, marker='o', markersize=3)
+                axes[0, 0].set_title(f'Collision Count Trend ({len(collision_data)} data points)')
+                axes[0, 0].set_xlabel('Training Steps')
+                axes[0, 0].set_ylabel('Cumulative Collisions')
+                axes[0, 0].grid(True, alpha=0.3)
+                
+                # Enhanced statistics info
+                total_collisions = collision_data['collision_count'].max()
+                collision_rate = total_collisions / len(collision_data) if len(collision_data) > 0 else 0
+                axes[0, 0].text(0.02, 0.98, 
+                               f'Total Collisions: {total_collisions}\nCollision Rate: {collision_rate:.4f}/step', 
+                               transform=axes[0, 0].transAxes, fontsize=10,
+                               verticalalignment='top', bbox=dict(boxstyle="round", facecolor='wheat', alpha=0.7))
+        
+        # 2. ENHANCED Deadlock count trend with detailed stats
+        if 'deadlocks_detected' in self.metrics_df.columns:
+            deadlock_data = self.metrics_df[['timestep', 'deadlocks_detected']].dropna()
+            if len(deadlock_data) > 0:
+                axes[0, 1].plot(deadlock_data['timestep'], deadlock_data['deadlocks_detected'], 
+                               'orange', linewidth=2, marker='s', markersize=3)
+                
+                # Calculate deadlock statistics
+                total_deadlocks = deadlock_data['deadlocks_detected'].max()
+                deadlock_rate = total_deadlocks / len(deadlock_data) if len(deadlock_data) > 0 else 0
+                
+                # Calculate deadlock increments (new deadlocks per step)
+                deadlock_increments = deadlock_data['deadlocks_detected'].diff().fillna(0)
+                new_deadlocks_count = (deadlock_increments > 0).sum()
+                avg_deadlock_gap = len(deadlock_data) / max(1, new_deadlocks_count)
+                
+                axes[0, 1].set_title(f'Deadlock Analysis ({len(deadlock_data)} data points)')
+                axes[0, 1].set_xlabel('Training Steps') 
+                axes[0, 1].set_ylabel('Cumulative Deadlocks')
+                axes[0, 1].grid(True, alpha=0.3)
+                
+                # Enhanced deadlock statistics
+                stats_text = f"""Total Deadlocks: {total_deadlocks}
+Deadlock Rate: {deadlock_rate:.4f}/step
+Episodes with Deadlocks: {new_deadlocks_count}
+Avg Steps Between: {avg_deadlock_gap:.1f}"""
+                
+                axes[0, 1].text(0.02, 0.98, stats_text,
+                               transform=axes[0, 1].transAxes, fontsize=9,
+                               verticalalignment='top', bbox=dict(boxstyle="round", facecolor='orange', alpha=0.7))
+        
+        # 3. ENHANCED Deadlock severity analysis
+        if 'deadlock_severity' in self.metrics_df.columns:
+            severity_data = self.metrics_df['deadlock_severity'].dropna()
+            if len(severity_data) > 0:
+                # Create histogram with enhanced analysis
+                n, bins, patches = axes[1, 0].hist(severity_data, bins=20, alpha=0.7, color='purple', edgecolor='black')
+                
+                # Color code the histogram bars by severity level
+                for i, patch in enumerate(patches):
+                    bin_center = (bins[i] + bins[i+1]) / 2
+                    if bin_center >= 0.8:
+                        patch.set_color('darkred')  # Critical
+                    elif bin_center >= 0.6:
+                        patch.set_color('red')      # High
+                    elif bin_center >= 0.4:
+                        patch.set_color('orange')   # Medium
+                    elif bin_center >= 0.2:
+                        patch.set_color('yellow')   # Low
+                    else:
+                        patch.set_color('lightgreen')  # Very low
+                
+                axes[1, 0].set_title('Deadlock Severity Distribution (Color Coded)')
+                axes[1, 0].set_xlabel('Severity (0-1)')
+                axes[1, 0].set_ylabel('Frequency')
+                
+                # Enhanced statistics
+                mean_severity = severity_data.mean()
+                max_severity = severity_data.max()
+                critical_episodes = (severity_data >= 0.8).sum()
+                
+                axes[1, 0].axvline(mean_severity, color='black', linestyle='--', linewidth=2,
+                                  label=f'Mean: {mean_severity:.3f}')
+                axes[1, 0].axvline(max_severity, color='darkred', linestyle=':', linewidth=2,
+                                  label=f'Max: {max_severity:.3f}')
+                
+                # Add severity level legend
+                severity_text = f"""Critical (≥0.8): {critical_episodes} episodes
+High (0.6-0.8): {((severity_data >= 0.6) & (severity_data < 0.8)).sum()}
+Medium (0.4-0.6): {((severity_data >= 0.4) & (severity_data < 0.6)).sum()}
+Low (0.2-0.4): {((severity_data >= 0.2) & (severity_data < 0.4)).sum()}"""
+                
+                axes[1, 0].text(0.98, 0.98, severity_text,
+                               transform=axes[1, 0].transAxes, fontsize=8,
+                               verticalalignment='top', horizontalalignment='right',
+                               bbox=dict(boxstyle="round", facecolor='lightgray', alpha=0.8))
+                axes[1, 0].legend()
+        
+        # 4. ENHANCED Safety events analysis with rates
+        if 'collision_count' in self.metrics_df.columns and 'deadlocks_detected' in self.metrics_df.columns:
+            collision_data = self.metrics_df[['timestep', 'collision_count']].dropna()
+            deadlock_data = self.metrics_df[['timestep', 'deadlocks_detected']].dropna()
+            
+            if len(collision_data) > 0 and len(deadlock_data) > 0:
+                # Calculate rates (events per 1000 steps)
+                collision_increments = collision_data['collision_count'].diff().fillna(0)
+                deadlock_increments = deadlock_data['deadlocks_detected'].diff().fillna(0)
+                
+                # Rolling window for rate calculation (per 1000 steps)
+                window_size = min(50, len(collision_data) // 10)
+                if window_size > 5:
+                    collision_rate = collision_increments.rolling(window=window_size).sum() * (1000 / window_size)
+                    deadlock_rate = deadlock_increments.rolling(window=window_size).sum() * (1000 / window_size)
+                    
+                    axes[1, 1].plot(collision_data['timestep'], collision_rate, 
+                                   'r-', linewidth=2, label=f'Collision Rate (per 1000 steps)', alpha=0.8)
+                    axes[1, 1].plot(deadlock_data['timestep'], deadlock_rate, 
+                                   'orange', linewidth=2, label=f'Deadlock Rate (per 1000 steps)', alpha=0.8)
+                    
+                    # Add trend lines
+                    if len(collision_rate.dropna()) > 2:
+                        valid_collision = collision_rate.dropna()
+                        if len(valid_collision) > 0:
+                            collision_trend = np.polyfit(range(len(valid_collision)), valid_collision, 1)[0]
+                            trend_color = 'green' if collision_trend <= 0 else 'red'
+                            axes[1, 1].text(0.02, 0.15, f'Collision Trend: {collision_trend:.3f}/step',
+                                           transform=axes[1, 1].transAxes, color=trend_color, fontweight='bold')
+                    
+                    if len(deadlock_rate.dropna()) > 2:
+                        valid_deadlock = deadlock_rate.dropna()
+                        if len(valid_deadlock) > 0:
+                            deadlock_trend = np.polyfit(range(len(valid_deadlock)), valid_deadlock, 1)[0]
+                            trend_color = 'green' if deadlock_trend <= 0 else 'red'
+                            axes[1, 1].text(0.02, 0.08, f'Deadlock Trend: {deadlock_trend:.3f}/step',
+                                           transform=axes[1, 1].transAxes, color=trend_color, fontweight='bold')
+                    
+                    axes[1, 1].set_title(f'Safety Event Rates (Rolling {window_size}-step window)')
                 else:
-                    # Do NOT fabricate values; insert NaN and warn
-                    self.metrics_df[col] = np.nan
-                    print(f"⚠️ Missing column '{col}' — filled with NaN (no synthetic data generated)")
+                    # Fallback to normalized comparison
+                    if collision_data['collision_count'].max() > 0:
+                        collision_norm = collision_data['collision_count'] / collision_data['collision_count'].max()
+                        axes[1, 1].plot(collision_data['timestep'], collision_norm, 
+                                       'r-', linewidth=2, label='Collisions (normalized)', marker='o', markersize=2)
+                    
+                    if deadlock_data['deadlocks_detected'].max() > 0:
+                        deadlock_norm = deadlock_data['deadlocks_detected'] / deadlock_data['deadlocks_detected'].max()
+                        axes[1, 1].plot(deadlock_data['timestep'], deadlock_norm, 
+                                       'orange', linewidth=2, label='Deadlocks (normalized)', marker='s', markersize=2)
+                    
+                    axes[1, 1].set_title('Safety Events Trend Comparison (Normalized)')
+                
+                axes[1, 1].set_xlabel('Training Steps')
+                axes[1, 1].set_ylabel('Rate/Normalized Count')
+                axes[1, 1].legend()
+                axes[1, 1].grid(True, alpha=0.3)
+            
+        plt.tight_layout()
         
-        # Coerce numeric types where possible, keep NaNs for missing/invalid entries
-        for col in required_columns:
-            if col in self.metrics_df.columns:
-                try:
-                    self.metrics_df[col] = pd.to_numeric(self.metrics_df[col], errors='coerce')
-                except Exception:
-                    pass
-
-    def _try_load_from_tensorboard(self):
-        """Try to extract data from tensorboard logs"""
-        tb_log_dirs = [
-            os.path.join(self.results_dir, 'tb_logs'),
-            os.path.join(self.results_dir.replace('results', 'logs'), 'tb_logs'),
-            self.results_dir.replace('results', 'logs')
-        ]
+        # Save chart
+        save_path = os.path.join(self.plots_dir, 'safety_metrics_statistics.png')
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
         
-        for log_dir in tb_log_dirs:
-            if os.path.exists(log_dir):
-                try:
-                    # This would require tensorboard parsing, skip for now
-                    print(f"📈 Found tensorboard logs in {log_dir} (parsing not implemented)")
-                except Exception as e:
-                    continue
+        print(f"✅ Safety metrics chart saved: {save_path}")
 
-    def plot_training_progress(self):
-        """Plot ACTUAL training progress - no interpolation for missing data"""
+    def plot_reward_and_performance(self):
+        """Plot reward and performance metrics chart"""
         if self.metrics_df is None or len(self.metrics_df) == 0:
-            print("⚠️ No real data available - cannot plot training progress")
-            # Create empty plot with explanation
-            fig, ax = plt.subplots(1, 1, figsize=(10, 6))
-            ax.text(0.5, 0.5, 'NO REAL TRAINING DATA AVAILABLE\n\nRun DRL training first to collect data', 
-                   ha='center', va='center', fontsize=16, 
-                   bbox=dict(boxstyle="round,pad=0.3", facecolor="lightcoral"))
-            ax.set_xlim(0, 1)
-            ax.set_ylim(0, 1)
-            ax.set_title('Training Progress - No Data')
-            save_path = os.path.join(self.plots_dir, 'no_data_available.png')
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            plt.close()
+            print("❌ No data available for performance metrics plotting")
             return
         
-        try:
-            plt.ioff()
-            
-            # Determine subplot layout based on available data
-            available_metrics = []
-            if 'reward' in self.metrics_df.columns and not self.metrics_df['reward'].isna().all():
-                available_metrics.append('reward')
-            if 'throughput' in self.metrics_df.columns and not self.metrics_df['throughput'].isna().all():
-                available_metrics.append('throughput')
-            if 'avg_acceleration' in self.metrics_df.columns and not self.metrics_df['avg_acceleration'].isna().all():
-                available_metrics.append('acceleration')
-            if 'bid_scale' in self.metrics_df.columns and not self.metrics_df['bid_scale'].isna().all():
-                available_metrics.append('bid_scale')
-            
-            if len(available_metrics) == 0:
-                print("⚠️ No plottable metrics found in real data")
-                return
-            
-            # Create subplots based on available metrics
-            n_plots = len(available_metrics)
-            fig, axes = plt.subplots(n_plots, 1, figsize=(12, 4*n_plots))
-            if n_plots == 1:
-                axes = [axes]
-            
-            fig.suptitle(f'REAL Training Progress ({len(self.metrics_df)} actual data points)', 
-                        fontsize=16, fontweight='bold')
-            
-            plot_idx = 0
-            
-            # Plot only available metrics with actual data
-            if 'reward' in available_metrics:
-                reward_data = self.metrics_df[['timestep', 'reward']].dropna()
-                if len(reward_data) > 0:
-                    axes[plot_idx].plot(reward_data['timestep'], reward_data['reward'], 
-                                       'b-', linewidth=2, marker='o', markersize=3)
-                    axes[plot_idx].set_title(f'Reward Progress ({len(reward_data)} points)')
-                    axes[plot_idx].set_xlabel('Training Steps')
-                    axes[plot_idx].set_ylabel('Reward')
-                    axes[plot_idx].grid(True, alpha=0.3)
-                    plot_idx += 1
-            
-            if 'throughput' in available_metrics:
-                throughput_data = self.metrics_df[['timestep', 'throughput']].dropna()
-                if len(throughput_data) > 0:
-                    axes[plot_idx].plot(throughput_data['timestep'], throughput_data['throughput'], 
-                                       'orange', linewidth=2, marker='s', markersize=3)
-                    axes[plot_idx].set_title(f'Throughput ({len(throughput_data)} points)')
-                    axes[plot_idx].set_xlabel('Training Steps')
-                    axes[plot_idx].set_ylabel('Vehicles/hour')
-                    axes[plot_idx].grid(True, alpha=0.3)
-                    plot_idx += 1
-            
-            if 'acceleration' in available_metrics:
-                accel_data = self.metrics_df[['timestep', 'avg_acceleration']].dropna()
-                if len(accel_data) > 0:
-                    axes[plot_idx].plot(accel_data['timestep'], accel_data['avg_acceleration'], 
-                                       'green', linewidth=2, marker='^', markersize=3)
-                    axes[plot_idx].set_title(f'Acceleration ({len(accel_data)} points)')
-                    axes[plot_idx].set_xlabel('Training Steps')
-                    axes[plot_idx].set_ylabel('m/s²')
-                    axes[plot_idx].grid(True, alpha=0.3)
-                    plot_idx += 1
-            
-            if 'bid_scale' in available_metrics:
-                bid_data = self.metrics_df[['timestep', 'bid_scale']].dropna()
-                if len(bid_data) > 0:
-                    axes[plot_idx].plot(bid_data['timestep'], bid_data['bid_scale'], 
-                                       'red', linewidth=2, marker='d', markersize=3)
-                    axes[plot_idx].set_title(f'Bid Scale Learning ({len(bid_data)} points)')
-                    axes[plot_idx].set_xlabel('Training Steps')
-                    axes[plot_idx].set_ylabel('Bid Scale')
-                    axes[plot_idx].grid(True, alpha=0.3)
-            
-            plt.tight_layout()
-            save_path = os.path.join(self.plots_dir, 'real_training_progress.png')
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            print(f"✅ REAL training progress plot saved to {save_path}")
-            
-        except Exception as e:
-            print(f"❌ Failed to create real training progress plot: {e}")
-            import traceback
-            traceback.print_exc()
-
-    def plot_performance_metrics(self):
-        """Plot REAL performance metrics only"""
-        if self.metrics_df is None or len(self.metrics_df) == 0:
-            print("⚠️ No REAL data available for performance metrics plot")
-            return
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle('Reward and Performance Metrics', fontsize=16, fontweight='bold')
         
-        try:
-            fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-            fig.suptitle('Real Performance Metrics Analysis', fontsize=16, fontweight='bold')
-            
-            # Real throughput distribution
-            if 'throughput' in self.metrics_df.columns:
-                throughput_data = self.metrics_df['throughput'].dropna()
-                if len(throughput_data) > 0:
-                    axes[0, 0].hist(throughput_data, bins=20, alpha=0.7, 
-                                   color='skyblue', edgecolor='black')
-                    axes[0, 0].set_title('Real Throughput Distribution')
-                    axes[0, 0].set_xlabel('Throughput (vehicles/h)')
-                    axes[0, 0].set_ylabel('Frequency')
-                    mean_throughput = throughput_data.mean()
-                    axes[0, 0].axvline(mean_throughput, color='red', 
-                                      linestyle='--', label=f'Mean: {mean_throughput:.1f}')
+        # 1. Reward trend
+        if 'reward' in self.metrics_df.columns:
+            reward_data = self.metrics_df[['timestep', 'reward']].dropna()
+            if len(reward_data) > 0:
+                axes[0, 0].plot(reward_data['timestep'], reward_data['reward'], 
+                               'b-', linewidth=2, marker='o', markersize=3)
+                axes[0, 0].set_title(f'Reward Trend ({len(reward_data)} data points)')
+                axes[0, 0].set_xlabel('Training Steps')
+                axes[0, 0].set_ylabel('Reward Value')
+                axes[0, 0].grid(True, alpha=0.3)
+                
+                # Add moving average line
+                if len(reward_data) > 10:
+                    window = min(50, len(reward_data) // 10)
+                    reward_ma = reward_data['reward'].rolling(window=window).mean()
+                    axes[0, 0].plot(reward_data['timestep'], reward_ma, 
+                                   'r--', linewidth=2, label=f'{window}-step Moving Average')
                     axes[0, 0].legend()
             
-            # Real reward vs throughput correlation
-            if 'reward' in self.metrics_df.columns and 'throughput' in self.metrics_df.columns:
-                valid_data = self.metrics_df[['reward', 'throughput']].dropna()
-                if len(valid_data) > 0:
-                    axes[0, 1].scatter(valid_data['reward'], valid_data['throughput'], 
-                                      alpha=0.6, color='orange')
-                    axes[0, 1].set_title('Reward vs Real Throughput')
-                    axes[0, 1].set_xlabel('Reward')
-                    axes[0, 1].set_ylabel('Throughput (vehicles/h)')
-                    axes[0, 1].grid(True, alpha=0.3)
+        # 2. Throughput trend
+        if 'throughput' in self.metrics_df.columns:
+            throughput_data = self.metrics_df[['timestep', 'throughput']].dropna()
+            if len(throughput_data) > 0:
+                axes[0, 1].plot(throughput_data['timestep'], throughput_data['throughput'], 
+                               'g-', linewidth=2, marker='s', markersize=3)
+                axes[0, 1].set_title(f'Throughput Trend ({len(throughput_data)} data points)')
+                axes[0, 1].set_xlabel('Training Steps')
+                axes[0, 1].set_ylabel('Vehicles/Hour')
+                axes[0, 1].grid(True, alpha=0.3)
             
-            # Real collision count over time
-            if 'collision_count' in self.metrics_df.columns:
-                axes[1, 0].plot(self.metrics_df['timestep'], self.metrics_df['collision_count'], 
-                               linewidth=2, color='red')
-                axes[1, 0].set_title('Real Collision Count')
+        # 3. Vehicle control effectiveness
+        if 'total_controlled' in self.metrics_df.columns and 'vehicles_detected' in self.metrics_df.columns:
+            controlled_data = self.metrics_df[['timestep', 'total_controlled', 'vehicles_detected']].dropna()
+            if len(controlled_data) > 0:
+                axes[1, 0].plot(controlled_data['timestep'], controlled_data['total_controlled'], 
+                               'purple', linewidth=2, label='Controlled Vehicles', marker='o', markersize=2)
+                axes[1, 0].plot(controlled_data['timestep'], controlled_data['vehicles_detected'], 
+                               'cyan', linewidth=2, label='Detected Vehicles', marker='s', markersize=2)
+                axes[1, 0].set_title('Vehicle Control Effectiveness')
                 axes[1, 0].set_xlabel('Training Steps')
-                axes[1, 0].set_ylabel('Collisions')
+                axes[1, 0].set_ylabel('Number of Vehicles')
+                axes[1, 0].legend()
                 axes[1, 0].grid(True, alpha=0.3)
             
-            # Real vehicles controlled vs detected
-            if 'total_controlled' in self.metrics_df.columns and 'vehicles_detected' in self.metrics_df.columns:
-                valid_data = self.metrics_df[['total_controlled', 'vehicles_detected']].dropna()
-                if len(valid_data) > 0:
-                    axes[1, 1].scatter(valid_data['vehicles_detected'], valid_data['total_controlled'], 
-                                      color='purple', alpha=0.6)
-                    axes[1, 1].set_title('Vehicles Controlled vs Detected')
-                    axes[1, 1].set_xlabel('Vehicles Detected')
-                    axes[1, 1].set_ylabel('Vehicles Controlled')
-                    axes[1, 1].grid(True, alpha=0.3)
+        # 4. Reward distribution histogram
+        if 'reward' in self.metrics_df.columns:
+            reward_data = self.metrics_df['reward'].dropna()
+            if len(reward_data) > 0:
+                axes[1, 1].hist(reward_data, bins=30, alpha=0.7, color='skyblue', edgecolor='black')
+                axes[1, 1].set_title('Reward Distribution')
+                axes[1, 1].set_xlabel('Reward Value')
+                axes[1, 1].set_ylabel('Frequency')
+                axes[1, 1].axvline(reward_data.mean(), color='red', linestyle='--', 
+                                  label=f'Mean: {reward_data.mean():.2f}')
+                axes[1, 1].legend()
             
-            plt.tight_layout()
-            save_path = os.path.join(self.plots_dir, 'performance_metrics_real.png')
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            print(f"✅ REAL performance metrics plot saved to {save_path}")
-            
-        except Exception as e:
-            print(f"❌ Failed to create REAL performance metrics plot: {e}")
+        plt.tight_layout()
+        
+        # Save chart
+        save_path = os.path.join(self.plots_dir, 'reward_and_performance_metrics.png')
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"✅ Reward and performance metrics chart saved: {save_path}")
 
-    def plot_correlation_matrix(self):
-        """Plot correlation matrix of metrics - NO THROUGHPUT"""
+    def generate_summary_report(self):
+        """Generate summary report"""
         if self.metrics_df is None or len(self.metrics_df) == 0:
-            print("⚠️ No data available for correlation matrix")
+            print("❌ No data available for report generation")
             return
         
-        try:
-            # Select numeric columns for correlation - NO THROUGHPUT
-            numeric_cols = ['avg_acceleration', 'total_controlled', 
-                           'vehicles_exited', 'bid_scale', 'collision_count']
-            
-            # Add reward if available
-            if 'reward' in self.metrics_df.columns:
-                numeric_cols.insert(0, 'reward')
-            
-            # Only include columns that exist
-            available_cols = [col for col in numeric_cols if col in self.metrics_df.columns]
-            
-            if len(available_cols) < 2:
-                print(f"⚠️ Not enough numeric columns for correlation: {available_cols}")
-                return
-            
-            corr_data = self.metrics_df[available_cols].corr()
-            
-            plt.figure(figsize=(10, 8))
-            
-            # Create heatmap manually if seaborn not available
-            try:
-                sns.heatmap(corr_data, annot=True, cmap='coolwarm', center=0, 
-                           square=True, fmt='.3f')
-            except:
-                # Fallback to matplotlib imshow
-                im = plt.imshow(corr_data, cmap='coolwarm', aspect='auto')
-                plt.colorbar(im)
-                plt.xticks(range(len(available_cols)), available_cols, rotation=45)
-                plt.yticks(range(len(available_cols)), available_cols)
-                
-                # Add correlation values as text
-                for i in range(len(available_cols)):
-                    for j in range(len(available_cols)):
-                        plt.text(j, i, f'{corr_data.iloc[i, j]:.3f}', 
-                                ha='center', va='center')
-            
-            plt.title('Metrics Correlation Matrix (No Throughput)', fontsize=14, fontweight='bold')
-            plt.tight_layout()
-            save_path = os.path.join(self.plots_dir, 'correlation_matrix.png')
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            print(f"✅ Correlation matrix plot saved to {save_path}")
-            
-        except Exception as e:
-            print(f"❌ Failed to create correlation matrix: {e}")
-
-    def generate_report(self):
-        """Generate text summary report with throughput calculation ONLY HERE"""
-        if self.metrics_df is None or len(self.metrics_df) == 0:
-            print("⚠️ No data available for report generation")
-            return
+        report_path = os.path.join(self.plots_dir, 'training_analysis_report.txt')
         
-        try:
-            report_path = os.path.join(self.plots_dir, 'training_report_real_data.txt')
-            
-            with open(report_path, 'w', encoding='utf-8') as f:
-                f.write("=== DRL Training Analysis Report (REAL DATA ONLY) ===\n\n")
-                
-                # Data validation summary
-                f.write("Data Validation:\n")
-                f.write(f"  Total Data Points: {len(self.metrics_df):,}\n")
-                if 'using_real_data' in self.metrics_df.columns:
-                    real_count = self.metrics_df['using_real_data'].sum()
-                    f.write(f"  Real Data Points: {real_count:,}\n")
-                    f.write(f"  Data Authenticity: {(real_count/len(self.metrics_df)*100):.1f}%\n")
-                f.write("\n")
-                
-                # Training statistics using real data
-                f.write("Training Statistics (Real Data):\n")
-                f.write(f"  Total Training Steps: {self.metrics_df['timestep'].max():,}\n")
-                
-                # Real performance metrics
-                f.write("Real Performance Metrics:\n")
-                if 'throughput' in self.metrics_df.columns:
-                    throughput_data = self.metrics_df['throughput'].dropna()
-                    if len(throughput_data) > 0:
-                        f.write(f"  Average Real Throughput: {throughput_data.mean():.2f} ± {throughput_data.std():.2f} vehicles/h\n")
-                        f.write(f"  Max Real Throughput: {throughput_data.max():.2f} vehicles/h\n")
-                        f.write(f"  Min Real Throughput: {throughput_data.min():.2f} vehicles/h\n")
-                
-                if 'avg_acceleration' in self.metrics_df.columns:
-                    accel_data = self.metrics_df['avg_acceleration'].dropna()
-                    if len(accel_data) > 0:
-                        f.write(f"  Real Average Acceleration: {accel_data.mean():.3f} ± {accel_data.std():.3f} m/s²\n")
-                
-                if 'collision_count' in self.metrics_df.columns:
-                    f.write(f"  Real Total Collisions: {self.metrics_df['collision_count'].sum():,}\n")
-                
-                if 'vehicles_exited' in self.metrics_df.columns:
-                    f.write(f"  Real Total Vehicles Exited: {self.metrics_df['vehicles_exited'].sum():,}\n")
-                
-                # Learning progress from real data
-                if len(self.metrics_df) > 4:
-                    first_quarter = self.metrics_df.iloc[:len(self.metrics_df)//4]
-                    last_quarter = self.metrics_df.iloc[3*len(self.metrics_df)//4:]
-                    
-                    f.write("\nReal Learning Progress:\n")
-                    
-                    if 'throughput' in self.metrics_df.columns:
-                        first_throughput = first_quarter['throughput'].mean()
-                        last_throughput = last_quarter['throughput'].mean()
-                        improvement = last_throughput - first_throughput
-                        f.write(f"  Throughput Improvement: {improvement:+.2f} vehicles/h\n")
-                    
-                    if 'collision_count' in self.metrics_df.columns:
-                        first_collisions = first_quarter['collision_count'].mean()
-                        last_collisions = last_quarter['collision_count'].mean()
-                        f.write(f"  Collision Trend: {last_collisions - first_collisions:+.2f} per episode\n")
-                    
-                    if 'bid_scale' in self.metrics_df.columns:
-                        f.write(f"  Final Bid Scale: {self.metrics_df['bid_scale'].iloc[-1]:.3f}\n")
-                
-                # Data quality assessment
-                f.write("\nData Quality Assessment:\n")
-                missing_data = self.metrics_df.isnull().sum().sum()
-                total_cells = len(self.metrics_df) * len(self.metrics_df.columns)
-                completeness = ((total_cells - missing_data) / total_cells * 100)
-                f.write(f"  Missing Values: {missing_data}\n")
-                f.write(f"  Data Completeness: {completeness:.1f}%\n")
-                f.write(f"  Source: Real CARLA simulation data\n")
-            
-            print(f"✅ REAL data training report saved to {report_path}")
-            
-        except Exception as e:
-            print(f"❌ Failed to generate REAL data report: {e}")
-
-    def save_summary_json(self):
-        """Save a JSON summary for easy programmatic access - NO THROUGHPUT"""
-        if self.metrics_df is None:
-            return
+        report_lines = [
+            "=" * 50,
+            "DRL Training Analysis Report",
+            "=" * 50,
+            "",
+            f"Data Overview:",
+            f"  Total Training Steps: {self.metrics_df['timestep'].max():,}",
+            f"  Data Records Count: {len(self.metrics_df):,}",
+            "",
+        ]
         
-        try:
-            summary = {
-                'training_steps': int(self.metrics_df['timestep'].max()),
-                'data_points': len(self.metrics_df),
-                'avg_acceleration': float(self.metrics_df['avg_acceleration'].mean()),
-                'total_collisions': int(self.metrics_df['collision_count'].sum()),
-                'total_vehicles_exited': int(self.metrics_df['vehicles_exited'].sum()),
-                'final_bid_scale': float(self.metrics_df['bid_scale'].iloc[-1])
-            }
-            
-            # Add reward metrics if available
-            if 'reward' in self.metrics_df.columns:
-                summary.update({
-                    'avg_reward': float(self.metrics_df['reward'].mean()),
-                    'max_reward': float(self.metrics_df['reward'].max()),
-                    'final_reward': float(self.metrics_df['reward'].iloc[-1])
-                })
-            
-            summary_path = os.path.join(self.plots_dir, 'training_summary.json')
-            with open(summary_path, 'w') as f:
-                json.dump(summary, f, indent=2)
-            
-            print(f"✅ Training summary saved to {summary_path} (no throughput)")
-            
-        except Exception as e:
-            print(f"❌ Failed to save summary JSON: {e}")
+        # Safety metrics statistics
+        if 'collision_count' in self.metrics_df.columns:
+            total_collisions = self.metrics_df['collision_count'].max()
+            report_lines.extend([
+                f"Safety Metrics:",
+                f"  Total Collisions: {total_collisions}",
+            ])
+        
+        if 'deadlocks_detected' in self.metrics_df.columns:
+            total_deadlocks = self.metrics_df['deadlocks_detected'].max()
+            report_lines.append(f"  Total Deadlocks: {total_deadlocks}")
+        
+        if 'deadlock_severity' in self.metrics_df.columns:
+            avg_severity = self.metrics_df['deadlock_severity'].mean()
+            max_severity = self.metrics_df['deadlock_severity'].max()
+            report_lines.extend([
+                f"  Average Deadlock Severity: {avg_severity:.3f}",
+                f"  Maximum Deadlock Severity: {max_severity:.3f}",
+            ])
+        
+        report_lines.append("")
+        
+        # Performance metrics
+        if 'reward' in self.metrics_df.columns:
+            avg_reward = self.metrics_df['reward'].mean()
+            final_reward = self.metrics_df['reward'].iloc[-1]
+            report_lines.extend([
+                f"Performance Metrics:",
+                f"  Average Reward: {avg_reward:.2f}",
+                f"  Final Reward: {final_reward:.2f}",
+            ])
+        
+        if 'throughput' in self.metrics_df.columns:
+            avg_throughput = self.metrics_df['throughput'].mean()
+            report_lines.append(f"  Average Throughput: {avg_throughput:.1f} vehicles/hour")
+        
+        # Final parameter values
+        param_keys = ['bid_scale', 'eta_weight', 'speed_weight', 'congestion_sensitivity']
+        final_params = {}
+        for key in param_keys:
+            if key in self.metrics_df.columns and not self.metrics_df[key].isna().all():
+                final_params[key] = self.metrics_df[key].iloc[-1]
+        
+        if final_params:
+            report_lines.extend(["", "Final Parameter Values:"])
+            for key, value in final_params.items():
+                report_lines.append(f"  {key}: {value:.4f}")
+        
+        # Write report
+        report_content = "\n".join(report_lines)
+        with open(report_path, 'w', encoding='utf-8') as f:
+            f.write(report_content)
+        
+        print(f"✅ Analysis report saved: {report_path}")
 
     def generate_all_plots(self):
-        """Generate all analysis plots"""
-        print("📊 Generating all training analysis plots...")
+        """Generate all analysis charts"""
+        print("📊 Starting to generate all analysis charts...")
         
-        if self.metrics_df is None or len(self.metrics_df) == 0:
-            print("⚠️ No real data available - cannot generate plots")
+        # First load data
+        if not self.load_data():
+            print("❌ Unable to load data, exiting")
             return
         
         try:
-            # Generate individual plots
-            self.plot_training_progress()
-            self.plot_performance_metrics()
-            self.plot_correlation_matrix()
+            # Generate various charts
+            print("   Generating parameter trend charts...")
+            self.plot_parameter_trends()
             
-            print(f"✅ All plots generated successfully in {self.plots_dir}")
+            print("   Generating safety metrics charts...")
+            self.plot_safety_metrics()
+            
+            print("   Generating reward and performance metrics charts...")
+            self.plot_reward_and_performance()
+            
+            print("   Generating analysis report...")
+            self.generate_summary_report()
+            
+            print(f"✅ All charts generated successfully, saved in: {self.plots_dir}")
             
         except Exception as e:
-            print(f"❌ Failed to generate some plots: {e}")
+            print(f"❌ Error generating charts: {e}")
             import traceback
             traceback.print_exc()
 
+    def generate_report(self):
+        """Compatibility method - generate report"""
+        self.generate_summary_report()
+
+    def save_summary_json(self):
+        """Save JSON summary"""
+        if self.metrics_df is None or len(self.metrics_df) == 0:
+            return
+        
+        import json
+        
+        summary = {
+            'training_steps': int(self.metrics_df['timestep'].max()),
+            'data_points': len(self.metrics_df),
+            'total_collisions': int(self.metrics_df.get('collision_count', pd.Series([0])).max()),
+            'total_deadlocks': int(self.metrics_df.get('deadlocks_detected', pd.Series([0])).max()),
+        }
+        
+        # Add available metrics
+        if 'reward' in self.metrics_df.columns:
+            summary['avg_reward'] = float(self.metrics_df['reward'].mean())
+            summary['final_reward'] = float(self.metrics_df['reward'].iloc[-1])
+        
+        if 'throughput' in self.metrics_df.columns:
+            summary['avg_throughput'] = float(self.metrics_df['throughput'].mean())
+        
+        if 'bid_scale' in self.metrics_df.columns:
+            summary['final_bid_scale'] = float(self.metrics_df['bid_scale'].iloc[-1])
+        
+        summary_path = os.path.join(self.plots_dir, 'training_summary.json')
+        with open(summary_path, 'w', encoding='utf-8') as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False)
+        
+        print(f"✅ JSON summary saved: {summary_path}")
+
 def quick_analysis(results_dir: str = None, plots_dir: str = None):
-    """Quick analysis function for easy usage"""
+    """Quick analysis function"""
     if results_dir is None:
         results_dir = "drl/results"
     if plots_dir is None:
         plots_dir = "drl/plots"
     
-    print("ℹ️ Running analysis without TensorBoard dependency")
     analyzer = TrainingAnalyzer(results_dir, plots_dir)
     analyzer.generate_all_plots()
-    analyzer.generate_report()
     analyzer.save_summary_json()
     
     return analyzer
 
 if __name__ == "__main__":
-    # Allow running analysis directly
+    # Run analysis
     import sys
     
     if len(sys.argv) > 1:
