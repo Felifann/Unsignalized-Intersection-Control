@@ -24,27 +24,27 @@ sim_config:
   spawn_rate: 0.8
   intersection_center: [-188.9, -89.7, 0.0]
 
-# Reward Configuration
+# Reward Configuration - FIXED VALUES (not trainable)
 reward_config:
-  vehicle_exit_reward: 10.0
-  throughput_bonus: 0.01
+  vehicle_exit_reward: 10.0      # FIXED: Not trainable
+  throughput_bonus: 0.01         # FIXED: Not trainable
   acceleration_penalty_threshold: 3.0
   acceleration_penalty_factor: 2.0
   efficiency_bonus: 5.0
-  collision_penalty: 100.0
-  deadlock_penalty: 800.0
+  collision_penalty: 100.0       # FIXED: Not trainable
+  deadlock_penalty: 800.0        # FIXED: Not trainable
   step_penalty: 0.1
 
-# NEW Nash Conflict Parameters (trainable via DRL)
+# OPTIMIZED: Only 8 trainable parameters instead of 18
 nash_hyperparams:
   path_intersection_threshold:
-    range: [1.0, 5.0]  # Path intersection sensitivity (meters)
+    range: [2.5, 2.5]  # FIXED: Not trainable
     default: 2.5
-    description: "Distance threshold for detecting path intersections"
+    description: "Distance threshold for detecting path intersections (FIXED)"
   platoon_conflict_distance:
-    range: [5.0, 30.0]  # Platoon interaction distance (meters)  
+    range: [15.0, 15.0]  # FIXED: Not trainable
     default: 15.0
-    description: "Distance at which platoons are considered in conflict"
+    description: "Distance at which platoons are considered in conflict (FIXED)"
 
 # Training Schedule
 schedule:
@@ -64,3 +64,10 @@ logging:
   csv: true
   metrics_freq: 100
   save_freq: 1000
+
+# OPTIMIZATION NOTES:
+# - Action space reduced from 18 to 8 parameters (55% reduction)
+# - Observation space reduced from 169 to 60 dimensions (65% reduction)
+# - Only core parameters are trainable: bid_scale, eta_weight, platoon_bonus, junction_penalty,
+#   speed_diff_modifier, max_participants_per_auction, ignore_vehicles_go, ignore_vehicles_platoon_leader
+# - All other parameters are fixed for stability and faster training

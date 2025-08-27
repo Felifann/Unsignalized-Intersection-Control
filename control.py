@@ -340,6 +340,11 @@ class TrafficController:
                 reason = f"rank #{winner.rank}"
                 print(f"   🚗 Vehicle {vehicle_id}: {control_action} {action_emoji} ({reason})")
                 
+                # DEBUG: Show control parameters for waiting vehicles
+                if control_action == 'wait' and i < 3:  # Show first 3 waiting vehicles
+                    control_params = self._get_control_params_by_rank_and_action(
+                        winner.rank, control_action, False, False
+                    )
                 if self._apply_single_vehicle_control(vehicle_id, winner.rank, 
                                                     winner.bid.value, control_action):
                     controlled_vehicles.add(vehicle_id)
@@ -388,7 +393,7 @@ class TrafficController:
                     'follow_distance': 1.0,
                     'ignore_lights': 0.0,
                     'ignore_signs': 0.0,
-                    'ignore_vehicles': 20.0
+                    'ignore_vehicles': 0.0
                 }
             else:
                 return {
@@ -405,7 +410,7 @@ class TrafficController:
                     'follow_distance': 0.8,
                     'ignore_lights': 100.0,
                     'ignore_signs': 100.0,
-                    'ignore_vehicles': 90.0
+                    'ignore_vehicles': 25.0  # Restored to reasonable range
                 }
             elif is_platoon_member and is_leader:
                 return {
@@ -413,7 +418,7 @@ class TrafficController:
                     'follow_distance': 1.5,
                     'ignore_lights': 100.0,
                     'ignore_signs': 100.0,
-                    'ignore_vehicles': 50.0
+                    'ignore_vehicles': 20.0  # Restored to reasonable range
                 }
             else:
                 return {
@@ -421,7 +426,7 @@ class TrafficController:
                     'follow_distance': 1.2,
                     'ignore_lights': 100.0,
                     'ignore_signs': 100.0,
-                    'ignore_vehicles': 50.0
+                    'ignore_vehicles': 15.0  # Restored to reasonable range
                 }
 
     def set_bid_policy(self, bid_policy):

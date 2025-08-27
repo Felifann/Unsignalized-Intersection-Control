@@ -37,27 +37,27 @@ sim_config:
   severe_deadlock_reset_enabled: true
   severe_deadlock_punishment: -300.0
 
-# Reward Configuration - ADJUSTED FOR SAC
+# Reward Configuration - FIXED VALUES (not trainable)
 reward_config:
-  vehicle_exit_reward: 10.0
-  throughput_bonus: 0.01
+  vehicle_exit_reward: 10.0      # FIXED: Not trainable
+  throughput_bonus: 0.01         # FIXED: Not trainable
   acceleration_penalty_threshold: 3.0
   acceleration_penalty_factor: 2.0
   efficiency_bonus: 5.0
-  collision_penalty: 100.0
-  deadlock_penalty: 400.0  # Lower than PPO since SAC learns from replay
-  step_penalty: 0.05       # Lower step penalty for SAC
+  collision_penalty: 100.0       # FIXED: Not trainable
+  deadlock_penalty: 800.0        # FIXED: Not trainable
+  step_penalty: 0.05             # Lower step penalty for SAC
 
-# Nash Conflict Parameters (trainable via DRL)
+# OPTIMIZED: Only 8 trainable parameters instead of 18
 nash_hyperparams:
   path_intersection_threshold:
-    range: [1.0, 5.0]  # Path intersection sensitivity (meters)
+    range: [2.5, 2.5]  # FIXED: Not trainable
     default: 2.5
-    description: "Distance threshold for detecting path intersections"
+    description: "Distance threshold for detecting path intersections (FIXED)"
   platoon_conflict_distance:
-    range: [5.0, 30.0]  # Platoon interaction distance (meters)  
+    range: [15.0, 15.0]  # FIXED: Not trainable
     default: 15.0
-    description: "Distance at which platoons are considered in conflict"
+    description: "Distance at which platoons are considered in conflict (FIXED)"
 
 # SAC Specific Parameters
 sac_specific:
@@ -92,10 +92,16 @@ logging:
   metrics_freq: 100
   save_freq: 2000
 
-# SAC vs PPO Differences:
-# 1. SAC uses experience replay (buffer_size)
-# 2. SAC is off-policy (can reuse old data)
-# 3. SAC has automatic entropy tuning
-# 4. SAC trains continuously (train_freq=1)
-# 5. SAC uses soft updates (tau parameter)
-# 6. SAC is more sample efficient for continuous actions
+# OPTIMIZATION NOTES:
+# - Action space reduced from 18 to 8 parameters (55% reduction)
+# - Observation space reduced from 169 to 60 dimensions (65% reduction)
+# - Only core parameters are trainable: bid_scale, eta_weight, platoon_bonus, junction_penalty,
+#   speed_diff_modifier, max_participants_per_auction, ignore_vehicles_go, ignore_vehicles_platoon_leader
+# - All other parameters are fixed for stability and faster training
+# - SAC vs PPO Differences:
+#   1. SAC uses experience replay (buffer_size)
+#   2. SAC is off-policy (can reuse old data)
+#   3. SAC has automatic entropy tuning
+#   4. SAC trains continuously (train_freq=1)
+#   5. SAC uses soft updates (tau parameter)
+#   6. SAC is more sample efficient for continuous actions

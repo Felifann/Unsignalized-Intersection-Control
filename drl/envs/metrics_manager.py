@@ -8,8 +8,20 @@ import atexit
 class SimulationMetricsManager:
     """Dedicated manager for simulation metrics tracking and validation"""
     
-    def __init__(self, max_history: int = 1000):
+    def __init__(self, max_history: int = 1000, unified_config=None):
         self.max_history = max_history
+        
+        # Store unified config reference
+        if unified_config is None:
+            try:
+                from config.unified_config import get_config
+                self.unified_config = get_config()
+            except ImportError:
+                # Fallback if config module is not available
+                print("⚠️ Warning: Could not import unified config, using fallback")
+                self.unified_config = None
+        else:
+            self.unified_config = unified_config
         
         # Core metrics with enhanced deadlock tracking
         self.metrics = {
@@ -51,6 +63,7 @@ class SimulationMetricsManager:
         atexit.register(self._cleanup_resources)
         
         print("📊 Metrics Manager initialized with memory-bounded tracking and optimized file handling")
+        print(f"   🔧 Unified config: {'Available' if self.unified_config else 'Not available (using fallbacks)'}")
 
     def _cleanup_resources(self):
         """Clean up file handles and resources"""
@@ -164,156 +177,69 @@ class SimulationMetricsManager:
 
     def calculate_reward(self, traffic_controller, state_extractor, scenario, 
                         nash_solver, current_step: int, actions_since_reset: int = 0) -> float:
-        """Calculate STEP-WISE reward (NOT cumulative) with proper episode isolation"""
-        # IMPORTANT: This function calculates reward for THIS STEP only
-        # Reward should NOT carry over between episodes - each step is independent
+        """SIMPLIFIED reward calculation - clear learning signals for DRL agent"""
+        # FIXED: Simple, clear reward function that provides clear learning signals
         reward = 0.0
         
-        # DEBUG: Extra logging for first few actions after reset
-        debug_early_actions = actions_since_reset <= 5
-        
         try:
-            # Get REAL statistics
+            # Get basic statistics
             control_stats = traffic_controller.get_control_stats()
             final_stats = traffic_controller.get_final_statistics()
+            current_vehicles = state_extractor.get_vehicle_states()
             
-            # VALIDATED exit reward calculation
+            # 1. SIMPLE exit reward - clear positive signal
             current_exited = final_stats.get('vehicles_exited_intersection', 0)
             prev_exited = self.metrics.get('prev_vehicles_exited', 0)
             new_exits = max(0, current_exited - prev_exited)
             
-            # Cross-validation with current vehicle count
-            current_vehicles = state_extractor.get_vehicle_states()
-            current_vehicle_count = len(current_vehicles)
-            
-            # CRITICAL: Check if TrafficController is in post-reset grace period
-            if (hasattr(traffic_controller, '_just_reset') and 
-                traffic_controller._just_reset and 
-                traffic_controller._reset_update_count <= 3):
-                print(f"🔄 GRACE PERIOD: Skipping exit rewards during reset stabilization")
-                new_exits = 0  # Force to 0 during grace period
-            elif new_exits > 10:  # More than 10 vehicles exiting in one step is suspicious
-                print(f"⚠️ SUSPICIOUS: {new_exits} vehicles exit in one step (current: {current_exited}, prev: {prev_exited})")
-                new_exits = min(new_exits, 3)  # Cap at 3 to prevent false rewards
-            
             if new_exits > 0:
-                # ENHANCED exit reward with efficiency bonus
-                base_exit_reward = new_exits * 8.0  # Increased base reward
-                
-                # Efficiency bonus based on traffic throughput
-                current_vehicle_count = len(current_vehicles)
-                if current_vehicle_count > 5:  # High traffic scenario
-                    throughput_bonus = min(new_exits * 2.0, 10.0)  # Cap bonus
-                    exit_reward = base_exit_reward + throughput_bonus
-                    print(f"✅ +{exit_reward:.1f} for {new_exits} exits (base: {base_exit_reward:.1f}, throughput bonus: {throughput_bonus:.1f})")
-                else:
-                    exit_reward = base_exit_reward
-                    print(f"✅ +{exit_reward:.1f} for {new_exits} verified exits")
-                
+                # Simple +10 per vehicle exit - clear positive reward
+                exit_reward = new_exits * 10.0
                 reward += exit_reward
-                self.metrics['prev_vehicles_exited'] = current_exited
-            else:
-                # Update baseline even if no new exits
-                self.metrics['prev_vehicles_exited'] = current_exited
-                if debug_early_actions and actions_since_reset <= 2:
-                    print(f"🔍 DEBUG (action {actions_since_reset}): No new exits (current: {current_exited}, prev: {prev_exited})")
+                print(f"✅ +{exit_reward:.1f} for {new_exits} vehicle exits")
             
-            # ENHANCED: Smoother acceleration reward/penalty
-            real_avg_accel = final_stats.get('average_absolute_acceleration', 0.0)
-            self.metrics['avg_acceleration'] = real_avg_accel
+            # Update baseline
+            self.metrics['prev_vehicles_exited'] = current_exited
             
-            # Graduated acceleration penalty/reward system
-            if real_avg_accel < 1.0:  # Very smooth traffic
-                reward += 2.0
-            elif real_avg_accel < 1.5:  # Smooth traffic
-                reward += 1.0
-            elif real_avg_accel > 3.0:  # Aggressive driving
-                reward -= (real_avg_accel - 3.0) * 2.0
-            elif real_avg_accel > 2.0:  # Moderate penalty
-                reward -= (real_avg_accel - 2.0) * 1.0
-            
-            # ENHANCED control effectiveness with activity bonus
-            if current_vehicles:
-                controlled_vehicles = control_stats.get('total_controlled', 0)
-                control_ratio = controlled_vehicles / len(current_vehicles)
-                
-                # Base control effectiveness reward
-                control_reward = control_ratio * 2.0
-                
-                # Activity bonus for managing more vehicles
-                if len(current_vehicles) > 8:
-                    activity_bonus = min(1.0, (len(current_vehicles) - 8) * 0.1)
-                    control_reward += activity_bonus
-                    
-                reward += control_reward
-            
-            # ENHANCED collision penalty with context
+            # 2. SIMPLE collision penalty - clear negative signal
             if hasattr(scenario, 'traffic_generator') and hasattr(scenario.traffic_generator, 'collision_count'):
                 current_collisions = scenario.traffic_generator.collision_count
                 prev_collisions = self.metrics.get('prev_collision_count', 0)
                 new_collisions = current_collisions - prev_collisions
                 
                 if new_collisions > 0:
-                    # Base collision penalty
-                    base_collision_penalty = new_collisions * 25.0  # Increased from 20.0
-                    
-                    # Context multiplier - higher penalty in high traffic
-                    traffic_multiplier = 1.0
-                    if current_vehicle_count > 10:
-                        traffic_multiplier = 1.3  # 30% higher penalty in dense traffic
-                    elif current_vehicle_count > 6:
-                        traffic_multiplier = 1.15  # 15% higher penalty in moderate traffic
-                    
-                    total_collision_penalty = base_collision_penalty * traffic_multiplier
-                    reward -= total_collision_penalty
+                    # Simple -50 per collision - clear negative reward
+                    collision_penalty = new_collisions * 50.0
+                    reward -= collision_penalty
                     self.metrics['prev_collision_count'] = current_collisions
-                    
-                    print(f"💥 COLLISION PENALTY: -{total_collision_penalty:.1f} ({new_collisions} collisions, traffic: {current_vehicle_count})")
+                    print(f"💥 -{collision_penalty:.1f} for {new_collisions} collisions")
             
-            # Enhanced deadlock penalty system with severity-based punishment
-            # FIXED: Skip deadlock penalties during grace period after reset
-            if actions_since_reset > 10:  # Grace period of 10 actions
-                deadlock_penalty = self._calculate_deadlock_penalty(nash_solver)
+            # 3. SIMPLE efficiency reward - smooth traffic
+            avg_accel = final_stats.get('average_absolute_acceleration', 0.0)
+            self.metrics['avg_acceleration'] = avg_accel
+            
+            # Simple acceleration-based reward
+            if avg_accel < 1.5:  # Smooth traffic
+                reward += 2.0
+            elif avg_accel > 3.0:  # Aggressive driving
+                reward -= 3.0
+            
+            # 4. SIMPLE activity reward - encourage control
+            if current_vehicles and control_stats.get('total_controlled', 0) > 0:
+                control_ratio = control_stats.get('total_controlled', 0) / len(current_vehicles)
+                activity_reward = control_ratio * 3.0  # Simple control effectiveness reward
+                reward += activity_reward
+            
+            # 5. SIMPLE deadlock penalty - only after grace period
+            if actions_since_reset > 5:  # Shorter grace period
+                deadlock_penalty = self._calculate_simple_deadlock_penalty(nash_solver)
                 reward += deadlock_penalty  # deadlock_penalty is negative
-                
-                # Near-deadlock warning system - penalize approaching deadlock situations
-                severity_penalty = self._calculate_severity_penalty(nash_solver)
-                reward += severity_penalty  # severity_penalty is negative
-            else:
-                # During grace period, no deadlock penalties
-                if actions_since_reset == 1:  # Only log once at start
-                    print(f"🕐 Grace period: Skipping deadlock penalties for first 10 actions")
             
-            # IMPROVED step penalty and bonuses
-            if current_vehicle_count < 3:  # Low traffic - smaller penalty
-                reward -= 0.005  
-            else:
-                reward -= 0.02  # Higher penalty for inactive periods in high traffic
+            # 6. SIMPLE step penalty - encourage efficiency
+            reward -= 0.1  # Small penalty per step
             
-            # Enhanced activity bonus
-            if current_vehicle_count > 2 and control_stats.get('total_controlled', 0) > 0:
-                base_activity = 0.2
-                # Scale with vehicle density
-                density_bonus = min(0.3, current_vehicle_count * 0.02)
-                reward += base_activity + density_bonus
-            
-            # Bound reward to realistic range
-            reward = np.clip(reward, -50.0, 50.0)
-            
-            # VALIDATION: Check for suspicious reward patterns
-            self.reward_history.append(reward)
-            if len(self.reward_history) > 10:
-                recent_rewards = list(self.reward_history)[-10:]
-                if all(r > 20 for r in recent_rewards):
-                    print(f"⚠️ SUSPICIOUS: Consistently high rewards in last 10 steps (avg: {np.mean(recent_rewards):.1f})")
-                    self.suspicious_rewards += 1
-                elif all(r < -20 for r in recent_rewards):
-                    print(f"⚠️ SUSPICIOUS: Consistently low rewards in last 10 steps (avg: {np.mean(recent_rewards):.1f})")
-                    self.suspicious_rewards += 1
-            
-            # DEBUG logging for early actions
-            if debug_early_actions:
-                print(f"🔍 DEBUG (action {actions_since_reset}): Step reward = {reward:.2f}")
+            # Bound reward to reasonable range
+            reward = np.clip(reward, -100.0, 100.0)
             
             return reward
             
@@ -353,6 +279,9 @@ class SimulationMetricsManager:
                      max_steps: int) -> Dict:
         """Generate comprehensive info dictionary with validation"""
         try:
+            # Debug: Check if unified_config is available
+            if not hasattr(self, 'unified_config') or self.unified_config is None:
+                print("⚠️ Warning: unified_config not available in get_info_dict, using fallback values")
             # Get real statistics
             control_stats = traffic_controller.get_control_stats()
             final_stats = traffic_controller.get_final_statistics()
@@ -405,7 +334,7 @@ class SimulationMetricsManager:
                 'go_vehicles': int(control_stats.get('go_vehicles', 0)),
                 'waiting_vehicles': int(control_stats.get('waiting_vehicles', 0)),
                 
-                # Training parameters
+                # Training parameters - EXTENDED to include NEW reward and safety parameters
                 'bid_scale': float(bid_policy.bid_scale),
                 'eta_weight': float(bid_policy.eta_weight),
                 'speed_weight': float(bid_policy.speed_weight),
@@ -421,6 +350,17 @@ class SimulationMetricsManager:
                 'ignore_vehicles_wait': float(bid_policy.ignore_vehicles_wait),
                 'ignore_vehicles_platoon_leader': float(bid_policy.ignore_vehicles_platoon_leader),
                 'ignore_vehicles_platoon_follower': float(bid_policy.ignore_vehicles_platoon_follower),
+                
+                # NEW: Reward function parameters from unified config
+                'vehicle_exit_reward': float(self.unified_config.drl.vehicle_exit_reward if self.unified_config else 10.0),
+                'collision_penalty': float(self.unified_config.drl.collision_penalty if self.unified_config else 100.0),
+                'deadlock_penalty': float(self.unified_config.drl.deadlock_penalty if self.unified_config else 800.0),
+                'throughput_bonus': float(self.unified_config.drl.throughput_bonus if self.unified_config else 0.01),
+                
+                # NEW: Conflict detection parameters from unified config
+                'conflict_time_window': float(self.unified_config.conflict.conflict_time_window if self.unified_config else 2.5),
+                'min_safe_distance': float(self.unified_config.conflict.min_safe_distance if self.unified_config else 3.0),
+                'collision_threshold': float(self.unified_config.conflict.collision_threshold if self.unified_config else 2.0),
                 
                 # Metadata
                 'sim_time_elapsed': float(sim_elapsed) if sim_elapsed is not None else 0.0,
@@ -456,8 +396,8 @@ class SimulationMetricsManager:
             self.perf_stats['reward_times'].append(reward_time)
         self.perf_stats['total_ticks'] += 1
 
-    def _calculate_deadlock_penalty(self, nash_solver) -> float:
-        """Calculate penalty based on actual deadlocks detected with severity - FIXED EPISODE ISOLATION"""
+    def _calculate_simple_deadlock_penalty(self, nash_solver) -> float:
+        """SIMPLIFIED deadlock penalty - clear negative signal for DRL agent"""
         penalty = 0.0
         
         try:
@@ -479,36 +419,21 @@ class SimulationMetricsManager:
                 new_deadlocks = episode_deadlocks - prev_episode_deadlocks
                 
                 if new_deadlocks > 0:
-                    # Get severity for graduated penalty
-                    severity = nash_solver.deadlock_detector.get_deadlock_severity()
-                    
-                    # IMPROVED deadlock penalty system
-                    # Base penalty scales with occurrence frequency
-                    base_penalty = new_deadlocks * 30.0  # Reduced from 50.0
-                    
-                    # Smart severity multiplier (1.0 to 2.5 based on severity)
-                    severity_multiplier = 1.0 + (severity * 1.5)
-                    
-                    # Context-aware penalty adjustment
-                    affected_vehicles = nash_solver.deadlock_detector.stats.get('total_affected_vehicles', 0)
-                    if affected_vehicles <= 3:  # Minor deadlock
-                        vehicle_factor = 1.0
-                    elif affected_vehicles <= 6:  # Moderate deadlock
-                        vehicle_factor = 1.3
-                    else:  # Major deadlock
-                        vehicle_factor = 1.8
-                    
-                    total_penalty = base_penalty * severity_multiplier * vehicle_factor
-                    penalty = -min(total_penalty, 300.0)  # Reduced cap from 500.0
+                    # SIMPLE deadlock penalty - clear negative signal
+                    penalty = -new_deadlocks * 25.0  # Simple -25 per deadlock
                     
                     # Update EPISODE deadlock count (not absolute count)
                     self.metrics['prev_deadlock_count'] = episode_deadlocks
-                    print(f"🚨 BALANCED deadlock penalty: {penalty:.1f} (deadlocks: {new_deadlocks}, severity: {severity:.2f}, affected: {affected_vehicles})")
+                    print(f"🚨 Simple deadlock penalty: {penalty:.1f} for {new_deadlocks} deadlocks")
                     
         except Exception as e:
             print(f"⚠️ Deadlock penalty calculation error: {str(e)}")
             
         return penalty
+
+    def _calculate_deadlock_penalty(self, nash_solver) -> float:
+        """Legacy method - now calls simplified version"""
+        return self._calculate_simple_deadlock_penalty(nash_solver)
     
     def _calculate_severity_penalty(self, nash_solver) -> float:
         """Calculate penalty for approaching deadlock situations (severity-based early warning)"""

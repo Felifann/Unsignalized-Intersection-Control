@@ -8,6 +8,37 @@ This module provides centralized configuration management for all system compone
 - Deadlock detection and prevention
 - DRL training parameters
 - Simulation environment settings
+
+TIME HIERARCHY DESIGN:
+=====================
+The system uses a 4-level time hierarchy for optimal performance:
+
+Level 1: Simulation Step (0.1s)
+  - fixed_delta_seconds = 0.1s
+  - Basic physics and vehicle movement updates
+  - Smooth, responsive simulation
+
+Level 2: Decision Step (2.0s) 
+  - logic_update_interval_seconds = 2.0s
+  - Vehicle behavior decisions and route planning
+  - 20 simulation steps per decision
+
+Level 3: Auction Cycle (6.0s)
+  - auction_interval = 6.0s (total cycle)
+  - bidding_duration = 3.0s (50% bidding, 50% execution)
+  - 3 decision steps per auction cycle
+  - Allows proper bidding and execution phases
+
+Level 4: System Check (12.0s)
+  - deadlock_check_interval = 12.0s
+  - 2 auction cycles per system check
+  - High-level system health monitoring
+
+This hierarchy ensures:
+- Smooth simulation (0.1s)
+- Responsive decisions (2.0s) 
+- Proper auction timing (6.0s)
+- Efficient system monitoring (12.0s)
 """
 
 from dataclasses import dataclass, field
@@ -27,6 +58,11 @@ class SystemConfig:
     steps_per_action: int = 1
     observation_cache_steps: int = 5
     
+    # Time hierarchy design:
+    # fixed_delta_seconds (0.1s) -> logic_update_interval (2.0s) -> auction_cycle (6.0s)
+    # This creates a 3-level hierarchy: simulation step -> decision step -> auction cycle
+    logic_update_interval_seconds: float = 2.0  # Decision making interval (20 simulation steps)
+    
     # Deadlock handling
     severe_deadlock_reset_enabled: bool = True
     severe_deadlock_punishment: float = -800.0
@@ -37,20 +73,22 @@ class SystemConfig:
     carla_port: int = 2000
     carla_timeout: float = 10.0
     synchronous_mode: bool = True
-    fixed_delta_seconds: float = 0.75
+    fixed_delta_seconds: float = 0.1  # Simulation step size - keep small for smooth simulation
     
     # Traffic generation
     max_vehicles: int = 500
-    spawn_rate: float = 0.8
+    spawn_rate: float = 1.0
 
 
 @dataclass
 class ConflictConfig:
     """Conflict detection and analysis parameters"""
-    conflict_time_window: float = 2.5  # seconds to predict conflicts
+    # Time hierarchy: conflict_time_window should be 2-3x logic_update_interval
+    # This allows for proper conflict prediction and resolution planning
+    conflict_time_window: float = 5.0  # seconds to predict conflicts (2.5x logic_update_interval)
     min_safe_distance: float = 3.0     # minimum safe distance between vehicles (meters)
     collision_threshold: float = 2.0   # distance below which collision is imminent
-    prediction_steps: int = 25          # number of steps to predict ahead
+    prediction_steps: int = 50          # number of steps to predict ahead (increased for better coverage)
     velocity_threshold: float = 0.1     # minimum velocity to consider for prediction
     
     # TRAINABLE NASH PARAMETERS - optimizable via DRL
@@ -72,8 +110,14 @@ class MWISConfig:
 class AuctionConfig:
     """Auction system configuration parameters"""
     max_participants_per_auction: int = 4  # Maximum agents per auction round (prevents mass movement)
-    auction_interval: float = 1.0          # seconds between auctions
-    bidding_duration: float = 1.0          # duration of bidding phase
+    
+    # Auction cycle design:
+    # Total auction cycle = bidding_duration + auction_interval = 6.0 seconds
+    # This creates a rhythm: 3s bidding + 3s execution = 6s total cycle
+    # Logic updates every 2s, so we get 3 logic updates per auction cycle
+    auction_interval: float = 6.0          # seconds between auction cycles (total cycle time)
+    bidding_duration: float = 3.0          # duration of bidding phase (50% of cycle)
+    
     priority_in_transit_weight: float = 2.0  # weight multiplier for agents already in transit
     priority_distance_weight: float = 1.5    # weight multiplier for proximity to intersection
 
@@ -81,16 +125,21 @@ class AuctionConfig:
 @dataclass
 class DeadlockConfig:
     """Deadlock detection and prevention parameters"""
-    deadlock_speed_threshold: float = 0.5      # m/s - vehicles below this are considered stopped
-    deadlock_detection_window: float = 35.0    # seconds to track for deadlock
+    # Deadlock detection and resolution - FURTHER LOOSENED for better performance
+    deadlock_speed_threshold: float = 0.2      # m/s - vehicles below this are considered stopped (reduced from 0.3)
+    deadlock_detection_window: float = 30.0    # seconds to track for deadlock detection
     deadlock_min_vehicles: int = 6             # minimum vehicles for deadlock detection
-    deadlock_check_interval: float = 1.0       # check every 1 second - synchronized with other intervals
-    deadlock_severity_threshold: float = 0.8   # 80% of vehicles stalled
-    deadlock_duration_threshold: float = 15.0  # 15 seconds continuous stalling
+    
+    # Time hierarchy: deadlock_check_interval should be 2-3x auction_cycle
+    # This allows for proper deadlock detection without interfering with auction cycles
+    deadlock_check_interval: float = 12.0      # check every 12 seconds (2x auction cycle)
+    
+    deadlock_severity_threshold: float = 0.95  # 95% of vehicles stalled (increased from 0.9)
+    deadlock_duration_threshold: float = 45.0  # 45 seconds continuous stalling (increased from 30.0)
+    deadlock_timeout_duration: float = 90.0    # seconds before timeout reset (increased from 60.0)
     deadlock_core_half_size: float = 5.0       # core region half size for deadlock detection
     
     # Timeout and reset settings
-    deadlock_timeout_duration: float = 30.0    # seconds before timeout reset
     max_deadlock_resets: int = 3               # maximum auto-resets per episode
 
 
@@ -227,6 +276,7 @@ class UnifiedConfig:
             'carla_timeout': self.system.carla_timeout,
             'synchronous_mode': self.system.synchronous_mode,
             'fixed_delta_seconds': self.system.fixed_delta_seconds,
+            'logic_update_interval_seconds': self.system.logic_update_interval_seconds,
             
             # Traffic and intersection
             'max_vehicles': self.system.max_vehicles,

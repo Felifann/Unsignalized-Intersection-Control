@@ -6,10 +6,24 @@ from .traffic_generator import TrafficGenerator
 from .simulation_config import SimulationConfig
 
 class ScenarioManager:
-    def __init__(self, town=None):
-        # 使用配置文件中的地图设置
-        map_name = town or SimulationConfig.MAP_NAME
-        self.carla = CarlaWrapper(town=map_name)
+    def __init__(self, town=None, unified_config=None):
+        """
+        Initialize ScenarioManager with optional unified configuration
+        
+        Args:
+            town: Map name override
+            unified_config: UnifiedConfig object for dynamic configuration
+        """
+        self.unified_config = unified_config
+        
+        # Use unified config if available, otherwise fall back to legacy config
+        if unified_config:
+            map_name = town or unified_config.system.map_name
+        else:
+            map_name = town or SimulationConfig.MAP_NAME
+        
+        # Pass unified config to CarlaWrapper
+        self.carla = CarlaWrapper(town=map_name, unified_config=unified_config)
         self.traffic_gen = TrafficGenerator(self.carla)
 
         self.traffic_generator = self.traffic_gen
@@ -19,6 +33,21 @@ class ScenarioManager:
         self._real_end = None
         self._sim_start = None
         self._sim_end = None
+
+    
+    def update_carla_settings(self, fixed_delta_seconds=None):
+        """Update CARLA world settings dynamically"""
+        if hasattr(self.carla, 'update_world_settings'):
+            self.carla.update_world_settings(fixed_delta_seconds=fixed_delta_seconds)
+        else:
+            print("⚠️ CarlaWrapper does not support dynamic settings updates")
+    
+    def get_carla_settings(self):
+        """Get current CARLA world settings"""
+        if hasattr(self.carla, 'get_current_settings'):
+            return self.carla.get_current_settings()
+        else:
+            return None
 
     def reset_scenario(self):
         """Reset scenario with improved vehicle cleanup to prevent spawn collisions"""

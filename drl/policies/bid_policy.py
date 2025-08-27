@@ -99,7 +99,7 @@ class TrainableBidPolicy:
         if ignore_vehicles_go is not None:
             self.ignore_vehicles_go = np.clip(ignore_vehicles_go, 0.0, 100.0)
         if ignore_vehicles_wait is not None:
-            self.ignore_vehicles_wait = np.clip(ignore_vehicles_wait, 0.0, 50.0)
+            self.ignore_vehicles_wait = 0.0  # Always fixed at 0 (not trainable)
         if ignore_vehicles_platoon_leader is not None:
             self.ignore_vehicles_platoon_leader = np.clip(ignore_vehicles_platoon_leader, 0.0, 80.0)
         if ignore_vehicles_platoon_follower is not None:
@@ -281,8 +281,11 @@ class TrainableBidPolicy:
             speed_diff = max(speed_diff, -30.0)  # 允许更积极的速度
             follow_distance = max(0.5, follow_distance - 0.2)
         elif action == 'wait':
-            speed_diff = min(speed_diff, -70.0)  # 更保守的速度
-            follow_distance = follow_distance + 0.5
+            # CRITICAL FIX: Make waiting vehicles strictly stop
+            speed_diff = -100.0  # 强制停止 (much more strict than -70.0)
+            follow_distance = follow_distance + 1.0  # 增加跟车距离确保安全
+            # Force ignore_vehicles to 0 for waiting vehicles
+            ignore_vehicles = 0.0
         
         # 车队特殊调整
         if is_platoon_member:

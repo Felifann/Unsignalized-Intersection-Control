@@ -122,7 +122,13 @@ from traffic_light_override import force_vehicles_run_lights, freeze_lights_gree
 # 主仿真循环
 try:
     step = 0
-    unified_update_interval = 10
+    # Derive logic update interval (in steps) from unified seconds-based config
+    try:
+        logic_seconds = getattr(unified_config.system, 'logic_update_interval_seconds', 0.5)
+        fixed_delta = max(1e-6, float(unified_config.system.fixed_delta_seconds))
+        unified_update_interval = max(1, int(round(float(logic_seconds) / fixed_delta)))
+    except Exception:
+        unified_update_interval = 10
     unified_print_interval = SimulationConfig.PRINT_INTERVAL
     
     while True:

@@ -17,12 +17,15 @@ from typing import List, Dict
 # --- Prefer gymnasium if available, and make it available as 'gym' for legacy imports ---
 try:
     import gymnasium as gym  # type: ignore
+    print("✅ Using gymnasium")
     sys.modules['gym'] = gym
 except Exception:
     try:
         import gym  # type: ignore
+        print("✅ Using legacy gym")
     except Exception:
-        pass
+        print("❌ No gym or gymnasium found")
+        sys.exit(1)
 
 # Add project root to path
 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -103,21 +106,33 @@ class SimpleSACMetricsCallback(BaseCallback):
                 'vehicles_detected': int(info.get('vehicles_detected', 0)),
                 'deadlocks_detected': int(info.get('deadlocks_detected', 0)),
                 'deadlock_severity': float(info.get('deadlock_severity', 0.0)),
+                
+                # Core bidding parameters (4 parameters)
                 'bid_scale': float(info.get('bid_scale', 1.0)),
                 'eta_weight': float(info.get('eta_weight', 1.0)),
-                'speed_weight': float(info.get('speed_weight', 0.3)),
-                'congestion_sensitivity': float(info.get('congestion_sensitivity', 0.4)),
                 'platoon_bonus': float(info.get('platoon_bonus', 0.5)),
                 'junction_penalty': float(info.get('junction_penalty', 0.2)),
-                'fairness_factor': float(info.get('fairness_factor', 0.1)),
-                'urgency_threshold': float(info.get('urgency_threshold', 5.0)),
-                'proximity_bonus_weight': float(info.get('proximity_bonus_weight', 1.0)),
+                
+                # Control parameter (1 parameter)
                 'speed_diff_modifier': float(info.get('speed_diff_modifier', 0.0)),
-                'follow_distance_modifier': float(info.get('follow_distance_modifier', 0.0)),
-                'ignore_vehicles_go': float(info.get('ignore_vehicles_go', 50.0)),
-                'ignore_vehicles_wait': float(info.get('ignore_vehicles_wait', 0.0)),
-                'ignore_vehicles_platoon_leader': float(info.get('ignore_vehicles_platoon_leader', 50.0)),
-                'ignore_vehicles_platoon_follower': float(info.get('ignore_vehicles_platoon_follower', 90.0))
+                
+                # Auction efficiency parameter (1 parameter)
+                'max_participants_per_auction': int(info.get('max_participants_per_auction', 6)),
+                
+                # Safety parameters (2 parameters)
+                'ignore_vehicles_go': float(info.get('ignore_vehicles_go', 25.0)),
+                'ignore_vehicles_platoon_leader': float(info.get('ignore_vehicles_platoon_leader', 20.0)),
+                
+                # FIXED: Reward function parameters (not trainable)
+                'vehicle_exit_reward': float(info.get('vehicle_exit_reward', 10.0)),
+                'collision_penalty': float(info.get('collision_penalty', 100.0)),
+                'deadlock_penalty': float(info.get('deadlock_penalty', 800.0)),
+                'throughput_bonus': float(info.get('throughput_bonus', 0.01)),
+                
+                # FIXED: Conflict detection parameters (not trainable)
+                'conflict_time_window': float(info.get('conflict_time_window', 2.5)),
+                'min_safe_distance': float(info.get('min_safe_distance', 3.0)),
+                'collision_threshold': float(info.get('collision_threshold', 2.0))
             }
             
             self.metrics_log.append(metrics)
@@ -189,38 +204,89 @@ def main():
         env = AuctionGymEnv(sim_cfg={
             'max_steps': 400,  # Shorter episodes for SAC (off-policy can handle this)
             'training_mode': True,  # Enable performance optimizations
-            'deadlock_reset_enabled': True,  # Enable automatic deadlock reset
-            'deadlock_timeout_duration': 12.0,  # Shorter timeout for SAC
-            'max_deadlock_resets': 3,  # Allow up to 3 resets per episode
-            'severe_deadlock_reset_enabled': True,  # Enable immediate reset for severity 1.0
-            'severe_deadlock_punishment': -300.0  # Proper punishment for learning
+            # DISABLED: No mid-episode resets - clean episode termination for SAC DRL
+            'deadlock_reset_enabled': False,  # Episodes terminate on deadlock
+            'severe_deadlock_reset_enabled': False,  # Episodes terminate on severe deadlock
+            'severe_deadlock_punishment': -300.0  # Punishment applied to final step only
         })
         print("✅ SAC Environment created successfully")
 
-        # Compatibility wrapper
-        class ResetStepCompatWrapper(gym.Wrapper):
+        # SIMPLIFIED: Robust compatibility wrapper without complex logic
+        class SimpleCompatWrapper(gym.Wrapper):
             def reset(self, **kwargs):
-                out = self.env.reset(**kwargs)
-                if isinstance(out, tuple):
-                    if len(out) == 2:
-                        return out
-                    if len(out) == 1:
-                        return out[0], {}
-                    obs = out[0]
-                    info = out[-1] if isinstance(out[-1], dict) else {}
+                """Simple reset handling that works with both gym and gymnasium"""
+                try:
+                    # Call the environment's reset method
+                    result = self.env.reset(**kwargs)
+                    
+                    # Handle different return formats safely
+                    if isinstance(result, tuple):
+                        if len(result) >= 2:
+                            # gymnasium format: (obs, info) or more
+                            obs = result[0]
+                            info = result[1] if len(result) > 1 else {}
+                        else:
+                            # Single element tuple
+                            obs = result[0]
+                            info = {}
+                    else:
+                        # Single value (old gym format)
+                        obs = result
+                        info = {}
+                    
+                    # Ensure obs is numpy array with correct shape
+                    if not isinstance(obs, np.ndarray):
+                        obs = np.array(obs, dtype=np.float32)
+                    
+                    # Ensure correct dimensions
+                    if obs.shape[0] != 50:
+                        if obs.shape[0] < 50:
+                            # Pad with zeros
+                            padding = np.zeros(50 - obs.shape[0], dtype=np.float32)
+                            obs = np.concatenate([obs, padding])
+                        else:
+                            # Truncate
+                            obs = obs[:50]
+                    
                     return obs, info
-                else:
-                    return out, {}
+                    
+                except Exception as e:
+                    print(f"⚠️ Reset wrapper error: {str(e)}")
+                    # Return safe fallback
+                    fallback_obs = np.zeros(50, dtype=np.float32)
+                    fallback_info = {'reset_error': str(e), 'fallback': True}
+                    return fallback_obs, fallback_info
 
             def step(self, action):
-                out = self.env.step(action)
-                if isinstance(out, tuple):
-                    if len(out) == 4:
-                        obs, reward, done, info = out
-                        return obs, reward, done, False, info
-                return out
+                """Simple step handling that works with both gym and gymnasium"""
+                try:
+                    result = self.env.step(action)
+                    
+                    # Handle different return formats
+                    if isinstance(result, tuple):
+                        if len(result) == 4:
+                            # Old gym: obs, reward, done, info
+                            obs, reward, done, info = result
+                            return obs, reward, done, False, info  # Add truncated=False
+                        elif len(result) == 5:
+                            # New gymnasium: obs, reward, terminated, truncated, info
+                            return result
+                        else:
+                            # Unexpected format - try to handle gracefully
+                            print(f"⚠️ Unexpected step output length: {len(result)}")
+                            return result
+                    else:
+                        print(f"⚠️ Step output is not tuple: {type(result)}")
+                        return result
+                        
+                except Exception as e:
+                    print(f"⚠️ Step wrapper error: {str(e)}")
+                    # Return safe fallback
+                    fallback_obs = np.zeros(50, dtype=np.float32)
+                    fallback_info = {'step_error': str(e), 'fallback': True}
+                    return fallback_obs, -10.0, True, True, fallback_info
 
-        env = ResetStepCompatWrapper(env)
+        env = SimpleCompatWrapper(env)
         
         # Setup logging WITHOUT TensorBoard
         logger = configure(dirs['log_dir'], ["csv"])  # REMOVED: "tensorboard"
