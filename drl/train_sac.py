@@ -62,6 +62,12 @@ class SimpleSACMetricsCallback(BaseCallback):
         os.makedirs(log_dir, exist_ok=True)
         self.csv_path = os.path.join(log_dir, 'sac_training_metrics.csv')
         
+        # Track cumulative values for proper calculation
+        self.cumulative_collisions = 0
+        self.cumulative_deadlocks = 0
+        self.last_collision_count = 0
+        self.last_deadlock_count = 0
+        
         print(f"📊 Simple SAC metrics collection initialized:")
         print(f"   Collection interval: every {self.collection_interval} steps")
 
@@ -77,8 +83,6 @@ class SimpleSACMetricsCallback(BaseCallback):
             print(f"📊 Saved {len(self.metrics_log)} SAC metrics records")
         except Exception as e:
             print(f"⚠️ Save failed: {e}")
-            
-
 
     def _on_step(self) -> bool:
         """Simple SAC data collection every N steps"""
@@ -93,25 +97,84 @@ class SimpleSACMetricsCallback(BaseCallback):
             info = infos[0] if isinstance(infos[0], dict) else {}
             reward_value = float(self.locals.get('rewards', [0.0])[0])
             
-            # Collect basic metrics
+            # DEBUG: Log raw info data for troubleshooting
+            if self.num_timesteps % 500 == 0:  # Log every 500 steps
+                print(f"🔍 DEBUG: Raw SAC info keys at step {self.num_timesteps}: {list(info.keys())}")
+                if 'collision_count' in info:
+                    print(f"   🔍 Raw collision_count: {info['collision_count']} (type: {type(info['collision_count'])})")
+                if 'deadlocks_detected' in info:
+                    print(f"   🔍 Raw deadlocks_detected: {info['deadlocks_detected']} (type: {type(info['deadlocks_detected'])})")
+            
+            # FIXED: Properly extract and validate collision and deadlock data
+            # Get collision count with proper validation
+            collision_count = info.get('collision_count', 0)
+            if isinstance(collision_count, (int, float)) and collision_count >= 0:
+                # Calculate new collisions since last step
+                new_collisions = max(0, collision_count - self.last_collision_count)
+                self.cumulative_collisions += new_collisions
+                self.last_collision_count = collision_count
+                
+                # DEBUG: Log collision tracking
+                if new_collisions > 0:
+                    print(f"🚨 SAC COLLISION DETECTED: {new_collisions} new collisions (total: {self.cumulative_collisions})")
+            else:
+                collision_count = 0
+                new_collisions = 0
+                if self.num_timesteps % 500 == 0:  # Log every 500 steps
+                    print(f"⚠️ DEBUG: Invalid SAC collision_count: {collision_count} (type: {type(collision_count)})")
+            
+            # Get deadlock count with proper validation
+            deadlocks_detected = info.get('deadlocks_detected', 0)
+            if isinstance(deadlocks_detected, (int, float)) and deadlocks_detected >= 0:
+                # Calculate new deadlocks since last step
+                new_deadlocks = max(0, deadlocks_detected - self.last_deadlock_count)
+                self.cumulative_deadlocks += new_deadlocks
+                self.last_deadlock_count = deadlocks_detected
+                
+                # DEBUG: Log deadlock tracking
+                if new_deadlocks > 0:
+                    print(f"🚨 SAC DEADLOCK DETECTED: {new_deadlocks} new deadlocks (total: {self.cumulative_deadlocks})")
+            else:
+                deadlocks_detected = 0
+                new_deadlocks = 0
+                if self.num_timesteps % 500 == 0:  # Log every 500 steps
+                    print(f"⚠️ DEBUG: Invalid SAC deadlocks_detected: {deadlocks_detected} (type: {type(deadlocks_detected)})")
+            
+            # Get deadlock severity with validation
+            deadlock_severity = info.get('deadlock_severity', 0.0)
+            if not isinstance(deadlock_severity, (int, float)) or np.isnan(deadlock_severity):
+                deadlock_severity = 0.0
+                if self.num_timesteps % 500 == 0:  # Log every 500 steps
+                    print(f"⚠️ DEBUG: Invalid SAC deadlock_severity: {deadlock_severity} (type: {type(deadlock_severity)})")
+            
+            # Collect basic metrics with proper validation
             metrics = {
                 'timestep': int(self.num_timesteps),
                 'reward': reward_value,
                 'algorithm': 'SAC',
                 'throughput': float(info.get('throughput', 0.0)),
                 'avg_acceleration': float(info.get('avg_acceleration', 0.0)),
-                'collision_count': int(info.get('collision_count', 0)),
+                
+                # FIXED: Proper collision tracking
+                'collision_count': int(collision_count),  # Current episode collisions
+                'cumulative_collisions': int(self.cumulative_collisions),  # Total across all episodes
+                'new_collisions_this_step': int(new_collisions),  # New collisions this step
+                
+                # FIXED: Proper deadlock tracking
+                'deadlocks_detected': int(deadlocks_detected),  # Current episode deadlocks
+                'cumulative_deadlocks': int(self.cumulative_deadlocks),  # Total across all episodes
+                'new_deadlocks_this_step': int(new_deadlocks),  # New deadlocks this step
+                'deadlock_severity': float(deadlock_severity),  # Current severity level
+                
                 'total_controlled': int(info.get('total_controlled', 0)),
                 'vehicles_exited': int(info.get('vehicles_exited', 0)),
                 'vehicles_detected': int(info.get('vehicles_detected', 0)),
-                'deadlocks_detected': int(info.get('deadlocks_detected', 0)),
-                'deadlock_severity': float(info.get('deadlock_severity', 0.0)),
                 
-                # Core bidding parameters (4 parameters)
-                'bid_scale': float(info.get('bid_scale', 1.0)),
-                'eta_weight': float(info.get('eta_weight', 1.0)),
-                'platoon_bonus': float(info.get('platoon_bonus', 0.5)),
-                'junction_penalty': float(info.get('junction_penalty', 0.2)),
+                # Core bidding parameters (1 parameter - urgency_position_ratio only)
+                'urgency_position_ratio': float(info.get('urgency_position_ratio', 1.0)),
+                'eta_weight': float(info.get('eta_weight', 1.0)),  # Fixed at 1.0 (not trainable)
+                'platoon_bonus': float(info.get('platoon_bonus', 0.5)),  # Fixed at 0.5 (not trainable)
+                'junction_penalty': float(info.get('junction_penalty', 0.2)),  # Fixed at 0.5 (not trainable)
                 
                 # Control parameter (1 parameter)
                 'speed_diff_modifier': float(info.get('speed_diff_modifier', 0.0)),
@@ -119,9 +182,9 @@ class SimpleSACMetricsCallback(BaseCallback):
                 # Auction efficiency parameter (1 parameter)
                 'max_participants_per_auction': int(info.get('max_participants_per_auction', 6)),
                 
-                # Safety parameters (2 parameters)
+                # Safety parameters (1 parameter - ignore_vehicles_go only)
                 'ignore_vehicles_go': float(info.get('ignore_vehicles_go', 25.0)),
-                'ignore_vehicles_platoon_leader': float(info.get('ignore_vehicles_platoon_leader', 20.0)),
+                'ignore_vehicles_platoon_leader': float(info.get('ignore_vehicles_platoon_leader', 15.0)),  # Auto: GO - 10%
                 
                 # FIXED: Reward function parameters (not trainable)
                 'vehicle_exit_reward': float(info.get('vehicle_exit_reward', 10.0)),
@@ -135,6 +198,14 @@ class SimpleSACMetricsCallback(BaseCallback):
                 'collision_threshold': float(info.get('collision_threshold', 2.0))
             }
             
+            # Validate all numeric values
+            for key, value in metrics.items():
+                if isinstance(value, (int, float)) and (np.isnan(value) or np.isinf(value)):
+                    if key in ['collision_count', 'deadlocks_detected', 'new_collisions_this_step', 'new_deadlocks_this_step']:
+                        metrics[key] = 0  # Safety metrics should be 0, not NaN
+                    else:
+                        metrics[key] = 0.0  # Other metrics default to 0.0
+            
             self.metrics_log.append(metrics)
             
             # Save every 1000 records
@@ -144,15 +215,17 @@ class SimpleSACMetricsCallback(BaseCallback):
                 
         except Exception as e:
             print(f"⚠️ SAC Metrics error: {e}")
+            import traceback
+            traceback.print_exc()
     
         return True
-
-
 
     def _on_training_end(self):
         """Final save when SAC training ends"""
         self._save_metrics()
         print(f"✅ Final SAC metrics saved")
+        print(f"   📊 Total collisions tracked: {self.cumulative_collisions}")
+        print(f"   📊 Total deadlocks tracked: {self.cumulative_deadlocks}")
 
 # System resource monitoring functions removed - no longer needed
 
@@ -202,14 +275,34 @@ def main():
     try:
         print("🎯 Creating optimized SAC training environment...")
         env = AuctionGymEnv(sim_cfg={
-            'max_steps': 400,  # Shorter episodes for SAC (off-policy can handle this)
+            'max_steps': 400,  # Shorter episodes for SAC (off-policy can handle this better)
             'training_mode': True,  # Enable performance optimizations
+            # FIXED: New synchronized timing configuration for proper vehicle control
+            'fixed_delta_seconds': 0.1,  # 10 FPS simulation
+            'logic_update_interval_seconds': 1.0,  # 1s decision intervals (REDUCED from 2.0s)
+            'auction_interval': 4.0,  # 4s auction cycles (REDUCED from 6.0s)
+            'bidding_duration': 2.0,  # 2s bidding phase (REDUCED from 3.0s)
+            'deadlock_check_interval': 8.0,  # 8s system checks (REDUCED from 12.0s)
             # DISABLED: No mid-episode resets - clean episode termination for SAC DRL
             'deadlock_reset_enabled': False,  # Episodes terminate on deadlock
             'severe_deadlock_reset_enabled': False,  # Episodes terminate on severe deadlock
             'severe_deadlock_punishment': -300.0  # Punishment applied to final step only
         })
         print("✅ SAC Environment created successfully")
+        
+        # Show initial parameter values
+        initial_params = env.get_current_parameter_values()
+        if 'error' not in initial_params:
+            print(f"   Initial parameter values:")
+            for param_name in ['urgency_position_ratio', 'speed_diff_modifier', 'max_participants_per_auction', 'ignore_vehicles_go']:
+                if param_name in initial_params:
+                    print(f"     {param_name}: {initial_params[param_name]}")
+        else:
+            print(f"   Could not get initial parameter values: {initial_params['error']}")
+        
+        # Test parameter mapping to verify ranges
+        print("\n🔍 TESTING PARAMETER MAPPING RANGES:")
+        env.test_parameter_mapping(num_samples=100)
 
         # SIMPLIFIED: Robust compatibility wrapper without complex logic
         class SimpleCompatWrapper(gym.Wrapper):
@@ -236,17 +329,31 @@ def main():
                     
                     # Ensure obs is numpy array with correct shape
                     if not isinstance(obs, np.ndarray):
-                        obs = np.array(obs, dtype=np.float32)
+                        try:
+                            obs = np.array(obs, dtype=np.float32)
+                        except Exception as array_error:
+                            print(f"⚠️ Failed to convert obs to numpy array: {array_error}")
+                            obs = np.zeros(50, dtype=np.float32)
                     
-                    # Ensure correct dimensions
-                    if obs.shape[0] != 50:
-                        if obs.shape[0] < 50:
-                            # Pad with zeros
-                            padding = np.zeros(50 - obs.shape[0], dtype=np.float32)
-                            obs = np.concatenate([obs, padding])
-                        else:
-                            # Truncate
-                            obs = obs[:50]
+                    # Ensure correct dimensions with proper error handling
+                    try:
+                        if not hasattr(obs, 'shape'):
+                            print(f"⚠️ obs has no shape attribute, type: {type(obs)}")
+                            obs = np.zeros(50, dtype=np.float32)
+                        elif len(obs.shape) == 0:
+                            print(f"⚠️ obs has scalar shape, converting to array")
+                            obs = np.array([obs], dtype=np.float32)
+                        elif obs.shape[0] != 50:
+                            if obs.shape[0] < 50:
+                                # Pad with zeros
+                                padding = np.zeros(50 - obs.shape[0], dtype=np.float32)
+                                obs = np.concatenate([obs, padding])
+                            else:
+                                # Truncate
+                                obs = obs[:50]
+                    except Exception as shape_error:
+                        print(f"⚠️ Error handling obs shape: {shape_error}, obs type: {type(obs)}")
+                        obs = np.zeros(50, dtype=np.float32)
                     
                     return obs, info
                     
@@ -410,7 +517,7 @@ def main():
                 print(f"\n📈 SAC Training Summary:")
                 print(f"   Steps completed: {analyzer.metrics_df['timestep'].max():,}")
                 print(f"   Average throughput: {analyzer.metrics_df['throughput'].mean():.1f} vehicles/h")
-                print(f"   Final bid scale: {analyzer.metrics_df['bid_scale'].iloc[-1]:.3f}")
+                print(f"   Final urgency_position_ratio: {analyzer.metrics_df['urgency_position_ratio'].iloc[-1]:.3f}")
                 print(f"   Total data points: {len(analyzer.metrics_df)}")
             
         except Exception as analysis_error:

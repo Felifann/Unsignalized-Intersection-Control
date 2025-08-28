@@ -146,11 +146,18 @@ class SimulationMetricsManager:
         # IMPORTANT: Store Nash solver reference to get fresh deadlock count when needed
         self._nash_solver_ref = nash_solver
         
+        # FIXED: Reset collision baseline to match traffic generator reset
+        # This ensures collision penalties are calculated correctly for new episodes
+        initial_collision_count = 0
+        
+        # DEBUG: Log what we're resetting
+        print(f"🔍 Resetting collision baseline: prev_collision_count = {initial_collision_count}")
+        
         self.metrics = {
             'avg_acceleration': 0.0,
             'collision_count': 0,
             'prev_vehicles_exited': initial_vehicles_exited,  # Initialize with current baseline
-            'prev_collision_count': 0,
+            'prev_collision_count': initial_collision_count,  # FIXED: Start at 0 for new episode
             'prev_deadlock_count': 0,  # FIXED: Always start at 0 for new episode
             'episode_deadlock_baseline': None,  # Will be set on first deadlock check
             'current_deadlock_severity': 0.0,
@@ -207,12 +214,41 @@ class SimulationMetricsManager:
                 prev_collisions = self.metrics.get('prev_collision_count', 0)
                 new_collisions = current_collisions - prev_collisions
                 
+                # DEBUG: Log collision count details
+                if current_collisions > 0 or prev_collisions > 0:
+                    print(f"🔍 Collision Debug: current={current_collisions}, prev={prev_collisions}, new={new_collisions}")
+                
+                # SAFETY CHECK: Detect and fix suspicious collision counts
+                if current_collisions > 100:  # Suspiciously high collision count
+                    print(f"🚨 SAFETY CHECK: Suspiciously high collision count detected: {current_collisions}")
+                    print(f"   This suggests collision counter was not properly reset between episodes")
+                    
+                    # Try to reset the collision counter automatically
+                    if hasattr(scenario.traffic_generator, 'reset_collision_count'):
+                        old_count = scenario.traffic_generator.reset_collision_count()
+                        print(f"   ✅ Automatically reset collision count from {old_count} to 0")
+                        current_collisions = 0
+                        new_collisions = 0
+                    else:
+                        print(f"   ⚠️ Could not reset collision count automatically")
+                        # Force the count to be reasonable for this episode
+                        current_collisions = min(current_collisions, 10)  # Cap at 10 for this episode
+                        new_collisions = max(0, current_collisions - prev_collisions)
+                        print(f"   🔧 Capped collision count at {current_collisions} for this episode")
+                
+                # VALIDATION: Check for suspicious collision counts
+                if current_collisions > 1000:
+                    print(f"⚠️ WARNING: Suspiciously high collision count: {current_collisions}")
+                if new_collisions > 100:
+                    print(f"⚠️ WARNING: Suspiciously high new collisions: {new_collisions}")
+                
                 if new_collisions > 0:
-                    # Simple -50 per collision - clear negative reward
-                    collision_penalty = new_collisions * 50.0
+                    # Use unified config collision penalty value for consistency
+                    collision_penalty_value = self.unified_config.drl.collision_penalty if self.unified_config else 100.0
+                    collision_penalty = new_collisions * collision_penalty_value
                     reward -= collision_penalty
                     self.metrics['prev_collision_count'] = current_collisions
-                    print(f"💥 -{collision_penalty:.1f} for {new_collisions} collisions")
+                    print(f"💥 -{collision_penalty:.1f} for {new_collisions} collisions (penalty per collision: {collision_penalty_value})")
             
             # 3. SIMPLE efficiency reward - smooth traffic
             avg_accel = final_stats.get('average_absolute_acceleration', 0.0)
@@ -335,7 +371,7 @@ class SimulationMetricsManager:
                 'waiting_vehicles': int(control_stats.get('waiting_vehicles', 0)),
                 
                 # Training parameters - EXTENDED to include NEW reward and safety parameters
-                'bid_scale': float(bid_policy.bid_scale),
+                'urgency_position_ratio': float(bid_policy.urgency_position_ratio),
                 'eta_weight': float(bid_policy.eta_weight),
                 'speed_weight': float(bid_policy.speed_weight),
                 'congestion_sensitivity': float(bid_policy.congestion_sensitivity),

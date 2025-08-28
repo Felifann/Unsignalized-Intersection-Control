@@ -419,6 +419,15 @@ class DecentralizedAuctionEngine:
         """Update the maximum participants per auction limit"""
         self.max_participants_per_auction = max_participants
 
+    def get_current_config(self) -> Dict[str, Any]:
+        """Get current configuration for verification"""
+        return {
+            'max_participants_per_auction': self.max_participants_per_auction,
+            'max_go_agents': self.max_go_agents,
+            'auction_interval': self.auction_interval,
+            'communication_range': self.communication_range
+        }
+
     def set_auction_interval_from_config(self, auction_interval: float):
         """Set auction interval from unified config (unified with other system intervals)"""
         self.auction_interval = auction_interval

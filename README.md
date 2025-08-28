@@ -43,7 +43,7 @@ Methodology
 -----------
 - Auction-based prioritization: participants submit bids that reflect urgency or learned policy values. The decentralized engine ranks participants and couples bids with candidate actions.
 - Nash deadlock resolution: when multiple participants conflict, solve a small game to find stable strategies (go/wait combinations) that minimize deadlock risk while respecting bids and a configurable conflict time window.
-- Platoon-aware control: leaders and followers receive different TM parameters to keep formation (tighter following, different speed adjustments). If a platoon member is already in-transit, preserve continuity by protecting its 'go' action.
+- Platoon-aware control: leaders and followers receive the same TM parameters to maintain consistent formation behavior. If a platoon member is already in-transit, preserve continuity by protecting its 'go' action.
 - Acceleration filtering & metrics: record per-vehicle positive/negative/absolute acceleration using simulation timestamps; apply truncation and optional median filtering to reduce noise before averaging.
 
 Configuration & DRL integration

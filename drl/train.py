@@ -51,102 +51,263 @@ from drl.envs.auction_gym import AuctionGymEnv
 from drl.utils.analysis import TrainingAnalyzer
 
 class SimpleMetricsCallback(BaseCallback):
-    """Simplified callback for basic data collection"""
+    """Enhanced callback to log training metrics with action space parameter tracking and per-episode statistics"""
     
     def __init__(self, log_dir: str, verbose: int = 0):
         super().__init__(verbose)
         self.log_dir = log_dir
-        self.metrics_log = []
-        self.collection_interval = 100  # Collect every 100 steps
-        os.makedirs(log_dir, exist_ok=True)
-        self.csv_path = os.path.join(log_dir, 'training_metrics.csv')
         
-        print(f"📊 Simple metrics collection initialized:")
-        print(f"   Collection interval: every {self.collection_interval} steps")
+        # Create logs directory
+        os.makedirs(log_dir, exist_ok=True)
+        
+        # Episode-level tracking
+        self.episode_actions = []  # Store actions for current episode
+        self.episode_metrics = []  # Store metrics for current episode
+        self.episode_count = 0
+        self.episode_start_step = 0
+        
+        # CSV file paths
+        self.step_metrics_path = os.path.join(log_dir, 'step_metrics.csv')
+        self.episode_metrics_path = os.path.join(log_dir, 'episode_metrics.csv')
+        
+        # File handle management
+        self._last_write_timestamp = 0
+        self._write_interval = 10.0  # Write every 10 seconds at most
+        
+        # Register cleanup function
+        import atexit
+        atexit.register(self._cleanup_resources)
+        
+        print(f"📊 Enhanced Metrics Callback initialized:")
+        print(f"   Step metrics: {self.step_metrics_path}")
+        print(f"   Episode metrics: {self.episode_metrics_path}")
 
-    def _save_metrics(self):
-        """Simple save metrics to CSV"""
-        if not self.metrics_log:
+    def _on_step(self) -> bool:
+        """Log metrics every step and track episode boundaries"""
+        try:
+            # Get current info and actions
+            infos = self.locals.get('infos', [{}])
+            actions = self.locals.get('actions', [])
+            
+            if not infos or not actions:
+                return True
+            
+            info = infos[0] if isinstance(infos[0], dict) else {}
+            action = actions[0] if isinstance(actions[0], (np.ndarray, list)) else []
+            
+            # Check if episode ended (reset occurred)
+            if self._is_episode_reset():
+                self._finalize_episode()
+                self._start_new_episode()
+            
+            # Store action for current episode
+            if isinstance(action, (np.ndarray, list)) and len(action) == 4:
+                self.episode_actions.append(action)
+            
+            # Store step metrics
+            step_metrics = {
+                'timestep': self.num_timesteps,
+                'episode': self.episode_count,
+                'throughput': info.get('throughput', 0.0),
+                'avg_acceleration': info.get('avg_acceleration', 0.0),
+                'collision_count': info.get('collision_count', 0),
+                'total_controlled': info.get('total_controlled', 0),
+                'vehicles_exited': info.get('vehicles_exited', 0),
+                'urgency_position_ratio': info.get('urgency_position_ratio', 1.0),
+                'speed_diff_modifier': info.get('speed_diff_modifier', 0.0),
+                'max_participants_per_auction': info.get('max_participants_per_auction', 4),
+                'ignore_vehicles_go': info.get('ignore_vehicles_go', 50.0),
+                'deadlocks_detected': info.get('deadlocks_detected', 0),
+                'deadlock_severity': info.get('deadlock_severity', 0.0)
+            }
+            
+            # SAFETY CHECK: Detect suspiciously high collision counts
+            collision_count = step_metrics['collision_count']
+            if collision_count > 100:
+                print(f"🚨 SAFETY CHECK: Suspiciously high collision count in training: {collision_count}")
+                print(f"   This suggests collision counter was not properly reset between episodes")
+                print(f"   Training may be unstable due to massive negative rewards")
+                print(f"   Check if traffic_generator.reset_episode_state() is working properly")
+            
+            self.episode_metrics.append(step_metrics)
+            
+            # Save step metrics every 1000 steps
+            if self.num_timesteps % 1000 == 0:
+                self._save_step_metrics()
+                
+        except Exception as e:
+            print(f"⚠️ Metrics callback error: {e}")
+        
+        return True
+
+    def _is_episode_reset(self) -> bool:
+        """Check if episode reset occurred by looking for environment reset signals"""
+        # This is a simple heuristic - in practice, you might want to use
+        # more sophisticated episode boundary detection
+        return len(self.episode_actions) > 0 and len(self.episode_actions) > 200
+
+    def _start_new_episode(self):
+        """Start tracking a new episode"""
+        self.episode_count += 1
+        self.episode_start_step = self.num_timesteps
+        self.episode_actions = []
+        self.episode_metrics = []
+        print(f"🔄 Starting episode {self.episode_count} at step {self.episode_start_step}")
+
+    def _finalize_episode(self):
+        """Calculate and save episode-level statistics"""
+        if not self.episode_actions or not self.episode_metrics:
             return
         
         try:
-            import pandas as pd
-            df = pd.DataFrame(self.metrics_log)
-            df.to_csv(self.csv_path, index=False)
-            print(f"📊 Saved {len(self.metrics_log)} metrics records")
-        except Exception as e:
-            print(f"⚠️ Save failed: {e}")
-
-    def _on_step(self) -> bool:
-        """Simple data collection every N steps"""
-        if self.num_timesteps % self.collection_interval != 0:
-            return True
+            # Convert actions to numpy array for calculations
+            actions_array = np.array(self.episode_actions)
             
-        try:
-            infos = self.locals.get('infos', [])
-            if not infos:
-                return True
-                
-            info = infos[0] if isinstance(infos[0], dict) else {}
-            reward_value = float(self.locals.get('rewards', [0.0])[0])
+            # Calculate action space parameter statistics
+            action_means = np.mean(actions_array, axis=0)
+            action_vars = np.var(actions_array, axis=0)
+            action_stds = np.std(actions_array, axis=0)
             
-            # Collect basic metrics
-            metrics = {
-                'timestep': int(self.num_timesteps),
-                'reward': reward_value,
-                'throughput': float(info.get('throughput', 0.0)),
-                'avg_acceleration': float(info.get('avg_acceleration', 0.0)),
-                'collision_count': int(info.get('collision_count', 0)),
-                'total_controlled': int(info.get('total_controlled', 0)),
-                'vehicles_exited': int(info.get('vehicles_exited', 0)),
-                'vehicles_detected': int(info.get('vehicles_detected', 0)),
-                'deadlocks_detected': int(info.get('deadlocks_detected', 0)),
-                'deadlock_severity': float(info.get('deadlock_severity', 0.0)),
+            # Get episode-level metrics
+            episode_stats = self._calculate_episode_stats()
+            
+            # Create episode summary
+            episode_summary = {
+                'episode': self.episode_count,
+                'episode_start_step': self.episode_start_step,
+                'episode_end_step': self.num_timesteps,
+                'episode_length': len(self.episode_actions),
                 
-                # Core bidding parameters (4 parameters)
-                'bid_scale': float(info.get('bid_scale', 1.0)),
-                'eta_weight': float(info.get('eta_weight', 1.0)),
-                'platoon_bonus': float(info.get('platoon_bonus', 0.5)),
-                'junction_penalty': float(info.get('junction_penalty', 0.2)),
+                # Action space parameter statistics
+                'urgency_position_ratio_mean': float(action_means[0]),
+                'urgency_position_ratio_var': float(action_vars[0]),
+                'urgency_position_ratio_std': float(action_stds[0]),
                 
-                # Control parameter (1 parameter)
-                'speed_diff_modifier': float(info.get('speed_diff_modifier', 0.0)),
+                'speed_diff_modifier_mean': float(action_means[1]),
+                'speed_diff_modifier_var': float(action_vars[1]),
+                'speed_diff_modifier_std': float(action_stds[1]),
                 
-                # Auction efficiency parameter (1 parameter)
-                'max_participants_per_auction': int(info.get('max_participants_per_auction', 6)),
+                'max_participants_mean': float(action_means[2]),
+                'max_participants_var': float(action_vars[2]),
+                'max_participants_std': float(action_stds[2]),
                 
-                # Safety parameters (2 parameters)
-                'ignore_vehicles_go': float(info.get('ignore_vehicles_go', 50.0)),
-                'ignore_vehicles_platoon_leader': float(info.get('ignore_vehicles_platoon_leader', 50.0)),
+                'ignore_vehicles_go_mean': float(action_means[3]),
+                'ignore_vehicles_go_var': float(action_vars[3]),
+                'ignore_vehicles_go_std': float(action_stds[3]),
                 
-                # FIXED: Reward function parameters (not trainable)
-                'vehicle_exit_reward': float(info.get('vehicle_exit_reward', 10.0)),
-                'collision_penalty': float(info.get('collision_penalty', 100.0)),
-                'deadlock_penalty': float(info.get('deadlock_penalty', 800.0)),
-                'throughput_bonus': float(info.get('throughput_bonus', 0.01)),
-                
-                # FIXED: Conflict detection parameters (not trainable)
-                'conflict_time_window': float(info.get('conflict_time_window', 2.5)),
-                'min_safe_distance': float(info.get('min_safe_distance', 3.0)),
-                'collision_threshold': float(info.get('collision_threshold', 2.0))
+                # Episode performance metrics
+                'total_vehicles_exited': episode_stats['total_exits'],
+                'total_collisions': episode_stats['total_collisions'],
+                'total_deadlocks': episode_stats['total_deadlocks'],
+                'max_deadlock_severity': episode_stats['max_deadlock_severity'],
+                'avg_throughput': episode_stats['avg_throughput'],
+                'avg_acceleration': episode_stats['avg_acceleration'],
+                'total_controlled_vehicles': episode_stats['total_controlled']
             }
             
-            self.metrics_log.append(metrics)
+            # Save episode summary
+            self._save_episode_metrics(episode_summary)
             
-            # Save every 1000 records
-            if len(self.metrics_log) >= 1000:
-                self._save_metrics()
-                self.metrics_log = []
-                
+            # Print episode summary
+            print(f"📊 Episode {self.episode_count} Summary:")
+            print(f"   Length: {episode_summary['episode_length']} steps")
+            print(f"   Vehicles exited: {episode_summary['total_vehicles_exited']}")
+            print(f"   Collisions: {episode_summary['total_collisions']}")
+            print(f"   Deadlocks: {episode_summary['total_deadlocks']}")
+            print(f"   Avg throughput: {episode_summary['avg_throughput']:.1f} vehicles/h")
+            print(f"   Action means: [{action_means[0]:.3f}, {action_means[1]:.1f}, {action_means[2]:.1f}, {action_means[3]:.1f}]")
+            
         except Exception as e:
-            print(f"⚠️ Metrics error: {e}")
-    
-        return True
+            print(f"⚠️ Episode finalization error: {e}")
+
+    def _calculate_episode_stats(self) -> dict:
+        """Calculate episode-level statistics from step metrics"""
+        if not self.episode_metrics:
+            return {
+                'total_exits': 0, 'total_collisions': 0, 'total_deadlocks': 0,
+                'max_deadlock_severity': 0.0, 'avg_throughput': 0.0,
+                'avg_acceleration': 0.0, 'total_controlled': 0
+            }
+        
+        # Calculate cumulative statistics
+        total_exits = max(0, self.episode_metrics[-1].get('vehicles_exited', 0) - 
+                         self.episode_metrics[0].get('vehicles_exited', 0))
+        
+        total_collisions = max(0, self.episode_metrics[-1].get('collision_count', 0) - 
+                              self.episode_metrics[0].get('collision_count', 0))
+        
+        total_deadlocks = max(0, self.episode_metrics[-1].get('deadlocks_detected', 0) - 
+                             self.episode_metrics[0].get('deadlocks_detected', 0))
+        
+        # Calculate averages
+        throughputs = [m.get('throughput', 0.0) for m in self.episode_metrics]
+        accelerations = [m.get('avg_acceleration', 0.0) for m in self.episode_metrics]
+        controlled = [m.get('total_controlled', 0) for m in self.episode_metrics]
+        
+        # Get max deadlock severity
+        max_severity = max([m.get('deadlock_severity', 0.0) for m in self.episode_metrics])
+        
+        return {
+            'total_exits': total_exits,
+            'total_collisions': total_collisions,
+            'total_deadlocks': total_deadlocks,
+            'max_deadlock_severity': max_severity,
+            'avg_throughput': np.mean(throughputs) if throughputs else 0.0,
+            'avg_acceleration': np.mean(accelerations) if accelerations else 0.0,
+            'total_controlled': max(controlled) if controlled else 0
+        }
+
+    def _save_step_metrics(self):
+        """Save step-level metrics to CSV"""
+        if not self.episode_metrics:
+            return
+            
+        current_time = time.time()
+        if current_time - self._last_write_timestamp < self._write_interval:
+            return
+            
+        try:
+            df = pd.DataFrame(self.episode_metrics)
+            df.to_csv(self.step_metrics_path, index=False)
+            self._last_write_timestamp = current_time
+            print(f"📊 Step metrics saved: {len(self.episode_metrics)} records")
+        except Exception as e:
+            print(f"⚠️ Step metrics save failed: {e}")
+
+    def _save_episode_metrics(self, episode_summary: dict):
+        """Save episode-level metrics to CSV"""
+        try:
+            # Load existing data or create new file
+            csv_path = self.episode_metrics_path
+            if os.path.exists(csv_path):
+                existing_df = pd.read_csv(csv_path)
+                new_df = pd.concat([existing_df, pd.DataFrame([episode_summary])], ignore_index=True)
+            else:
+                new_df = pd.DataFrame([episode_summary])
+            
+            new_df.to_csv(csv_path, index=False)
+            print(f"📊 Episode {episode_summary['episode']} metrics saved")
+            
+        except Exception as e:
+            print(f"⚠️ Episode metrics save failed: {e}")
+
+    def _cleanup_resources(self):
+        """Clean up resources on exit"""
+        try:
+            # Finalize current episode if training ends
+            if self.episode_actions:
+                self._finalize_episode()
+            
+            # Save final step metrics
+            self._save_step_metrics()
+            
+            print("🧹 Metrics callback cleanup completed")
+        except Exception as e:
+            print(f"⚠️ Cleanup error: {e}")
 
     def _on_training_end(self):
-        """Final save when training ends"""
-        self._save_metrics()
-        print(f"✅ Final metrics saved")
+        """Called when training ends"""
+        self._cleanup_resources()
 
 # System resource monitoring functions removed - no longer needed
 
@@ -169,14 +330,34 @@ def main():
     print("🚀 Starting DRL Training for Traffic Intersection Control")
     print("=" * 70)
     
-    # Create directories
-    dirs = create_directories()
+    # Parse command line arguments for multi-instance support
+    import argparse
+    parser = argparse.ArgumentParser(description='DRL Training with multi-CARLA instance support')
+    parser.add_argument('--carla-port', type=int, default=2000, help='CARLA server port (default: 2000)')
+    parser.add_argument('--carla-host', type=str, default='localhost', help='CARLA server host (default: localhost)')
+    parser.add_argument('--instance-id', type=int, default=0, help='CARLA instance ID for logging (default: 0)')
+    parser.add_argument('--total-timesteps', type=int, default=5000, help='Total training timesteps (default: 5000)')
+    
+    args = parser.parse_args()
+    
+    # Create directories with instance-specific naming
+    instance_suffix = f"_instance_{args.instance_id}" if args.instance_id > 0 else ""
+    dirs = {
+        'log_dir': f"drl/logs{instance_suffix}",
+        'checkpoint_dir': f"drl/checkpoints{instance_suffix}", 
+        'results_dir': f"drl/results{instance_suffix}",
+        'plots_dir': f"drl/plots{instance_suffix}"
+    }
+    
+    for name, path in dirs.items():
+        os.makedirs(path, exist_ok=True)
+        print(f"📁 {name}: {path}")
     
     # DRL parameters
     config = {
-        'total_timesteps': 5000,
+        'total_timesteps': args.total_timesteps,
         'learning_rate': 3e-4,
-        'n_steps': 512,
+        'n_steps': 150,
         'batch_size': 64,
         'n_epochs': 4,
         'gamma': 0.99,
@@ -192,16 +373,47 @@ def main():
     model = None
     
     try:
-        print("🎯 Creating optimized training environment...")
+        print(f"🎯 Creating optimized training environment for CARLA instance {args.instance_id}...")
+        print(f"   🌐 CARLA Server: {args.carla_host}:{args.carla_port}")
+        
         env = AuctionGymEnv(sim_cfg={
-            'max_steps': 256,  # OPTIMAL: Aligned with n_steps=512 for 2 episodes per update
+            'max_steps': 128,  # OPTIMAL: Aligned with n_steps=512 for 2 episodes per update
             'training_mode': True,  # Enable performance optimizations
-            # DISABLED: No mid-episode resets - clean episode termination for DRL
+            # Multi-instance CARLA configuration
+            'carla_port': args.carla_port,
+            'carla_host': args.carla_host,
+            'carla_instance_id': args.instance_id,
+            'fixed_delta_seconds': 0.1,  # 10 FPS simulation
+            'logic_update_interval_seconds': 1.0,  # 1s decision intervals (REDUCED from 2.0s)
+            'auction_interval': 4.0,  # 4s auction cycles (REDUCED from 6.0s)
+            'bidding_duration': 2.0,  # 2s bidding phase (REDUCED from 3.0s)
+            'deadlock_check_interval': 8.0,  # 8s system checks (REDUCED from 12.0s)
             'deadlock_reset_enabled': False,  # Episodes terminate on deadlock
             'severe_deadlock_reset_enabled': False,  # Episodes terminate on severe deadlock
             'severe_deadlock_punishment': -200.0  # Punishment applied to final step only
         })
         print("✅ Environment created successfully")
+
+        # Show action space configuration for verification
+        print("\n🔍 VERIFYING ACTION SPACE CONFIGURATION:")
+        action_space_config = env.get_current_action_space_config()
+        print(f"   Action space dimensions: {action_space_config['action_space_dimensions']}")
+        print(f"   Action space shape: {action_space_config['action_space_shape']}")
+        print(f"   Parameter mappings: {len(action_space_config['parameter_mappings'])} parameters")
+        
+        # Show initial parameter values
+        initial_params = env.get_current_parameter_values()
+        if 'error' not in initial_params:
+            print(f"   Initial parameter values:")
+            for param_name in ['urgency_position_ratio', 'speed_diff_modifier', 'max_participants_per_auction', 'ignore_vehicles_go']:
+                if param_name in initial_params:
+                    print(f"     {param_name}: {initial_params[param_name]}")
+        else:
+            print(f"   Could not get initial parameter values: {initial_params['error']}")
+        
+        # Test parameter mapping to verify ranges
+        print("\n🔍 TESTING PARAMETER MAPPING RANGES:")
+        env.test_parameter_mapping(num_samples=100)
 
         # SIMPLIFIED: Robust compatibility wrapper without complex logic
         class SimpleCompatWrapper(gym.Wrapper):
@@ -228,17 +440,31 @@ def main():
                     
                     # Ensure obs is numpy array with correct shape
                     if not isinstance(obs, np.ndarray):
-                        obs = np.array(obs, dtype=np.float32)
+                        try:
+                            obs = np.array(obs, dtype=np.float32)
+                        except Exception as array_error:
+                            print(f"⚠️ Failed to convert obs to numpy array: {array_error}")
+                            obs = np.zeros(50, dtype=np.float32)
                     
-                    # Ensure correct dimensions
-                    if obs.shape[0] != 50:
-                        if obs.shape[0] < 50:
-                            # Pad with zeros
-                            padding = np.zeros(50 - obs.shape[0], dtype=np.float32)
-                            obs = np.concatenate([obs, padding])
-                        else:
-                            # Truncate
-                            obs = obs[:50]
+                    # Ensure correct dimensions with proper error handling
+                    try:
+                        if not hasattr(obs, 'shape'):
+                            print(f"⚠️ obs has no shape attribute, type: {type(obs)}")
+                            obs = np.zeros(50, dtype=np.float32)
+                        elif len(obs.shape) == 0:
+                            print(f"⚠️ obs has scalar shape, converting to array")
+                            obs = np.array([obs], dtype=np.float32)
+                        elif obs.shape[0] != 50:
+                            if obs.shape[0] < 50:
+                                # Pad with zeros
+                                padding = np.zeros(50 - obs.shape[0], dtype=np.float32)
+                                obs = np.concatenate([obs, padding])
+                            else:
+                                # Truncate
+                                obs = obs[:50]
+                    except Exception as shape_error:
+                        print(f"⚠️ Error handling obs shape: {shape_error}, obs type: {type(obs)}")
+                        obs = np.zeros(50, dtype=np.float32)
                     
                     return obs, info
                     
@@ -379,29 +605,34 @@ def main():
         print("=" * 70)
         
         try:
-            # Create analyzer and generate plots
-            analyzer = TrainingAnalyzer(dirs['results_dir'], dirs['plots_dir'])
-            analyzer.generate_all_plots()
-            analyzer.generate_report()
-            analyzer.save_summary_json()
+            # Import and use the new plotting utility
+            from drl.utils.plot_generator import plot_training_metrics, generate_summary_report
+            
+            print("🎨 Generating training plots using new plotting utility...")
+            plot_training_metrics(dirs['results_dir'], dirs['plots_dir'], save_plots=True)
+            generate_summary_report(dirs['results_dir'], dirs['plots_dir'])
             
             print(f"\n✅ Analysis complete! Check these locations:")
             print(f"   📊 Plots: {dirs['plots_dir']}")
-            print(f"   📋 Report: {os.path.join(dirs['plots_dir'], 'training_report.txt')}")
-            print(f"   📈 Metrics: {os.path.join(dirs['results_dir'], 'training_metrics.csv')}")
+            print(f"   📋 Summary: {os.path.join(dirs['plots_dir'], 'training_summary.txt')}")
+            print(f"   📈 Metrics: {os.path.join(dirs['results_dir'], 'episode_metrics.csv')}")
             
-            # Display summary statistics if available
-            if analyzer.metrics_df is not None and len(analyzer.metrics_df) > 0:
-                print(f"\n📈 Training Summary:")
-                print(f"   Steps completed: {analyzer.metrics_df['timestep'].max():,}")
-                print(f"   Average throughput: {analyzer.metrics_df['throughput'].mean():.1f} vehicles/h")
-                print(f"   Final bid scale: {analyzer.metrics_df['bid_scale'].iloc[-1]:.3f}")
-                print(f"   Total data points: {len(analyzer.metrics_df)}")
-            
+        except ImportError:
+            print("⚠️ New plotting utility not available, using legacy analysis...")
+            try:
+                # Fallback to legacy analysis
+                analyzer = TrainingAnalyzer(dirs['results_dir'], dirs['plots_dir'])
+                analyzer.generate_all_plots()
+                analyzer.generate_report()
+                analyzer.save_summary_json()
+                
+                print(f"\n✅ Legacy analysis completed. Check {dirs['plots_dir']} for plots and reports")
+            except Exception as legacy_error:
+                print(f"❌ Legacy analysis also failed: {legacy_error}")
         except Exception as analysis_error:
             print(f"❌ Analysis failed: {analysis_error}")
             print(f"   You can still run analysis manually:")
-            print(f"   python -c \"from drl.utils.analysis import quick_analysis; quick_analysis('{dirs['results_dir']}', '{dirs['plots_dir']}')\"")
+            print(f"   python -m drl.utils.plot_generator --results-dir {dirs['results_dir']} --plots-dir {dirs['plots_dir']}")
         
         print(f"\n🏁 Training session complete!")
 

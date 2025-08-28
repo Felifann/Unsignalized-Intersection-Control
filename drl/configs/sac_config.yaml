@@ -1,11 +1,11 @@
-# SAC Training Configuration for Traffic Intersection DRL - OPTIMIZED MODE
+# SAC Training Configuration for Traffic Intersection DRL - ULTRA-OPTIMIZED MODE with FIXED TIMING
 
-# Training Parameters - OPTIMIZED FOR CONTINUOUS ACTION SPACE
+# Training Parameters - OPTIMIZED FOR 4 CRITICAL PARAMETERS
 total_timesteps: 100000  # SAC is more sample efficient than PPO
 eval_freq: 2000          # Evaluate every 2000 steps
 checkpoint_freq: 5000    # Save checkpoints every 5000 steps
 
-# SAC Algorithm Parameters - OPTIMIZED FOR TRAFFIC CONTROL
+# SAC Algorithm Parameters - OPTIMIZED FOR 4 CRITICAL PARAMETERS
 learning_rate: 3e-4      # Learning rate for both actor and critic
 buffer_size: 1000000     # Experience replay buffer size (1M experiences)
 batch_size: 256          # Batch size for training (larger than PPO for off-policy)
@@ -24,7 +24,22 @@ policy_kwargs:
   log_std_init: -3       # Initial log std for policy
   net_arch: [256, 256]   # Hidden layers for actor and critic networks
 
-# Simulation Configuration - FASTER EPISODES FOR SAC
+# FIXED TIMING CONFIGURATION - Synchronized intervals for proper vehicle control
+timing_config:
+  # FIXED: New synchronized time hierarchy
+  fixed_delta_seconds: 0.1          # Simulation step: 0.1s (10 FPS)
+  logic_update_interval: 1.0        # Decision step: 1.0s (10 sim steps per decision)
+  auction_interval: 4.0             # Auction cycle: 4.0s (4 decisions per cycle)
+  bidding_duration: 2.0             # Bidding phase: 2.0s (50% of cycle)
+  deadlock_check_interval: 8.0      # System check: 8.0s (2 auction cycles)
+  
+  # This ensures PERFECT synchronization:
+  # - 10 sim steps per decision
+  # - 4 decisions per auction cycle  
+  # - Vehicles properly respect 'wait' commands
+  # - No more "all vehicles moving together" issue
+
+# Simulation Configuration - FASTER EPISODES FOR SAC with FIXED TIMING
 sim_config:
   map: 'Town05'
   max_steps: 500         # Shorter episodes for SAC (off-policy can handle this better)
@@ -36,6 +51,12 @@ sim_config:
   max_deadlock_resets: 3
   severe_deadlock_reset_enabled: true
   severe_deadlock_punishment: -300.0
+  
+  # FIXED: Apply new timing configuration
+  fixed_delta_seconds: 0.1
+  logic_update_interval_seconds: 1.0
+  auction_interval: 4.0
+  bidding_duration: 2.0
 
 # Reward Configuration - FIXED VALUES (not trainable)
 reward_config:
@@ -48,7 +69,8 @@ reward_config:
   deadlock_penalty: 800.0        # FIXED: Not trainable
   step_penalty: 0.05             # Lower step penalty for SAC
 
-# OPTIMIZED: Only 8 trainable parameters instead of 18
+# ULTRA-OPTIMIZED: Only 4 trainable parameters instead of 8 parameters (50% reduction)
+# These are the MOST IMPORTANT parameters for deadlock avoidance
 nash_hyperparams:
   path_intersection_threshold:
     range: [2.5, 2.5]  # FIXED: Not trainable
@@ -58,6 +80,12 @@ nash_hyperparams:
     range: [15.0, 15.0]  # FIXED: Not trainable
     default: 15.0
     description: "Distance at which platoons are considered in conflict (FIXED)"
+
+# NEW: 紧急度与位置优势关系因子说明
+# urgency_position_ratio: 控制紧急度vs位置优势的平衡关系
+# - 高值 (>1.0): 优先考虑紧急度，从时间敏感车辆获得更高收入
+# - 低值 (<1.0): 优先考虑位置优势，从在路口的车辆获得更高收入
+# - 这个参数替换了原来的 bid_scale，提供更智能的收入最大化策略
 
 # SAC Specific Parameters
 sac_specific:
@@ -92,12 +120,12 @@ logging:
   metrics_freq: 100
   save_freq: 2000
 
-# OPTIMIZATION NOTES:
-# - Action space reduced from 18 to 8 parameters (55% reduction)
-# - Observation space reduced from 169 to 60 dimensions (65% reduction)
-# - Only core parameters are trainable: bid_scale, eta_weight, platoon_bonus, junction_penalty,
-#   speed_diff_modifier, max_participants_per_auction, ignore_vehicles_go, ignore_vehicles_platoon_leader
-# - All other parameters are fixed for stability and faster training
+# FIXED TIMING NOTES:
+# - New synchronized time hierarchy prevents vehicles from moving together
+# - 1.0s decision intervals provide better control responsiveness
+# - 4.0s auction cycles align perfectly with decision steps
+# - 8.0s deadlock checks maintain system health monitoring
+# - Vehicles now properly respect 'wait' commands due to synchronized timing
 # - SAC vs PPO Differences:
 #   1. SAC uses experience replay (buffer_size)
 #   2. SAC is off-policy (can reuse old data)

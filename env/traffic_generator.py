@@ -404,6 +404,35 @@ class TrafficGenerator:
         if hasattr(self, 'collision_status'):
             self.collision_status[vehicle_id] = False
 
+    def reset_episode_state(self):
+        """Reset episode-specific state for new episode - CRITICAL FIX for DRL training"""
+        print("🔄 Traffic generator episode state reset")
+        
+        # Reset collision counter to 0 for new episode
+        self.collision_count = 0
+        print(f"   ✅ Collision count reset: {self.collision_count}")
+        
+        # Clear collision incident history for new episode
+        self.collision_incidents = []
+        print(f"   ✅ Collision incidents cleared: {len(self.collision_incidents)}")
+        
+        # Reset per-vehicle collision status
+        self.collision_status = {}
+        print(f"   ✅ Per-vehicle collision status reset")
+        
+        # Clear dedupe structures for fresh episode
+        self._recent_collision_keys = {}
+        print(f"   ✅ Collision dedupe structures cleared")
+        
+        print("🔄 Traffic generator episode state reset completed")
+
+    def reset_collision_count(self):
+        """Reset collision count to 0 - emergency fix method"""
+        old_count = self.collision_count
+        self.collision_count = 0
+        print(f"🚨 EMERGENCY: Collision count reset from {old_count} to {self.collision_count}")
+        return old_count
+
     def get_collision_status(self, vehicle_id):
         """获取车辆是否发生碰撞"""
         if hasattr(self, 'collision_status'):

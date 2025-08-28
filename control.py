@@ -387,7 +387,8 @@ class TrafficController:
         
         # 原有的fallback逻辑
         if action == 'wait':
-            if is_platoon_member and not is_leader:
+            if is_platoon_member:
+                # Same parameters for both leader and follower
                 return {
                     'speed_diff': -75.0,
                     'follow_distance': 1.0,
@@ -404,21 +405,14 @@ class TrafficController:
                     'ignore_vehicles': 0.0
                 }
         elif action == 'go':
-            if is_platoon_member and not is_leader:
+            if is_platoon_member:
+                # Same parameters for both leader and follower
                 return {
                     'speed_diff': -45.0,
                     'follow_distance': 0.8,
                     'ignore_lights': 100.0,
                     'ignore_signs': 100.0,
-                    'ignore_vehicles': 25.0  # Restored to reasonable range
-                }
-            elif is_platoon_member and is_leader:
-                return {
-                    'speed_diff': -50.0,
-                    'follow_distance': 1.5,
-                    'ignore_lights': 100.0,
-                    'ignore_signs': 100.0,
-                    'ignore_vehicles': 20.0  # Restored to reasonable range
+                    'ignore_vehicles': 25.0
                 }
             else:
                 return {

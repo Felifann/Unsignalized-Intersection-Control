@@ -85,6 +85,9 @@ class SimulationEnv:
         self.severe_deadlock_punishment = self.unified_config.system.severe_deadlock_punishment
         self.severe_deadlock_reset_count = 0
         
+        # Debug options for deadlock detection
+        self._debug_deadlock_cache = False  # Set to True to enable cache debugging
+        
         # Initialize simulation components
         self._init_simulation()
         
@@ -196,7 +199,7 @@ class SimulationEnv:
             # Phase 6: Get and validate initial observation
             obs = self._get_validated_observation()
             
-            print(f"✅ Reset completed successfully with {obs.shape[0]}-dim observation")
+            print(f"✅ Reset completed successfully with {getattr(obs, 'shape', [0])[0] if hasattr(obs, 'shape') and len(obs.shape) > 0 else 'unknown'}-dim observation")
             return obs
             
         except Exception as e:
@@ -223,8 +226,23 @@ class SimulationEnv:
             # Increment action counter
             self.current_action += 1
             
-            # Update trainable parameters
-            self._update_policy_parameters(action_params)
+            # FIXED: Only update trainable parameters at episode boundaries (during reset), not on every step
+            # This allows the agent to explore the consequences of its parameter choices throughout the episode
+            if not hasattr(self, '_episode_params_updated') or not self._episode_params_updated:
+                print(f"🔄 NEW EPISODE: Updating 4 trainable parameters")
+                self._update_policy_parameters(action_params)
+                self._episode_params_updated = True
+                print(f"✅ All 4 trainable parameters successfully updated for new episode")
+                print(f"🔒 Parameters will remain constant for this episode (until next reset)")
+            else:
+                # Parameters already updated for this episode - use cached values
+                if hasattr(self, '_verbose_parameter_logging') and self._verbose_parameter_logging:
+                    print(f"🔒 Using cached parameters for step {self.current_action} (episode {self.current_action // self.max_actions + 1})")
+                
+                # IMPORTANT: Apply the cached episode parameters to ensure consistency
+                # This ensures the same parameters are used throughout the episode
+                cached_params = self.get_current_episode_action_params()
+                self._apply_cached_parameters(cached_params)
             
             # OPTIMIZED: Don't reconnect bid_policy every step - it's the same object
             # self.traffic_controller.set_bid_policy(self.bid_policy)  # REMOVED: Unnecessary
@@ -267,16 +285,16 @@ class SimulationEnv:
                         break  # Terminate episode cleanly
                     
                     # Check for regular deadlock - terminate episode
-                    deadlock_detected = self._check_deadlock()
+                    deadlock_detected = self._get_cached_deadlock_status()
                     if deadlock_detected:
                         print(f"🚨 Deadlock detected at step {self.current_step} - TERMINATING EPISODE")
                         break  # Terminate episode cleanly
                     
-                    # Check for collisions - terminate episode 
+                    # Check for collisions - count for reward but don't terminate episode
                     collision_detected = self._check_collision()
                     if collision_detected:
-                        print(f"💥 Collision detected at step {self.current_step} - TERMINATING EPISODE")
-                        break  # Terminate episode cleanly
+                        print(f"💥 Collision detected at step {self.current_step} - counting for reward (episode continues)")
+                        # Don't break - let episode continue for collision learning
             
             # Calculate reward using metrics manager with action tracking
             reward = self.metrics_manager.calculate_reward(
@@ -295,10 +313,9 @@ class SimulationEnv:
             obs = self._get_observation_cached()
             
             # SIMPLIFIED: Check episode termination based on ACTIONS, not simulation steps
-            # Terminate on any deadlock or collision - no mid-episode resets
+            # Terminate on deadlocks but NOT collisions - collisions only affect reward
             done = (self.current_action >= self.max_actions or 
-                   self._check_collision() or 
-                   self._check_deadlock() or
+                   self._get_cached_deadlock_status() or
                    severe_deadlock_occurred)
             
             # Generate info using metrics manager
@@ -323,14 +340,13 @@ class SimulationEnv:
                     'steps_per_action': self.steps_per_action
                 },
                 'termination_info': {
-                    'deadlock_detected': self._check_deadlock(),
+                    'deadlock_detected': self._get_cached_deadlock_status(),
                     'collision_detected': self._check_collision(),
                     'severe_deadlock_detected': severe_deadlock_occurred,
                     'max_actions_reached': self.current_action >= self.max_actions,
                     'termination_reason': 'max_actions' if self.current_action >= self.max_actions else
                                         'severe_deadlock' if severe_deadlock_occurred else
-                                        'deadlock' if self._check_deadlock() else
-                                        'collision' if self._check_collision() else 'none'
+                                        'deadlock' if self._get_cached_deadlock_status() else 'none'
                 }
             })
             
@@ -346,74 +362,174 @@ class SimulationEnv:
                    {'error': str(e), 'using_real_data': False})
 
     def _update_policy_parameters(self, action_params: Dict):
-        """Update ONLY the 8 trainable parameters from the action space"""
-        # FIXED: Only update parameters that are actually in the 8-dimensional action space
+        """Update the 4 trainable parameters from the action space"""
+        # Update ONLY the 4 trainable parameters - others remain at their current values
         
-        # 1. Core bidding parameters (4 parameters)
-        if 'bid_scale' in action_params:
-            self.bid_policy.bid_scale = action_params['bid_scale']
-        if 'eta_weight' in action_params:
-            self.bid_policy.eta_weight = action_params['eta_weight']
-        if 'platoon_bonus' in action_params:
-            self.bid_policy.platoon_bonus = action_params['platoon_bonus']
-        if 'junction_penalty' in action_params:
-            self.bid_policy.junction_penalty = action_params['junction_penalty']
+        # Validate that we have exactly 4 parameters
+        expected_params = {'urgency_position_ratio', 'speed_diff_modifier', 'max_participants_per_auction', 'ignore_vehicles_go'}
+        received_params = set(action_params.keys())
+        
+        if received_params != expected_params:
+            missing = expected_params - received_params
+            extra = received_params - expected_params
+            print(f"⚠️ PARAMETER MISMATCH: Missing {missing}, Extra {extra}")
+            print(f"   Expected: {sorted(expected_params)}")
+            print(f"   Received: {sorted(received_params)}")
+        
+        # Store the action parameters for this episode so they can be reused
+        self._current_episode_action_params = action_params.copy()
+        
+        # Track which parameters actually changed
+        changed_params = []
+        
+        # 1. NEW: 紧急度与位置优势关系因子 (1 parameter - 替换 bid_scale)
+        if 'urgency_position_ratio' in action_params:
+            new_value = action_params['urgency_position_ratio']
+            old_value = self.bid_policy.urgency_position_ratio
+            if abs(new_value - old_value) > 1e-6:  # Only update if actually different
+                self.bid_policy.urgency_position_ratio = new_value
+                changed_params.append(f"urgency_position_ratio: {old_value:.3f} → {new_value:.3f}")
         
         # 2. Control parameter (1 parameter)
         if 'speed_diff_modifier' in action_params:
-            self.bid_policy.speed_diff_modifier = action_params['speed_diff_modifier']
+            new_value = action_params['speed_diff_modifier']
+            old_value = self.bid_policy.speed_diff_modifier
+            if abs(new_value - old_value) > 1e-6:  # Only update if actually different
+                self.bid_policy.speed_diff_modifier = new_value
+                changed_params.append(f"speed_diff_modifier: {old_value:.1f} → {new_value:.1f}")
         
         # 3. Auction efficiency parameter (1 parameter)
         if 'max_participants_per_auction' in action_params:
-            self.auction_engine.update_max_participants_per_auction(
-                action_params['max_participants_per_auction']
-            )
+            new_value = action_params['max_participants_per_auction']
+            old_value = getattr(self.auction_engine, 'max_participants_per_auction', 'unknown')
+            if new_value != old_value:  # Only update if actually different
+                self.auction_engine.update_max_participants_per_auction(new_value)
+                changed_params.append(f"max_participants_per_auction: {old_value} → {new_value}")
         
-        # 4. Safety parameters (2 parameters)
+        # 4. Safety parameters (1 parameter - ignore_vehicles_go only)
         if 'ignore_vehicles_go' in action_params:
-            self.bid_policy.ignore_vehicles_go = action_params['ignore_vehicles_go']
-        if 'ignore_vehicles_platoon_leader' in action_params:
-            self.bid_policy.ignore_vehicles_platoon_leader = action_params['ignore_vehicles_platoon_leader']
+            new_value = action_params['ignore_vehicles_go']
+            old_value = self.bid_policy.ignore_vehicles_go
+            if abs(new_value - old_value) > 1e-6:  # Only update if actually different
+                self.bid_policy.ignore_vehicles_go = new_value
+                # ignore_vehicles_platoon_leader is automatically 10 less than ignore_vehicles_go
+                self.bid_policy.ignore_vehicles_platoon_leader = max(0.0, new_value - 10.0)
+                changed_params.append(f"ignore_vehicles_go: {old_value:.1f}% → {new_value:.1f}%")
+                changed_params.append(f"ignore_vehicles_platoon_leader: auto-calculated → {self.bid_policy.ignore_vehicles_platoon_leader:.1f}%")
         
-        # FIXED: Set FIXED values for non-trainable parameters (not in action space)
-        # These parameters are NOT trainable and should remain constant
-        self.bid_policy.speed_weight = 0.3  # Fixed at 0.3 (not trainable)
-        self.bid_policy.congestion_sensitivity = 0.4  # Fixed at 0.4 (not trainable)
-        self.bid_policy.fairness_factor = 0.1  # Fixed at 0.1 (not trainable)
-        self.bid_policy.urgency_threshold = 5.0  # Fixed at 5.0 (not trainable)
-        self.bid_policy.proximity_bonus_weight = 1.0  # Fixed at 1.0 (not trainable)
-        self.bid_policy.follow_distance_modifier = 0.0  # Fixed at 0.0 (not trainable)
-        self.bid_policy.ignore_vehicles_wait = 0.0  # Fixed at 0 (not trainable)
-        self.bid_policy.ignore_vehicles_platoon_follower = 90.0  # Fixed at 90% (not trainable)
+        # Note: Non-trainable parameters keep their current values from initialization
+        # Only the 4 trainable parameters above are updated during training
         
-        # FIXED: Set FIXED values for reward function parameters (not trainable)
-        # These are NOT in the action space and should remain constant
-        if hasattr(self.unified_config, 'drl'):
-            self.unified_config.drl.vehicle_exit_reward = 10.0  # Fixed (not trainable)
-            self.unified_config.drl.collision_penalty = 100.0  # Fixed (not trainable)
-            self.unified_config.drl.deadlock_penalty = 800.0  # Fixed (not trainable)
-            self.unified_config.drl.throughput_bonus = 0.01  # Fixed (not trainable)
+        # Only print if parameters actually changed
+        if changed_params:
+            print(f"🔧 Updated {len(changed_params)} trainable parameters (deadlock avoidance focus):")
+            for param_change in changed_params:
+                print(f"   ✅ {param_change}")
+            print(f"🔒 These parameters will remain constant for the entire episode")
+        else:
+            # Only show detailed output if verbose logging is enabled
+            if hasattr(self, '_verbose_parameter_logging') and self._verbose_parameter_logging:
+                print(f"🔒 All 4 trainable parameters unchanged - using existing values")
+                print(f"   ✅ Urgency Position Ratio: {action_params.get('urgency_position_ratio', 'N/A'):.3f}")
+                print(f"   ✅ Speed Diff Modifier: {action_params.get('speed_diff_modifier', 'N/A'):.1f}")
+                print(f"   ✅ Max Participants: {action_params.get('max_participants_per_auction', 'N/A')}")
+                print(f"   ✅ Ignore Vehicles GO: {action_params.get('ignore_vehicles_go', 'N/A'):.1f}%")
+                print(f"🔒 Parameters will remain constant for this episode (until next reset)")
+            else:
+                # Minimal output when verbose logging is disabled
+                print(f"🔒 Using existing parameters (no changes needed)")
+
+    def get_current_episode_action_params(self) -> Dict:
+        """Get the action parameters for the current episode (cached from episode start)"""
+        if hasattr(self, '_current_episode_action_params'):
+            return self._current_episode_action_params.copy()
+        else:
+            # Fallback to default parameters if not set
+            return {
+                'urgency_position_ratio': 1.0,
+                'speed_diff_modifier': 0.0,
+                'max_participants_per_auction': 4,
+                'ignore_vehicles_go': 50.0
+            }
+
+    def _apply_cached_parameters(self, cached_params: Dict):
+        """Apply cached episode parameters to the bid policy and auction engine."""
+        # Track which parameters actually changed
+        changed_params = []
         
-        # FIXED: Set FIXED values for conflict detection parameters (not trainable)
-        # These are NOT in the action space and should remain constant
-        if hasattr(self.unified_config, 'conflict'):
-            self.unified_config.conflict.conflict_time_window = 2.5  # Fixed at 2.5s (not trainable)
-            self.unified_config.conflict.min_safe_distance = 3.0  # Fixed at 3.0m (not trainable)
-            self.unified_config.conflict.collision_threshold = 2.0  # Fixed at 2.0m (not trainable)
+        # 1. NEW: 紧急度与位置优势关系因子 (1 parameter - 替换 bid_scale)
+        if 'urgency_position_ratio' in cached_params:
+            new_value = cached_params['urgency_position_ratio']
+            old_value = self.bid_policy.urgency_position_ratio
+            if abs(new_value - old_value) > 1e-6:  # Only update if actually different
+                self.bid_policy.urgency_position_ratio = new_value
+                changed_params.append(f"urgency_position_ratio: {old_value:.3f} → {new_value:.3f}")
         
-        # FIXED: Set FIXED values for Nash parameters (not trainable)
-        # These are NOT in the action space and should remain constant
-        if hasattr(self.unified_config, 'nash'):
-            self.unified_config.nash.path_intersection_threshold = 2.5  # Fixed at 2.5m (not trainable)
-            self.unified_config.nash.platoon_conflict_distance = 15.0  # Fixed at 15m (not trainable)
+        # 2. Control parameter (1 parameter)
+        if 'speed_diff_modifier' in cached_params:
+            new_value = cached_params['speed_diff_modifier']
+            old_value = self.bid_policy.speed_diff_modifier
+            if abs(new_value - old_value) > 1e-6:  # Only update if actually different
+                self.bid_policy.speed_diff_modifier = new_value
+                changed_params.append(f"speed_diff_modifier: {old_value:.1f} → {new_value:.1f}")
         
-        # Debug logging for parameter updates
-        print(f"🔧 Updated trainable parameters:")
-        print(f"   Bid: scale={action_params.get('bid_scale', 'N/A'):.3f}, eta={action_params.get('eta_weight', 'N/A'):.3f}")
-        print(f"   Platoon: bonus={action_params.get('platoon_bonus', 'N/A'):.3f}, penalty={action_params.get('junction_penalty', 'N/A'):.3f}")
-        print(f"   Control: speed_mod={action_params.get('speed_diff_modifier', 'N/A'):.3f}")
-        print(f"   Auction: max_participants={action_params.get('max_participants_per_auction', 'N/A')}")
-        print(f"   Safety: ignore_go={action_params.get('ignore_vehicles_go', 'N/A'):.1f}%, ignore_leader={action_params.get('ignore_vehicles_platoon_leader', 'N/A'):.1f}%")
+        # 3. Auction efficiency parameter (1 parameter)
+        if 'max_participants_per_auction' in cached_params:
+            new_value = cached_params['max_participants_per_auction']
+            old_value = getattr(self.auction_engine, 'max_participants_per_auction', 'unknown')
+            if new_value != old_value:  # Only update if actually different
+                self.auction_engine.update_max_participants_per_auction(new_value)
+                changed_params.append(f"max_participants_per_auction: {old_value} → {new_value}")
+        
+        # 4. Safety parameters (1 parameter - ignore_vehicles_go only)
+        if 'ignore_vehicles_go' in cached_params:
+            new_value = cached_params['ignore_vehicles_go']
+            old_value = self.bid_policy.ignore_vehicles_go
+            if abs(new_value - old_value) > 1e-6:  # Only update if actually different
+                self.bid_policy.ignore_vehicles_go = new_value
+                # ignore_vehicles_platoon_leader is automatically 10 less than ignore_vehicles_go
+                self.bid_policy.ignore_vehicles_platoon_leader = max(0.0, new_value - 10.0)
+                changed_params.append(f"ignore_vehicles_go: {old_value:.1f}% → {new_value:.1f}%")
+                changed_params.append(f"ignore_vehicles_platoon_leader: auto-calculated → {self.bid_policy.ignore_vehicles_platoon_leader:.1f}%")
+        
+        # Note: Non-trainable parameters keep their current values from initialization
+        # Only the 4 trainable parameters above are updated during training
+        
+        # Only print if parameters actually changed
+        if changed_params:
+            print(f"🔧 Applying cached parameters (deadlock avoidance focus):")
+            for param_change in changed_params:
+                print(f"   ✅ {param_change}")
+            print(f"🔒 These parameters will remain constant for the entire episode")
+        else:
+            # No changes needed - parameters are already correct
+            if hasattr(self, '_verbose_parameter_logging') and self._verbose_parameter_logging:
+                print(f"🔒 Cached parameters already applied - no changes needed")
+            # When verbose logging is disabled, show no output for unchanged parameters
+
+    def set_verbose_parameter_logging(self, enabled: bool = True):
+        """Enable or disable verbose parameter update logging"""
+        self._verbose_parameter_logging = enabled
+        print(f"🔊 Verbose parameter logging {'enabled' if enabled else 'disabled'}")
+
+    def get_current_parameter_values(self) -> Dict[str, Any]:
+        """Get current values of all 4 trainable parameters for verification"""
+        if hasattr(self, 'bid_policy') and hasattr(self, 'auction_engine'):
+            bid_config = self.bid_policy.get_current_config()
+            auction_config = self.auction_engine.get_current_config()
+            
+            return {
+                'urgency_position_ratio': bid_config.get('urgency_position_ratio', 'N/A'),
+                'speed_diff_modifier': bid_config.get('speed_diff_modifier', 'N/A'),
+                'max_participants_per_auction': auction_config.get('max_participants_per_auction', 'N/A'),
+                'ignore_vehicles_go': bid_config.get('ignore_vehicles_go', 'N/A'),
+                'episode_params_updated': getattr(self, '_episode_params_updated', False),
+                'current_episode_action_params': getattr(self, '_current_episode_action_params', {}),
+                'bid_policy_config': bid_config,
+                'auction_engine_config': auction_config
+            }
+        else:
+            return {'error': 'Simulation not initialized'}
 
     def _get_observation_cached(self) -> np.ndarray:
         """Get observation with caching"""
@@ -464,8 +580,8 @@ class SimulationEnv:
             self._obs_array[6] = np.clip(deadlock_count / 5.0, 0.0, 1.0)  # Deadlock count (0-5)
             
             # Current bid policy state - meaningful for decision making
-            current_bid_scale = self.bid_policy.get_current_bid_scale()
-            self._obs_array[7] = np.clip((current_bid_scale - 0.1) / 4.9, 0.0, 1.0)  # Bid scale
+            current_urgency_position_ratio = self.bid_policy.get_current_urgency_position_ratio()
+            self._obs_array[7] = np.clip((current_urgency_position_ratio - 0.1) / 2.9, 0.0, 1.0)  # Urgency position ratio
             
             # Average waiting time - meaningful for efficiency
             total_waiting_time = 0
@@ -632,6 +748,9 @@ class SimulationEnv:
         self.current_step = 0      # Reset simulation steps
         self.current_action = 0    # Reset action counter
         
+        # FIXED: Reset episode parameter update flag to allow new episode parameter updates
+        self._episode_params_updated = False
+        
         # Reset deadlock tracking
         self.deadlock_first_detected_time = None
         self.deadlock_consecutive_detections = 0
@@ -654,12 +773,23 @@ class SimulationEnv:
             self._cached_severity_time = None
             self._cached_severity_value = None
         
+        # Clear deadlock cache for new episode
+        if hasattr(self, '_deadlock_cache'):
+            self._deadlock_cache.clear()
+        
         # OPTIMIZED: Initialize Nash solver parameter cache for new episode
         if not hasattr(self, '_last_nash_params'):
             self._last_nash_params = {}
         else:
             # Clear cache for fresh episode start
             self._last_nash_params.clear()
+        
+        # FIXED: Reset metrics manager for new episode to prevent collision count carryover
+        if hasattr(self, 'metrics_manager'):
+            self.metrics_manager.reset_metrics(
+                nash_solver=self.nash_solver if hasattr(self, 'nash_solver') else None,
+                traffic_controller=self.traffic_controller if hasattr(self, 'traffic_controller') else None
+            )
         
         print("✅ Internal state reset completed")
 
@@ -683,6 +813,22 @@ class SimulationEnv:
                 
                 # Tick the world to ensure everything is synchronized
                 self.scenario.carla.world.tick()
+                
+                # Reset traffic generator episode state (collision counts, etc.)
+                if hasattr(self.scenario.traffic_generator, 'reset_episode_state'):
+                    self.scenario.traffic_generator.reset_episode_state()
+                else:
+                    # FALLBACK: If reset_episode_state doesn't exist, manually reset collision count
+                    print("⚠️ WARNING: traffic_generator.reset_episode_state() method not found")
+                    if hasattr(self.scenario.traffic_generator, 'collision_count'):
+                        old_count = self.scenario.traffic_generator.collision_count
+                        self.scenario.traffic_generator.collision_count = 0
+                        print(f"   �� FALLBACK: Manually reset collision count from {old_count} to 0")
+                    else:
+                        print("   ⚠️ Could not reset collision count - collision counting may be broken")
+                
+                # Then destroy all vehicles
+                self._cleanup_existing_vehicles()
                 
                 # Verify reset success by checking for vehicles
                 vehicles = self.state_extractor.get_vehicle_states(include_all_vehicles=True)
@@ -842,21 +988,37 @@ class SimulationEnv:
             
             # ENSURE exact dimension match - OPTIMIZED: 50 dimensions with 8 vehicles
             expected_shape = 50
-            if obs.shape[0] != expected_shape:
-                print(f"⚠️ FIXING step observation: {obs.shape[0]} -> {expected_shape}")
-                if obs.shape[0] < expected_shape:
-                    padding = np.zeros(expected_shape - obs.shape[0], dtype=np.float32)
-                    obs = np.concatenate([obs, padding])
-                else:
-                    obs = obs[:expected_shape]
+            
+            # Safe shape validation with error handling
+            try:
+                if not hasattr(obs, 'shape'):
+                    print(f"⚠️ obs has no shape attribute, type: {type(obs)}")
+                    obs = np.zeros(expected_shape, dtype=np.float32)
+                elif len(obs.shape) == 0:
+                    print(f"⚠️ obs has scalar shape, converting to array")
+                    obs = np.array([obs], dtype=np.float32)
+                elif obs.shape[0] != expected_shape:
+                    print(f"⚠️ FIXING step observation: {obs.shape[0]} -> {expected_shape}")
+                    if obs.shape[0] < expected_shape:
+                        padding = np.zeros(expected_shape - obs.shape[0], dtype=np.float32)
+                        obs = np.concatenate([obs, padding])
+                    else:
+                        obs = obs[:expected_shape]
+            except Exception as shape_error:
+                print(f"⚠️ Error handling obs shape: {shape_error}, obs type: {type(obs)}")
+                obs = np.zeros(expected_shape, dtype=np.float32)
             
             # Validate observation content
             obs = np.nan_to_num(obs, nan=0.0, posinf=100.0, neginf=-100.0)
             
-            # Final validation
-            if obs.shape[0] != expected_shape:
-                print(f"❌ CRITICAL: Could not fix observation shape: {obs.shape[0]} != {expected_shape}")
-                return np.zeros(expected_shape, dtype=np.float32)  # FIXED: 50 dimensions for 8 vehicles
+            # Final validation with safe shape access
+            try:
+                if not hasattr(obs, 'shape') or obs.shape[0] != expected_shape:
+                    print(f"❌ CRITICAL: Could not fix observation shape: {getattr(obs, 'shape', 'no_shape')} != {expected_shape}")
+                    return np.zeros(expected_shape, dtype=np.float32)  # FIXED: 50 dimensions for 8 vehicles
+            except Exception as final_validation_error:
+                print(f"⚠️ Final validation error: {final_validation_error}")
+                return np.zeros(expected_shape, dtype=np.float32)
             
             return obs.astype(np.float32)
             
@@ -972,7 +1134,7 @@ class SimulationEnv:
             return False
 
     def _check_deadlock(self) -> bool:
-        """Check for deadlocks with proper error handling and timeout management - OPTIMIZED"""
+        """Check for deadlocks with proper error handling and timeout management - OPTIMIZED with caching"""
         try:
             if (hasattr(self, 'nash_solver') and 
                 hasattr(self.nash_solver, 'deadlock_detector')):
@@ -992,17 +1154,57 @@ class SimulationEnv:
                 vehicle_dict = {str(v['id']): v for v in self._cached_vehicle_states}
                 current_time = self.scenario.carla.world.get_snapshot().timestamp.elapsed_seconds
                 
-                return self.nash_solver.deadlock_detector.detect_deadlock(vehicle_dict, current_time)
+                result = self.nash_solver.deadlock_detector.detect_deadlock(vehicle_dict, current_time)
+                
+                # Cache the result to avoid repeated calls in the same step
+                if not hasattr(self, '_deadlock_cache'):
+                    self._deadlock_cache = {}
+                self._deadlock_cache['current_step'] = self.current_step
+                self._deadlock_cache['result'] = result
+                
+                return result
             
             return False
             
         except DeadlockException as e:
             # Deadlock detected - handle with timeout logic
-            return self._handle_deadlock_detection(e)
+            result = self._handle_deadlock_detection(e)
+            
+            # Cache the result
+            if not hasattr(self, '_deadlock_cache'):
+                self._deadlock_cache = {}
+            self._deadlock_cache['current_step'] = self.current_step
+            self._deadlock_cache['result'] = result
+            
+            return result
         except Exception as e:
             # Other errors - log but don't fail
             print(f"⚠️ Deadlock detection error: {str(e)}")
+            
+            # Cache the error result
+            if not hasattr(self, '_deadlock_cache'):
+                self._deadlock_cache = {}
+            self._deadlock_cache['current_step'] = self.current_step
+            self._deadlock_cache['result'] = False
+            
             return False
+
+    def _get_cached_deadlock_status(self) -> bool:
+        """Get cached deadlock status to avoid repeated calls in the same step"""
+        if hasattr(self, '_deadlock_cache') and self._deadlock_cache:
+            cached_step = self._deadlock_cache.get('current_step', -1)
+            if cached_step == self.current_step:
+                cached_result = self._deadlock_cache.get('result', False)
+                # Debug: Log cache hit
+                if hasattr(self, '_debug_deadlock_cache') and self._debug_deadlock_cache:
+                    print(f"🔍 Deadlock cache HIT: step {self.current_step}, result: {cached_result}")
+                return cached_result
+        
+        # Debug: Log cache miss
+        if hasattr(self, '_debug_deadlock_cache') and self._debug_deadlock_cache:
+            print(f"🔍 Deadlock cache MISS: step {self.current_step}, calling _check_deadlock()")
+        
+        return self._check_deadlock()
 
     def _handle_deadlock_detection(self, deadlock_exception: DeadlockException) -> bool:
         """SIMPLIFIED: Handle deadlock detection - just track and terminate episode"""
@@ -1128,6 +1330,11 @@ class SimulationEnv:
             self.observation_cache_steps = 5
         
         print(f"🔧 Performance mode: {'fast' if fast_mode else 'normal'} (steps_per_action: {self.steps_per_action})")
+
+    def set_deadlock_cache_debug(self, enabled: bool = True):
+        """Enable or disable deadlock cache debugging"""
+        self._debug_deadlock_cache = enabled
+        print(f"🔍 Deadlock cache debugging {'enabled' if enabled else 'disabled'}")
 
     def _compute_steps_per_action(self) -> int:
         """Compute steps per DRL action from seconds-based logic interval.

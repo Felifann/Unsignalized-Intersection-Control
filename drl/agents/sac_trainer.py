@@ -15,84 +15,257 @@ from drl.envs.auction_gym import AuctionGymEnv
 from drl.utils.analysis import TrainingAnalyzer
 
 class MetricsCallback(BaseCallback):
-    """Custom callback to log training metrics with proper file handle management for SAC"""
+    """Enhanced callback to log training metrics with action space parameter tracking and per-episode statistics for SAC"""
     
     def __init__(self, eval_env, log_dir: str, verbose: int = 0):
         super().__init__(verbose)
         self.eval_env = eval_env
         self.log_dir = log_dir
-        self.metrics_log = []
         
         # Create logs directory
         os.makedirs(log_dir, exist_ok=True)
         
-        # 文件句柄管理优化
-        self._csv_file_handle = None
-        self._last_write_timestamp = 0
-        self._write_interval = 10.0  # 每10秒最多写入一次
-        self._buffer_size = 50  # 缓冲区大小
+        # Episode-level tracking
+        self.episode_actions = []  # Store actions for current episode
+        self.episode_metrics = []  # Store metrics for current episode
+        self.episode_count = 0
+        self.episode_start_step = 0
         
-        # 注册清理函数
+        # CSV file paths
+        self.step_metrics_path = os.path.join(log_dir, 'step_metrics.csv')
+        self.episode_metrics_path = os.path.join(log_dir, 'episode_metrics.csv')
+        
+        # File handle management
+        self._last_write_timestamp = 0
+        self._write_interval = 10.0  # Write every 10 seconds at most
+        
+        # Register cleanup function
         import atexit
-        atexit.register(self._cleanup_file_handles)
+        atexit.register(self._cleanup_resources)
+        
+        print(f"📊 Enhanced SAC Metrics Callback initialized:")
+        print(f"   Step metrics: {self.step_metrics_path}")
+        print(f"   Episode metrics: {self.episode_metrics_path}")
 
     def _on_step(self) -> bool:
-        # Log metrics every 100 steps
-        if self.num_timesteps % 100 == 0:
-            info = self.locals.get('infos', [{}])[0]
+        """Log metrics every step and track episode boundaries"""
+        try:
+            # Get current info and actions
+            infos = self.locals.get('infos', [{}])
+            actions = self.locals.get('actions', [])
             
-            metrics = {
+            if not infos or not actions:
+                return True
+            
+            info = infos[0] if isinstance(infos[0], dict) else {}
+            action = actions[0] if isinstance(actions[0], (np.ndarray, list)) else []
+            
+            # Check if episode ended (reset occurred)
+            if self._is_episode_reset():
+                self._finalize_episode()
+                self._start_new_episode()
+            
+            # Store action for current episode
+            if isinstance(action, (np.ndarray, list)) and len(action) == 4:
+                self.episode_actions.append(action)
+            
+            # Store step metrics
+            step_metrics = {
                 'timestep': self.num_timesteps,
+                'episode': self.episode_count,
                 'throughput': info.get('throughput', 0.0),
                 'avg_acceleration': info.get('avg_acceleration', 0.0),
                 'collision_count': info.get('collision_count', 0),
                 'total_controlled': info.get('total_controlled', 0),
                 'vehicles_exited': info.get('vehicles_exited', 0),
-                'bid_scale': info.get('bid_scale', 1.0),
+                'urgency_position_ratio': info.get('urgency_position_ratio', 1.0),
+                'speed_diff_modifier': info.get('speed_diff_modifier', 0.0),
+                'max_participants_per_auction': info.get('max_participants_per_auction', 4),
+                'ignore_vehicles_go': info.get('ignore_vehicles_go', 50.0),
+                'deadlocks_detected': info.get('deadlocks_detected', 0),
                 'deadlock_severity': info.get('deadlock_severity', 0.0),
                 'deadlock_threat_level': info.get('deadlock_threat_level', 'none')
             }
             
-            self.metrics_log.append(metrics)
+            self.episode_metrics.append(step_metrics)
             
-            # Save metrics every 1000 steps
+            # Save step metrics every 1000 steps
             if self.num_timesteps % 1000 == 0:
-                self._save_metrics()
+                self._save_step_metrics()
+                
+        except Exception as e:
+            print(f"⚠️ Metrics callback error: {e}")
         
         return True
 
-    def _save_metrics(self):
-        """Save metrics to CSV with proper file handle management"""
-        if not self.metrics_log:
+    def _is_episode_reset(self) -> bool:
+        """Check if episode reset occurred by looking for environment reset signals"""
+        # This is a simple heuristic - in practice, you might want to use
+        # more sophisticated episode boundary detection
+        return len(self.episode_actions) > 0 and len(self.episode_actions) > 200
+
+    def _start_new_episode(self):
+        """Start tracking a new episode"""
+        self.episode_count += 1
+        self.episode_start_step = self.num_timesteps
+        self.episode_actions = []
+        self.episode_metrics = []
+        print(f"🔄 Starting episode {self.episode_count} at step {self.episode_start_step}")
+
+    def _finalize_episode(self):
+        """Calculate and save episode-level statistics"""
+        if not self.episode_actions or not self.episode_metrics:
+            return
+        
+        try:
+            # Convert actions to numpy array for calculations
+            actions_array = np.array(self.episode_actions)
+            
+            # Calculate action space parameter statistics
+            action_means = np.mean(actions_array, axis=0)
+            action_vars = np.var(actions_array, axis=0)
+            action_stds = np.std(actions_array, axis=0)
+            
+            # Get episode-level metrics
+            episode_stats = self._calculate_episode_stats()
+            
+            # Create episode summary
+            episode_summary = {
+                'episode': self.episode_count,
+                'episode_start_step': self.episode_start_step,
+                'episode_end_step': self.num_timesteps,
+                'episode_length': len(self.episode_actions),
+                
+                # Action space parameter statistics
+                'urgency_position_ratio_mean': float(action_means[0]),
+                'urgency_position_ratio_var': float(action_vars[0]),
+                'urgency_position_ratio_std': float(action_stds[0]),
+                
+                'speed_diff_modifier_mean': float(action_means[1]),
+                'speed_diff_modifier_var': float(action_vars[1]),
+                'speed_diff_modifier_std': float(action_stds[1]),
+                
+                'max_participants_mean': float(action_means[2]),
+                'max_participants_var': float(action_vars[2]),
+                'max_participants_std': float(action_stds[2]),
+                
+                'ignore_vehicles_go_mean': float(action_means[3]),
+                'ignore_vehicles_go_var': float(action_vars[3]),
+                'ignore_vehicles_go_std': float(action_stds[3]),
+                
+                # Episode performance metrics
+                'total_vehicles_exited': episode_stats['total_exits'],
+                'total_collisions': episode_stats['total_collisions'],
+                'total_deadlocks': episode_stats['total_deadlocks'],
+                'max_deadlock_severity': episode_stats['max_deadlock_severity'],
+                'avg_throughput': episode_stats['avg_throughput'],
+                'avg_acceleration': episode_stats['avg_acceleration'],
+                'total_controlled_vehicles': episode_stats['total_controlled']
+            }
+            
+            # Save episode summary
+            self._save_episode_metrics(episode_summary)
+            
+            # Print episode summary
+            print(f"📊 Episode {self.episode_count} Summary:")
+            print(f"   Length: {episode_summary['episode_length']} steps")
+            print(f"   Vehicles exited: {episode_summary['total_vehicles_exited']}")
+            print(f"   Collisions: {episode_summary['total_collisions']}")
+            print(f"   Deadlocks: {episode_summary['total_deadlocks']}")
+            print(f"   Avg throughput: {episode_summary['avg_throughput']:.1f} vehicles/h")
+            print(f"   Action means: [{action_means[0]:.3f}, {action_means[1]:.1f}, {action_means[2]:.1f}, {action_means[3]:.1f}]")
+            
+        except Exception as e:
+            print(f"⚠️ Episode finalization error: {e}")
+
+    def _calculate_episode_stats(self) -> dict:
+        """Calculate episode-level statistics from step metrics"""
+        if not self.episode_metrics:
+            return {
+                'total_exits': 0, 'total_collisions': 0, 'total_deadlocks': 0,
+                'max_deadlock_severity': 0.0, 'avg_throughput': 0.0,
+                'avg_acceleration': 0.0, 'total_controlled': 0
+            }
+        
+        # Calculate cumulative statistics
+        total_exits = max(0, self.episode_metrics[-1].get('vehicles_exited', 0) - 
+                         self.episode_metrics[0].get('vehicles_exited', 0))
+        
+        total_collisions = max(0, self.episode_metrics[-1].get('collision_count', 0) - 
+                              self.episode_metrics[0].get('collision_count', 0))
+        
+        total_deadlocks = max(0, self.episode_metrics[-1].get('deadlocks_detected', 0) - 
+                             self.episode_metrics[0].get('deadlocks_detected', 0))
+        
+        # Calculate averages
+        throughputs = [m.get('throughput', 0.0) for m in self.episode_metrics]
+        accelerations = [m.get('avg_acceleration', 0.0) for m in self.episode_metrics]
+        controlled = [m.get('total_controlled', 0) for m in self.episode_metrics]
+        
+        # Get max deadlock severity
+        max_severity = max([m.get('deadlock_severity', 0.0) for m in self.episode_metrics])
+        
+        return {
+            'total_exits': total_exits,
+            'total_collisions': total_collisions,
+            'total_deadlocks': total_deadlocks,
+            'max_deadlock_severity': max_severity,
+            'avg_throughput': np.mean(throughputs) if throughputs else 0.0,
+            'avg_acceleration': np.mean(accelerations) if accelerations else 0.0,
+            'total_controlled': max(controlled) if controlled else 0
+        }
+
+    def _save_step_metrics(self):
+        """Save step-level metrics to CSV"""
+        if not self.episode_metrics:
             return
             
         current_time = time.time()
-        # 限制写入频率以避免文件句柄耗尽
         if current_time - self._last_write_timestamp < self._write_interval:
             return
             
         try:
-            df = pd.DataFrame(self.metrics_log)
-            csv_path = os.path.join(self.log_dir, 'training_metrics.csv')
-            
-            # 使用上下文管理器确保文件正确关闭
-            with open(csv_path, 'w', newline='', encoding='utf-8') as f:
-                df.to_csv(f, index=False)
-            
+            df = pd.DataFrame(self.episode_metrics)
+            df.to_csv(self.step_metrics_path, index=False)
             self._last_write_timestamp = current_time
-            print(f"📊 指标已保存: {len(self.metrics_log)} 条记录")
+            print(f"📊 Step metrics saved: {len(self.episode_metrics)} records")
+        except Exception as e:
+            print(f"⚠️ Step metrics save failed: {e}")
+
+    def _save_episode_metrics(self, episode_summary: dict):
+        """Save episode-level metrics to CSV"""
+        try:
+            # Load existing data or create new file
+            csv_path = self.episode_metrics_path
+            if os.path.exists(csv_path):
+                existing_df = pd.read_csv(csv_path)
+                new_df = pd.concat([existing_df, pd.DataFrame([episode_summary])], ignore_index=True)
+            else:
+                new_df = pd.DataFrame([episode_summary])
+            
+            new_df.to_csv(csv_path, index=False)
+            print(f"📊 Episode {episode_summary['episode']} metrics saved")
             
         except Exception as e:
-            print(f"⚠️ 保存指标失败: {e}")
-    
-    def _cleanup_file_handles(self):
-        """清理文件句柄"""
+            print(f"⚠️ Episode metrics save failed: {e}")
+
+    def _cleanup_resources(self):
+        """Clean up resources on exit"""
         try:
-            if self._csv_file_handle is not None:
-                self._csv_file_handle.close()
-                self._csv_file_handle = None
+            # Finalize current episode if training ends
+            if self.episode_actions:
+                self._finalize_episode()
+            
+            # Save final step metrics
+            self._save_step_metrics()
+            
+            print("🧹 SAC Metrics callback cleanup completed")
         except Exception as e:
-            print(f"⚠️ 清理文件句柄时出错: {e}")
+            print(f"⚠️ Cleanup error: {e}")
+
+    def _on_training_end(self):
+        """Called when training ends"""
+        self._cleanup_resources()
 
 class SACTrainer:
     """SAC trainer for traffic intersection environment"""
@@ -110,6 +283,11 @@ class SACTrainer:
         self.checkpoint_freq = self.config.get('checkpoint_freq', 10000)
         
         print("🚀 SAC Trainer initialized")
+        print("🔒 EPISODE-LEVEL PARAMETER UPDATES:")
+        print("   • Action space parameters are updated ONLY at episode boundaries")
+        print("   • During an episode, parameters remain constant for consistent behavior")
+        print("   • This allows the agent to explore the consequences of its parameter choices")
+        print("   • Parameters are cached and reused throughout each episode")
 
     def _load_config(self, config_path: str) -> dict:
         """Load training configuration"""
@@ -129,7 +307,16 @@ class SACTrainer:
             'learning_starts': 1000,
             'use_sde': False,
             'policy_kwargs': dict(log_std_init=-3, net_arch=[256, 256]),
-            'sim_config': {'map': 'Town05', 'max_steps': 2000}
+            # FIXED: Updated timing configuration for better vehicle control
+            'sim_config': {
+                'map': 'Town05', 
+                'max_steps': 400,  # Shorter episodes for SAC
+                'fixed_delta_seconds': 0.1,  # 10 FPS simulation
+                'logic_update_interval_seconds': 1.0,  # 1s decision intervals
+                'auction_interval': 4.0,  # 4s auction cycles
+                'bidding_duration': 2.0,  # 2s bidding phase
+                'deadlock_check_interval': 8.0  # 8s system checks
+            }
         }
         
         if config_path and os.path.exists(config_path):

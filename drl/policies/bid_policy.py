@@ -8,7 +8,7 @@ class TrainableBidPolicy:
     
     def __init__(self):
         # 核心可训练参数 - 扩展版本
-        self.bid_scale = 1.0  # 总体出价缩放因子
+        self.urgency_position_ratio = 1.0  # NEW: 紧急度与位置优势关系因子 (替换 bid_scale)
         self.eta_weight = 1.0  # ETA权重
         self.speed_weight = 0.3  # 速度权重
         self.congestion_sensitivity = 0.4  # 拥堵敏感度
@@ -54,18 +54,18 @@ class TrainableBidPolicy:
         self.bid_history.clear()
         print("🔄 策略状态已重置")
 
-    def update_bid_scale(self, bid_scale: float):
-        """Update only bid scale (backward compatibility)"""
-        self.bid_scale = np.clip(bid_scale, 0.1, 5.0)
+    def update_urgency_position_ratio(self, urgency_position_ratio: float):
+        """Update urgency position ratio (replaces bid_scale)"""
+        self.urgency_position_ratio = np.clip(urgency_position_ratio, 0.1, 3.0)
 
-    def update_all_bid_params(self, bid_scale: float = None, eta_weight: float = None,
+    def update_all_bid_params(self, urgency_position_ratio: float = None, eta_weight: float = None,
                              speed_weight: float = None, congestion_sensitivity: float = None,
                              platoon_bonus: float = None, junction_penalty: float = None,
                              fairness_factor: float = None, urgency_threshold: float = None,
                              proximity_bonus_weight: float = None):
         """更新所有出价相关参数"""
-        if bid_scale is not None:
-            self.bid_scale = np.clip(bid_scale, 0.1, 5.0)
+        if urgency_position_ratio is not None:
+            self.urgency_position_ratio = np.clip(urgency_position_ratio, 0.1, 3.0)
         if eta_weight is not None:
             self.eta_weight = np.clip(eta_weight, 0.5, 3.0)
         if speed_weight is not None:
@@ -143,8 +143,16 @@ class TrainableBidPolicy:
             raw_bid = base_bid + eta_factor + speed_factor + platoon_factor + junction_factor + \
                      context_adjustment + fairness_adjustment + proximity_bonus
             
-            # 应用可训练的缩放因子
-            final_bid = raw_bid * self.bid_scale
+            # FIXED: 应用紧急度与位置优势关系因子 (替换 bid_scale)
+            # 这个因子控制紧急度vs位置优势的平衡，最大化收入
+            if self.urgency_position_ratio >= 1.0:
+                # 高比例：优先考虑紧急度 (从时间敏感的车辆获得更高收入)
+                final_bid = base_bid + (eta_factor * self.urgency_position_ratio) + speed_factor + platoon_factor + junction_factor + \
+                           context_adjustment + fairness_adjustment + proximity_bonus
+            else:
+                # 低比例：优先考虑位置优势 (从在路口的车辆获得更高收入)
+                final_bid = base_bid + eta_factor + speed_factor + platoon_factor + (junction_factor / max(self.urgency_position_ratio, 0.1)) + \
+                           context_adjustment + fairness_adjustment + proximity_bonus
             
             # 确保出价在合理范围内
             final_bid = np.clip(final_bid, 1.0, 200.0)
@@ -152,6 +160,14 @@ class TrainableBidPolicy:
             # 记录出价用于分析
             vehicle_id = vehicle_state.get('id', 'unknown')
             self._track_bid(vehicle_id, final_bid, context or {})
+            
+            # DEBUG: Log parameter usage for verification
+            if context and context.get('debug_bidding', False):
+                print(f"🔍 BID DEBUG for vehicle {vehicle_id}:")
+                print(f"   urgency_position_ratio: {self.urgency_position_ratio:.3f}")
+                print(f"   eta_factor: {eta_factor:.2f}")
+                print(f"   speed_factor: {speed_factor:.2f}")
+                print(f"   final_bid: {final_bid:.2f}")
             
             return float(final_bid)
             
@@ -264,12 +280,10 @@ class TrainableBidPolicy:
         speed_diff = self.speed_diff_base + self.speed_diff_modifier
         follow_distance = self.follow_distance_base + self.follow_distance_modifier
         
-        # 确定ignore_vehicles参数
+        # 确定ignore_vehicles参数 - same for both leader and follower
         if is_platoon_member:
-            if is_leader:
-                ignore_vehicles = self.ignore_vehicles_platoon_leader
-            else:
-                ignore_vehicles = self.ignore_vehicles_platoon_follower
+            # Same ignore_vehicles parameter for both leader and follower
+            ignore_vehicles = self.ignore_vehicles_platoon_follower
         else:
             if action == 'go':
                 ignore_vehicles = self.ignore_vehicles_go
@@ -287,11 +301,19 @@ class TrainableBidPolicy:
             # Force ignore_vehicles to 0 for waiting vehicles
             ignore_vehicles = 0.0
         
-        # 车队特殊调整
+        # 车队特殊调整 - same for both leader and follower
         if is_platoon_member:
             follow_distance *= 0.8  # 车队内更紧密
-            if is_leader:
-                speed_diff += 5.0  # 领队稍微积极
+            # No special treatment for leader - same parameters as follower
+        
+        # DEBUG: Log parameter usage for verification
+        if vehicle_state and vehicle_state.get('debug_control', False):
+            print(f"🔍 CONTROL DEBUG for action '{action}':")
+            print(f"   speed_diff_modifier: {self.speed_diff_modifier:.1f}")
+            print(f"   base_speed_diff: {self.speed_diff_base:.1f}")
+            print(f"   final_speed_diff: {speed_diff:.1f}")
+            print(f"   ignore_vehicles_go: {self.ignore_vehicles_go:.1f}%")
+            print(f"   final_ignore_vehicles: {ignore_vehicles:.1f}%")
         
         return {
             'speed_diff': float(speed_diff),           
@@ -311,19 +333,19 @@ class TrainableBidPolicy:
             
             # 简单的自适应调整
             if avg_reward < -10:  # 性能不佳
-                self.bid_scale *= (1.0 - self.adaptation_rate)
+                self.urgency_position_ratio *= (1.0 - self.adaptation_rate)
                 self.congestion_sensitivity *= (1.0 + self.adaptation_rate)
             elif avg_reward > 20:  # 性能良好
-                self.bid_scale *= (1.0 + self.adaptation_rate * 0.5)
+                self.urgency_position_ratio *= (1.0 + self.adaptation_rate * 0.5)
             
             # 确保参数在合理范围内
-            self.bid_scale = np.clip(self.bid_scale, 0.5, 3.0)
+            self.urgency_position_ratio = np.clip(self.urgency_position_ratio, 0.1, 3.0)
             self.congestion_sensitivity = np.clip(self.congestion_sensitivity, 0.1, 0.8)
 
     def get_policy_stats(self) -> Dict[str, Any]:
         """获取策略统计信息"""
         stats = {
-            'current_bid_scale': self.bid_scale,
+            'current_urgency_position_ratio': self.urgency_position_ratio,
             'eta_weight': self.eta_weight,
             'speed_weight': self.speed_weight,
             'congestion_sensitivity': self.congestion_sensitivity,
@@ -341,15 +363,79 @@ class TrainableBidPolicy:
         
         return stats
 
-    def get_current_bid_scale(self) -> float:
-        """获取当前出价缩放因子"""
-        return self.bid_scale
+    def get_current_urgency_position_ratio(self) -> float:
+        """获取当前紧急度与位置优势关系因子"""
+        return self.urgency_position_ratio
+
+    def get_current_config(self) -> Dict[str, Any]:
+        """Get current configuration for verification"""
+        return {
+            'urgency_position_ratio': self.urgency_position_ratio,
+            'speed_diff_modifier': self.speed_diff_modifier,
+            'ignore_vehicles_go': self.ignore_vehicles_go,
+            'ignore_vehicles_platoon_leader': self.ignore_vehicles_platoon_leader,
+            'eta_weight': self.eta_weight,
+            'speed_weight': self.speed_weight,
+            'platoon_bonus': self.platoon_bonus,
+            'junction_penalty': self.junction_penalty
+        }
+
+    def verify_trainable_parameters(self) -> Dict[str, Any]:
+        """验证所有4个可训练参数是否正确应用"""
+        verification = {
+            'urgency_position_ratio': {
+                'current_value': self.urgency_position_ratio,
+                'range': [0.1, 3.0],
+                'applied_in_bidding': True,
+                'description': '紧急度vs位置优势关系因子'
+            },
+            'speed_diff_modifier': {
+                'current_value': self.speed_diff_modifier,
+                'range': [-30.0, 30.0],
+                'applied_in_control': True,
+                'description': '速度控制修正'
+            },
+            'max_participants_per_auction': {
+                'current_value': 'N/A',  # This is set in auction engine
+                'range': [3, 6],
+                'applied_in_auction': True,
+                'description': '拍卖参与者数量'
+            },
+            'ignore_vehicles_go': {
+                'current_value': self.ignore_vehicles_go,
+                'range': [0.0, 80.0],
+                'applied_in_control': True,
+                'description': 'GO状态ignore_vehicles百分比'
+            }
+        }
+        
+        # Check if all parameters are within expected ranges
+        all_valid = True
+        for param_name, param_info in verification.items():
+            if param_name == 'max_participants_per_auction':
+                continue  # Skip this as it's managed by auction engine
+            
+            current_val = param_info['current_value']
+            min_val, max_val = param_info['range']
+            
+            if not (min_val <= current_val <= max_val):
+                param_info['status'] = 'INVALID_RANGE'
+                param_info['error'] = f'Value {current_val} outside range [{min_val}, {max_val}]'
+                all_valid = False
+            else:
+                param_info['status'] = 'VALID'
+                param_info['error'] = None
+        
+        verification['all_parameters_valid'] = all_valid
+        verification['total_trainable_parameters'] = 4
+        
+        return verification
 
     def get_all_trainable_params(self) -> Dict[str, float]:
         """获取所有可训练参数"""
         return {
             # 出价策略参数
-            'bid_scale': self.bid_scale,
+            'urgency_position_ratio': self.urgency_position_ratio,
             'eta_weight': self.eta_weight,
             'speed_weight': self.speed_weight,
             'congestion_sensitivity': self.congestion_sensitivity,

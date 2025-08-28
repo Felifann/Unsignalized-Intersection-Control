@@ -55,6 +55,10 @@ class ScenarioManager:
         if hasattr(self.traffic_gen, 'cleanup_sensors'):
             self.traffic_gen.cleanup_sensors()
         
+        # Reset traffic generator episode state (collision counts, etc.)
+        if hasattr(self.traffic_gen, 'reset_episode_state'):
+            self.traffic_gen.reset_episode_state()
+        
         # Then destroy all vehicles
         self.carla.destroy_all_vehicles()
         
