@@ -55,6 +55,12 @@ class SimulationEnv:
         self.current_action = 0  # Track actions taken by DRL agent
         self.current_step = 0    # Track simulation steps (for internal use)
         
+        # Simulation time tracking
+        self.simulation_start_time = None
+        self.episode_start_time = None
+        self.total_simulation_time = 0.0
+        self.episode_simulation_time = 0.0
+        
         # BALANCED Performance settings for DRL training - from unified config
         training_mode = self.unified_config.system.training_mode
         # Auto-calc steps_per_action from seconds-based logic interval and fixed delta
@@ -177,6 +183,14 @@ class SimulationEnv:
             # TODO: Also set other relevant random seeds (CARLA, etc.)
         
         try:
+            # Initialize simulation time tracking
+            if self.simulation_start_time is None:
+                self.simulation_start_time = time.time()
+                print(f"⏰ Simulation started at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.simulation_start_time))}")
+            
+            self.episode_start_time = time.time()
+            print(f"⏰ Episode started at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.episode_start_time))}")
+            
             # Phase 1: Reset internal state
             self._reset_internal_state()
             
@@ -347,8 +361,21 @@ class SimulationEnv:
                     'termination_reason': 'max_actions' if self.current_action >= self.max_actions else
                                         'severe_deadlock' if severe_deadlock_occurred else
                                         'deadlock' if self._get_cached_deadlock_status() else 'none'
+                },
+                'simulation_time': {
+                    'episode_simulation_time': round(self.episode_simulation_time, 2),
+                    'total_simulation_time': round(self.total_simulation_time, 2),
+                    'episode_start_time': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.episode_start_time)) if self.episode_start_time else None,
+                    'simulation_start_time': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.simulation_start_time)) if self.simulation_start_time else None
                 }
             })
+            
+            # Update simulation time tracking
+            current_time = time.time()
+            if self.episode_start_time is not None:
+                self.episode_simulation_time = current_time - self.episode_start_time
+            if self.simulation_start_time is not None:
+                self.total_simulation_time = current_time - self.simulation_start_time
             
             # Record performance
             step_time = time.time() - step_start
@@ -814,21 +841,8 @@ class SimulationEnv:
                 # Tick the world to ensure everything is synchronized
                 self.scenario.carla.world.tick()
                 
-                # Reset traffic generator episode state (collision counts, etc.)
-                if hasattr(self.scenario.traffic_generator, 'reset_episode_state'):
-                    self.scenario.traffic_generator.reset_episode_state()
-                else:
-                    # FALLBACK: If reset_episode_state doesn't exist, manually reset collision count
-                    print("⚠️ WARNING: traffic_generator.reset_episode_state() method not found")
-                    if hasattr(self.scenario.traffic_generator, 'collision_count'):
-                        old_count = self.scenario.traffic_generator.collision_count
-                        self.scenario.traffic_generator.collision_count = 0
-                        print(f"   �� FALLBACK: Manually reset collision count from {old_count} to 0")
-                    else:
-                        print("   ⚠️ Could not reset collision count - collision counting may be broken")
-                
-                # Then destroy all vehicles
-                self._cleanup_existing_vehicles()
+                # CRITICAL FIX: Don't destroy vehicles after reset - they were just created!
+                # self._cleanup_existing_vehicles()  # REMOVED: This was causing the issue
                 
                 # Verify reset success by checking for vehicles
                 vehicles = self.state_extractor.get_vehicle_states(include_all_vehicles=True)
@@ -905,8 +919,23 @@ class SimulationEnv:
         # Reset metrics AFTER all components are reset
         self.metrics_manager.reset_metrics(
             nash_solver=self.nash_solver,
-            traffic_controller=self.traffic_controller
+            traffic_controller=self.traffic_controller,
+            traffic_generator=self.scenario.traffic_generator
         )
+        
+        # CRITICAL FIX: Reset traffic generator episode state AFTER metrics manager reset
+        # This ensures collision count is reset after prev_collision_count baseline is set
+        if hasattr(self.scenario.traffic_generator, 'reset_episode_state'):
+            self.scenario.traffic_generator.reset_episode_state()
+        else:
+            # FALLBACK: If reset_episode_state doesn't exist, manually reset collision count
+            print("⚠️ WARNING: traffic_generator.reset_episode_state() method not found")
+            if hasattr(self.scenario.traffic_generator, 'collision_count'):
+                old_count = self.scenario.traffic_generator.collision_count
+                self.scenario.traffic_generator.collision_count = 0
+                print(f"   🔧 FALLBACK: Manually reset collision count from {old_count} to 0")
+            else:
+                print("   ⚠️ Could not reset collision count - collision counting may be broken")
         
         print("✅ Component initialization completed")
 
@@ -1349,3 +1378,19 @@ class SimulationEnv:
             return steps
         except Exception:
             return max(1, int(self.unified_config.system.steps_per_action))
+
+    def get_simulation_time_stats(self) -> Dict:
+        """Get simulation time statistics"""
+        current_time = time.time()
+        
+        stats = {
+            'episode_simulation_time': round(self.episode_simulation_time, 2) if self.episode_simulation_time else 0.0,
+            'total_simulation_time': round(self.total_simulation_time, 2) if self.total_simulation_time else 0.0,
+            'episode_start_time': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.episode_start_time)) if self.episode_start_time else None,
+            'simulation_start_time': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.simulation_start_time)) if self.simulation_start_time else None,
+            'current_time': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(current_time)),
+            'episode_duration_hours': round(self.episode_simulation_time / 3600, 3) if self.episode_simulation_time else 0.0,
+            'total_duration_hours': round(self.total_simulation_time / 3600, 3) if self.total_simulation_time else 0.0
+        }
+        
+        return stats

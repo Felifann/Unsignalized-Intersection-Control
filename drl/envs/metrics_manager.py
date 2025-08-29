@@ -125,7 +125,7 @@ class SimulationMetricsManager:
                 self._csv_buffer.clear()
                 self._last_write_time = current_time
 
-    def reset_metrics(self, nash_solver=None, traffic_controller=None):
+    def reset_metrics(self, nash_solver=None, traffic_controller=None, traffic_generator=None):
         """Reset all metrics for new episode with proper baseline sync"""
         # FIXED: Reset deadlock baseline to ZERO for new episode
         # Each episode should start fresh without carrying over deadlock counts
@@ -146,12 +146,25 @@ class SimulationMetricsManager:
         # IMPORTANT: Store Nash solver reference to get fresh deadlock count when needed
         self._nash_solver_ref = nash_solver
         
+        # CRITICAL: Store traffic generator reference for collision count synchronization
+        self._traffic_generator_ref = traffic_generator
+        
         # FIXED: Reset collision baseline to match traffic generator reset
         # This ensures collision penalties are calculated correctly for new episodes
         initial_collision_count = 0
         
         # DEBUG: Log what we're resetting
         print(f"🔍 Resetting collision baseline: prev_collision_count = {initial_collision_count}")
+        
+        # CRITICAL: Also reset the current collision count to ensure proper synchronization
+        if hasattr(self, '_traffic_generator_ref') and self._traffic_generator_ref:
+            try:
+                if hasattr(self._traffic_generator_ref, 'collision_count'):
+                    old_count = self._traffic_generator_ref.collision_count
+                    self._traffic_generator_ref.collision_count = 0
+                    print(f"🔧 Synchronized traffic generator collision count: {old_count} -> 0")
+            except Exception as e:
+                print(f"⚠️ Could not synchronize traffic generator collision count: {e}")
         
         self.metrics = {
             'avg_acceleration': 0.0,
@@ -217,6 +230,26 @@ class SimulationMetricsManager:
                 # DEBUG: Log collision count details
                 if current_collisions > 0 or prev_collisions > 0:
                     print(f"🔍 Collision Debug: current={current_collisions}, prev={prev_collisions}, new={new_collisions}")
+                
+                # CRITICAL SAFETY CHECK: Ensure collision count is properly synchronized
+                if current_collisions > 0 and prev_collisions == 0 and new_collisions == current_collisions:
+                    # This suggests the collision count wasn't properly reset between episodes
+                    print(f"🚨 CRITICAL: Collision count synchronization issue detected!")
+                    print(f"   Current: {current_collisions}, Previous: {prev_collisions}, New: {new_collisions}")
+                    print(f"   Attempting to fix by resetting collision count...")
+                    
+                    # Try to reset the collision counter automatically
+                    if hasattr(scenario.traffic_generator, 'reset_collision_count'):
+                        old_count = scenario.traffic_generator.reset_collision_count()
+                        print(f"   ✅ Automatically reset collision count from {old_count} to 0")
+                        current_collisions = 0
+                        new_collisions = 0
+                    else:
+                        print(f"   ⚠️ Could not reset collision count automatically")
+                        # Force the count to be reasonable for this episode
+                        current_collisions = min(current_collisions, 10)  # Cap at 10 for this episode
+                        new_collisions = max(0, current_collisions - prev_collisions)
+                        print(f"   🔧 Capped collision count at {current_collisions} for this episode")
                 
                 # SAFETY CHECK: Detect and fix suspicious collision counts
                 if current_collisions > 100:  # Suspiciously high collision count

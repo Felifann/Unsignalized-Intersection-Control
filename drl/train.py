@@ -89,7 +89,8 @@ class SimpleMetricsCallback(BaseCallback):
             infos = self.locals.get('infos', [{}])
             actions = self.locals.get('actions', [])
             
-            if not infos or not actions:
+            # FIXED: Use proper length checks instead of boolean checks for arrays
+            if len(infos) == 0 or len(actions) == 0:
                 return True
             
             info = infos[0] if isinstance(infos[0], dict) else {}
@@ -120,6 +121,16 @@ class SimpleMetricsCallback(BaseCallback):
                 'deadlocks_detected': info.get('deadlocks_detected', 0),
                 'deadlock_severity': info.get('deadlock_severity', 0.0)
             }
+            
+            # Add simulation time information if available
+            simulation_time_info = info.get('simulation_time', {})
+            if simulation_time_info:
+                step_metrics.update({
+                    'episode_simulation_time': simulation_time_info.get('episode_simulation_time', 0.0),
+                    'total_simulation_time': simulation_time_info.get('total_simulation_time', 0.0),
+                    'episode_start_time': simulation_time_info.get('episode_start_time', ''),
+                    'simulation_start_time': simulation_time_info.get('simulation_start_time', '')
+                })
             
             # SAFETY CHECK: Detect suspiciously high collision counts
             collision_count = step_metrics['collision_count']
@@ -202,7 +213,15 @@ class SimpleMetricsCallback(BaseCallback):
                 'max_deadlock_severity': episode_stats['max_deadlock_severity'],
                 'avg_throughput': episode_stats['avg_throughput'],
                 'avg_acceleration': episode_stats['avg_acceleration'],
-                'total_controlled_vehicles': episode_stats['total_controlled']
+                'total_controlled_vehicles': episode_stats['total_controlled'],
+                
+                # Simulation time statistics
+                'episode_simulation_time': episode_stats.get('episode_simulation_time', 0.0),
+                'total_simulation_time': episode_stats.get('total_simulation_time', 0.0),
+                'episode_start_time': episode_stats.get('episode_start_time', ''),
+                'simulation_start_time': episode_stats.get('simulation_start_time', ''),
+                'episode_duration_hours': episode_stats.get('episode_duration_hours', 0.0),
+                'total_duration_hours': episode_stats.get('total_duration_hours', 0.0)
             }
             
             # Save episode summary
@@ -216,6 +235,8 @@ class SimpleMetricsCallback(BaseCallback):
             print(f"   Deadlocks: {episode_summary['total_deadlocks']}")
             print(f"   Avg throughput: {episode_summary['avg_throughput']:.1f} vehicles/h")
             print(f"   Action means: [{action_means[0]:.3f}, {action_means[1]:.1f}, {action_means[2]:.1f}, {action_means[3]:.1f}]")
+            print(f"   ⏰ Simulation time: {episode_summary['episode_simulation_time']:.1f}s ({episode_summary['episode_duration_hours']:.3f}h)")
+            print(f"   ⏰ Total simulation time: {episode_summary['total_simulation_time']:.1f}s ({episode_summary['total_duration_hours']:.3f}h)")
             
         except Exception as e:
             print(f"⚠️ Episode finalization error: {e}")
@@ -247,6 +268,20 @@ class SimpleMetricsCallback(BaseCallback):
         # Get max deadlock severity
         max_severity = max([m.get('deadlock_severity', 0.0) for m in self.episode_metrics])
         
+        # Calculate simulation time statistics
+        episode_simulation_time = 0.0
+        total_simulation_time = 0.0
+        episode_start_time = ''
+        simulation_start_time = ''
+        
+        if self.episode_metrics:
+            # Get the latest simulation time info
+            latest_metrics = self.episode_metrics[-1]
+            episode_simulation_time = latest_metrics.get('episode_simulation_time', 0.0)
+            total_simulation_time = latest_metrics.get('total_simulation_time', 0.0)
+            episode_start_time = latest_metrics.get('episode_start_time', '')
+            simulation_start_time = latest_metrics.get('simulation_start_time', '')
+        
         return {
             'total_exits': total_exits,
             'total_collisions': total_collisions,
@@ -254,7 +289,13 @@ class SimpleMetricsCallback(BaseCallback):
             'max_deadlock_severity': max_severity,
             'avg_throughput': np.mean(throughputs) if throughputs else 0.0,
             'avg_acceleration': np.mean(accelerations) if accelerations else 0.0,
-            'total_controlled': max(controlled) if controlled else 0
+            'total_controlled': max(controlled) if controlled else 0,
+            'episode_simulation_time': episode_simulation_time,
+            'total_simulation_time': total_simulation_time,
+            'episode_start_time': episode_start_time,
+            'simulation_start_time': simulation_start_time,
+            'episode_duration_hours': round(episode_simulation_time / 3600, 3) if episode_simulation_time else 0.0,
+            'total_duration_hours': round(total_simulation_time / 3600, 3) if total_simulation_time else 0.0
         }
 
     def _save_step_metrics(self):
@@ -357,7 +398,7 @@ def main():
     config = {
         'total_timesteps': args.total_timesteps,
         'learning_rate': 3e-4,
-        'n_steps': 150,
+        'n_steps': 256,
         'batch_size': 64,
         'n_epochs': 4,
         'gamma': 0.99,

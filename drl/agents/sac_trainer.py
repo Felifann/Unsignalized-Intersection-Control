@@ -54,7 +54,8 @@ class MetricsCallback(BaseCallback):
             infos = self.locals.get('infos', [{}])
             actions = self.locals.get('actions', [])
             
-            if not infos or not actions:
+            # FIXED: Use proper length checks instead of boolean checks for arrays
+            if len(infos) == 0 or len(actions) == 0:
                 return True
             
             info = infos[0] if isinstance(infos[0], dict) else {}
