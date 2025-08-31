@@ -89,7 +89,7 @@ class MetricsCallback(BaseCallback):
             self.episode_metrics.append(step_metrics)
             
             # Save step metrics every 1000 steps
-            if self.num_timesteps % 1000 == 0:
+            if self.num_timesteps % 128 == 0:
                 self._save_step_metrics()
                 
         except Exception as e:
@@ -117,16 +117,12 @@ class MetricsCallback(BaseCallback):
             return
         
         try:
-            # Convert actions to numpy array for calculations
-            actions_array = np.array(self.episode_actions)
-            
-            # Calculate action space parameter statistics
-            action_means = np.mean(actions_array, axis=0)
-            action_vars = np.var(actions_array, axis=0)
-            action_stds = np.std(actions_array, axis=0)
-            
             # Get episode-level metrics
             episode_stats = self._calculate_episode_stats()
+            
+            # Get TRUE EXACT parameter values from the environment
+            # These are the actual parameter values that were applied during the episode
+            exact_params = self._get_exact_parameter_values()
             
             # Create episode summary
             episode_summary = {
@@ -135,22 +131,11 @@ class MetricsCallback(BaseCallback):
                 'episode_end_step': self.num_timesteps,
                 'episode_length': len(self.episode_actions),
                 
-                # Action space parameter statistics
-                'urgency_position_ratio_mean': float(action_means[0]),
-                'urgency_position_ratio_var': float(action_vars[0]),
-                'urgency_position_ratio_std': float(action_stds[0]),
-                
-                'speed_diff_modifier_mean': float(action_means[1]),
-                'speed_diff_modifier_var': float(action_vars[1]),
-                'speed_diff_modifier_std': float(action_stds[1]),
-                
-                'max_participants_mean': float(action_means[2]),
-                'max_participants_var': float(action_vars[2]),
-                'max_participants_std': float(action_stds[2]),
-                
-                'ignore_vehicles_go_mean': float(action_means[3]),
-                'ignore_vehicles_go_var': float(action_vars[3]),
-                'ignore_vehicles_go_std': float(action_stds[3]),
+                # TRUE EXACT parameter values (actual values applied in environment)
+                'urgency_position_ratio_exact': float(exact_params.get('urgency_position_ratio', 0.0)),
+                'speed_diff_modifier_exact': float(exact_params.get('speed_diff_modifier', 0.0)),
+                'max_participants_exact': float(exact_params.get('max_participants_per_auction', 4.0)),
+                'ignore_vehicles_go_exact': float(exact_params.get('ignore_vehicles_go', 50.0)),
                 
                 # Episode performance metrics
                 'total_vehicles_exited': episode_stats['total_exits'],
@@ -172,7 +157,7 @@ class MetricsCallback(BaseCallback):
             print(f"   Collisions: {episode_summary['total_collisions']}")
             print(f"   Deadlocks: {episode_summary['total_deadlocks']}")
             print(f"   Avg throughput: {episode_summary['avg_throughput']:.1f} vehicles/h")
-            print(f"   Action means: [{action_means[0]:.3f}, {action_means[1]:.1f}, {action_means[2]:.1f}, {action_means[3]:.1f}]")
+            print(f"   TRUE EXACT params: [{episode_summary['urgency_position_ratio_exact']:.3f}, {episode_summary['speed_diff_modifier_exact']:.1f}, {episode_summary['max_participants_exact']:.0f}, {episode_summary['ignore_vehicles_go_exact']:.1f}]")
             
         except Exception as e:
             print(f"⚠️ Episode finalization error: {e}")
@@ -265,6 +250,22 @@ class MetricsCallback(BaseCallback):
     def _on_training_end(self):
         """Called when training ends"""
         self._cleanup_resources()
+
+    def _get_exact_parameter_values(self) -> dict:
+        """Get TRUE EXACT parameter values from the environment (not from action means)"""
+        try:
+            # Try to get exact values from the evaluation environment
+            if hasattr(self.eval_env, 'get_current_parameter_values'):
+                exact_params = self.eval_env.get_current_parameter_values()
+                print(f"✅ Retrieved TRUE EXACT parameters from environment: {exact_params}")
+                return exact_params
+            else:
+                print(f"⚠️ Environment does not support get_current_parameter_values()")
+                return {}
+                
+        except Exception as e:
+            print(f"⚠️ Failed to get exact parameter values: {e}")
+            return {}
 
 class PPOTrainer:
     """PPO trainer for traffic intersection environment"""

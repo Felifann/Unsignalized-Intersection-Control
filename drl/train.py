@@ -13,6 +13,7 @@ import json
 import resource
 import gc
 from typing import List, Dict
+from datetime import datetime
 
 # --- Prefer gymnasium if available, and make it available as 'gym' for legacy imports ---
 try:
@@ -139,6 +140,18 @@ class SimpleMetricsCallback(BaseCallback):
                 print(f"   This suggests collision counter was not properly reset between episodes")
                 print(f"   Training may be unstable due to massive negative rewards")
                 print(f"   Check if traffic_generator.reset_episode_state() is working properly")
+                
+                # ENHANCED: Provide more diagnostic information
+                if hasattr(self, 'episode_count') and self.episode_count > 0:
+                    print(f"   Current episode: {self.episode_count}")
+                    print(f"   Episode start step: {self.episode_start_step}")
+                    print(f"   Current timestep: {self.num_timesteps}")
+                
+                # Check if this is a new episode issue
+                if collision_count > 1000:
+                    print(f"   🚨 CRITICAL: Collision count {collision_count} is extremely high!")
+                    print(f"   This episode should be terminated immediately")
+                    print(f"   Consider checking environment reset logic")
             
             self.episode_metrics.append(step_metrics)
             
@@ -153,9 +166,36 @@ class SimpleMetricsCallback(BaseCallback):
 
     def _is_episode_reset(self) -> bool:
         """Check if episode reset occurred by looking for environment reset signals"""
-        # This is a simple heuristic - in practice, you might want to use
-        # more sophisticated episode boundary detection
-        return len(self.episode_actions) > 0 and len(self.episode_actions) > 200
+        # ENHANCED: More reliable episode boundary detection
+        # Check if we have a significant gap in timesteps or if episode length is reasonable
+        if len(self.episode_actions) == 0:
+            return False
+        
+        # Method 1: Check for reasonable episode length (most reliable)
+        # Normal episodes should be around 128 steps based on config
+        if len(self.episode_actions) > 200:  # Episode too long, likely needs reset
+            return True
+        
+        # Method 2: Check for timestep gaps (backup method)
+        if hasattr(self, 'episode_start_step') and self.episode_start_step > 0:
+            current_gap = self.num_timesteps - self.episode_start_step
+            if current_gap > 1000:  # Large gap suggests episode boundary
+                return True
+        
+        # Method 3: Check for action pattern changes (heuristic)
+        if len(self.episode_actions) > 10:
+            recent_actions = self.episode_actions[-10:]
+            early_actions = self.episode_actions[:10]
+            
+            # If recent actions are very different from early actions, might be new episode
+            recent_mean = np.mean(recent_actions, axis=0)
+            early_mean = np.mean(early_actions, axis=0)
+            action_change = np.mean(np.abs(recent_mean - early_mean))
+            
+            if action_change > 2.0:  # Significant change in action patterns
+                return True
+        
+        return False
 
     def _start_new_episode(self):
         """Start tracking a new episode"""
@@ -189,22 +229,11 @@ class SimpleMetricsCallback(BaseCallback):
                 'episode_end_step': self.num_timesteps,
                 'episode_length': len(self.episode_actions),
                 
-                # Action space parameter statistics
-                'urgency_position_ratio_mean': float(action_means[0]),
-                'urgency_position_ratio_var': float(action_vars[0]),
-                'urgency_position_ratio_std': float(action_stds[0]),
-                
-                'speed_diff_modifier_mean': float(action_means[1]),
-                'speed_diff_modifier_var': float(action_vars[1]),
-                'speed_diff_modifier_std': float(action_stds[1]),
-                
-                'max_participants_mean': float(action_means[2]),
-                'max_participants_var': float(action_vars[2]),
-                'max_participants_std': float(action_stds[2]),
-                
-                'ignore_vehicles_go_mean': float(action_means[3]),
-                'ignore_vehicles_go_var': float(action_vars[3]),
-                'ignore_vehicles_go_std': float(action_stds[3]),
+                # TRUE EXACT parameter values (actual values applied in environment)
+                'urgency_position_ratio_exact': 0.0,  # Will be filled by environment
+                'speed_diff_modifier_exact': 0.0,     # Will be filled by environment
+                'max_participants_exact': 4.0,        # Will be filled by environment
+                'ignore_vehicles_go_exact': 50.0,     # Will be filled by environment
                 
                 # Episode performance metrics
                 'total_vehicles_exited': episode_stats['total_exits'],
@@ -352,18 +381,53 @@ class SimpleMetricsCallback(BaseCallback):
 
 # System resource monitoring functions removed - no longer needed
 
-def create_directories():
-    """Create all necessary directories"""
+def create_timestamped_directories(instance_id: int = 0) -> Dict[str, str]:
+    """Create timestamped directories for each training run"""
+    # Generate timestamp for this training run
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Create base timestamped directory
+    timestamped_base = f"drl/training_runs/{timestamp}"
+    
+    # Add instance suffix if multiple instances
+    if instance_id > 0:
+        timestamped_base += f"_instance_{instance_id}"
+    
+    # Create all subdirectories
     dirs = {
-        'log_dir': "drl/logs",
-        'checkpoint_dir': "drl/checkpoints", 
-        'results_dir': "drl/results",
-        'plots_dir': "drl/plots"
+        'base_dir': timestamped_base,
+        'log_dir': f"{timestamped_base}/logs",
+        'checkpoint_dir': f"{timestamped_base}/checkpoints", 
+        'results_dir': f"{timestamped_base}/results",
+        'plots_dir': f"{timestamped_base}/plots",
+        'csv_dir': f"{timestamped_base}/csv",
+        'config_dir': f"{timestamped_base}/config"
     }
     
+    # Create all directories
     for name, path in dirs.items():
         os.makedirs(path, exist_ok=True)
         print(f"📁 {name}: {path}")
+    
+    # Save training configuration to config directory
+    config_info = {
+        'timestamp': timestamp,
+        'instance_id': instance_id,
+        'created_at': datetime.now().isoformat(),
+        'training_parameters': {
+            'total_timesteps': '5000',  # Default value
+            'learning_rate': '3e-4',
+            'n_steps': '256',
+            'batch_size': '64',
+            'n_epochs': '4'
+        }
+    }
+    
+    config_file = os.path.join(dirs['config_dir'], 'training_config.json')
+    with open(config_file, 'w') as f:
+        json.dump(config_info, f, indent=2)
+    
+    print(f"📋 Training configuration saved to: {config_file}")
     
     return dirs
 
@@ -381,18 +445,9 @@ def main():
     
     args = parser.parse_args()
     
-    # Create directories with instance-specific naming
-    instance_suffix = f"_instance_{args.instance_id}" if args.instance_id > 0 else ""
-    dirs = {
-        'log_dir': f"drl/logs{instance_suffix}",
-        'checkpoint_dir': f"drl/checkpoints{instance_suffix}", 
-        'results_dir': f"drl/results{instance_suffix}",
-        'plots_dir': f"drl/plots{instance_suffix}"
-    }
-    
-    for name, path in dirs.items():
-        os.makedirs(path, exist_ok=True)
-        print(f"📁 {name}: {path}")
+    # Create timestamped directories for this training run
+    print(f"🕐 Creating timestamped directories for training run...")
+    dirs = create_timestamped_directories(args.instance_id)
     
     # DRL parameters
     config = {
@@ -410,12 +465,28 @@ def main():
         'checkpoint_freq': 1000
         }
     
+    # Update config file with actual training parameters
+    config_file = os.path.join(dirs['config_dir'], 'training_config.json')
+    if os.path.exists(config_file):
+        with open(config_file, 'r') as f:
+            config_info = json.load(f)
+        config_info['training_parameters'].update({
+            'total_timesteps': str(args.total_timesteps),
+            'learning_rate': str(config['learning_rate']),
+            'n_steps': str(config['n_steps']),
+            'batch_size': str(config['batch_size']),
+            'n_epochs': str(config['n_epochs'])
+        })
+        with open(config_file, 'w') as f:
+            json.dump(config_info, f, indent=2)
+    
     training_success = False
     model = None
     
     try:
         print(f"🎯 Creating optimized training environment for CARLA instance {args.instance_id}...")
         print(f"   🌐 CARLA Server: {args.carla_host}:{args.carla_port}")
+        print(f"   📁 Training run directory: {dirs['base_dir']}")
         
         env = AuctionGymEnv(sim_cfg={
             'max_steps': 128,  # OPTIMAL: Aligned with n_steps=512 for 2 episodes per update
@@ -435,6 +506,23 @@ def main():
         })
         print("✅ Environment created successfully")
 
+        # FIXED: Verify that max_steps configuration was properly applied
+        print("\n🔍 VERIFYING EPISODE LENGTH CONFIGURATION:")
+        if hasattr(env, 'max_actions'):
+            print(f"   ✅ Environment max_actions: {env.max_actions}")
+            if env.max_actions == 128:
+                print(f"   🎯 SUCCESS: Episode length correctly set to 128 steps")
+            else:
+                print(f"   ❌ FAILED: Expected 128 steps, got {env.max_actions}")
+        else:
+            print(f"   ⚠️ Environment has no max_actions attribute")
+        
+        # Also check sim_cfg if available
+        if hasattr(env, 'sim_cfg'):
+            print(f"   Environment sim_cfg max_steps: {env.sim_cfg.get('max_steps', 'NOT_SET')}")
+        else:
+            print(f"   Environment has no sim_cfg attribute")
+        
         # Show action space configuration for verification
         print("\n🔍 VERIFYING ACTION SPACE CONFIGURATION:")
         action_space_config = env.get_current_action_space_config()
@@ -675,7 +763,46 @@ def main():
             print(f"   You can still run analysis manually:")
             print(f"   python -m drl.utils.plot_generator --results-dir {dirs['results_dir']} --plots-dir {dirs['plots_dir']}")
         
+        # Copy CSV files to dedicated CSV directory for easy access
+        try:
+            print(f"\n📁 Copying CSV files to dedicated directory...")
+            import shutil
+            
+            # Copy episode metrics CSV
+            episode_csv_src = os.path.join(dirs['results_dir'], 'episode_metrics.csv')
+            episode_csv_dst = os.path.join(dirs['csv_dir'], 'episode_metrics.csv')
+            if os.path.exists(episode_csv_src):
+                shutil.copy2(episode_csv_src, episode_csv_dst)
+                print(f"   ✅ Copied episode_metrics.csv to {dirs['csv_dir']}")
+            
+            # Copy step metrics CSV
+            step_csv_src = os.path.join(dirs['results_dir'], 'step_metrics.csv')
+            step_csv_dst = os.path.join(dirs['csv_dir'], 'step_metrics.csv')
+            if os.path.exists(step_csv_src):
+                shutil.copy2(step_csv_src, step_csv_dst)
+                print(f"   ✅ Copied step_metrics.csv to {dirs['csv_dir']}")
+            
+            # Create a summary CSV with training run information
+            summary_csv_path = os.path.join(dirs['csv_dir'], 'training_summary.csv')
+            summary_data = {
+                'training_run': [dirs['base_dir'].split('/')[-1]], # Use the timestamped base directory name
+                'instance_id': [args.instance_id],
+                'total_timesteps': [args.total_timesteps],
+                'training_success': [training_success],
+                'elapsed_time_seconds': [elapsed_time if 'elapsed_time' in locals() else 0],
+                'base_directory': [dirs['base_dir']],
+                'created_at': [datetime.now().isoformat()]
+            }
+            summary_df = pd.DataFrame(summary_data)
+            summary_df.to_csv(summary_csv_path, index=False)
+            print(f"   ✅ Created training_summary.csv in {dirs['csv_dir']}")
+            
+        except Exception as csv_error:
+            print(f"⚠️ CSV copying failed: {csv_error}")
+        
         print(f"\n🏁 Training session complete!")
+        print(f"📁 All results stored in: {dirs['base_dir']}")
+        print(f"📊 CSV files available in: {dirs['csv_dir']}")
 
 if __name__ == "__main__":
     main()

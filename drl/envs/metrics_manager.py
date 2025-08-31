@@ -149,28 +149,32 @@ class SimulationMetricsManager:
         # CRITICAL: Store traffic generator reference for collision count synchronization
         self._traffic_generator_ref = traffic_generator
         
-        # FIXED: Reset collision baseline to match traffic generator reset
+        # FIXED: Now traffic_generator should already be reset, so read its current value
         # This ensures collision penalties are calculated correctly for new episodes
         initial_collision_count = 0
+        if traffic_generator and hasattr(traffic_generator, 'collision_count'):
+            initial_collision_count = traffic_generator.collision_count
+            print(f"✅ Reading collision count baseline from traffic_generator: {initial_collision_count}")
+            
+            # VALIDATION: Ensure collision count is actually reset
+            if initial_collision_count != 0:
+                print(f"⚠️ WARNING: traffic_generator collision count not reset: {initial_collision_count}")
+                print(f"   This may cause incorrect collision penalty calculations")
+                # Don't force reset here - let the calling code handle it
+        else:
+            print("⚠️ No traffic_generator reference available for collision count baseline")
         
         # DEBUG: Log what we're resetting
         print(f"🔍 Resetting collision baseline: prev_collision_count = {initial_collision_count}")
         
-        # CRITICAL: Also reset the current collision count to ensure proper synchronization
-        if hasattr(self, '_traffic_generator_ref') and self._traffic_generator_ref:
-            try:
-                if hasattr(self._traffic_generator_ref, 'collision_count'):
-                    old_count = self._traffic_generator_ref.collision_count
-                    self._traffic_generator_ref.collision_count = 0
-                    print(f"🔧 Synchronized traffic generator collision count: {old_count} -> 0")
-            except Exception as e:
-                print(f"⚠️ Could not synchronize traffic generator collision count: {e}")
+        # REMOVED: Don't force reset traffic_generator here - it should already be reset
+        # The calling code (sim_wrapper) now handles this in the correct order
         
         self.metrics = {
             'avg_acceleration': 0.0,
             'collision_count': 0,
             'prev_vehicles_exited': initial_vehicles_exited,  # Initialize with current baseline
-            'prev_collision_count': initial_collision_count,  # FIXED: Start at 0 for new episode
+            'prev_collision_count': initial_collision_count,  # FIXED: Use actual traffic_generator value
             'prev_deadlock_count': 0,  # FIXED: Always start at 0 for new episode
             'episode_deadlock_baseline': None,  # Will be set on first deadlock check
             'current_deadlock_severity': 0.0,
@@ -231,43 +235,30 @@ class SimulationMetricsManager:
                 if current_collisions > 0 or prev_collisions > 0:
                     print(f"🔍 Collision Debug: current={current_collisions}, prev={prev_collisions}, new={new_collisions}")
                 
-                # CRITICAL SAFETY CHECK: Ensure collision count is properly synchronized
+                # ENHANCED VALIDATION: Check for proper episode reset
                 if current_collisions > 0 and prev_collisions == 0 and new_collisions == current_collisions:
                     # This suggests the collision count wasn't properly reset between episodes
                     print(f"🚨 CRITICAL: Collision count synchronization issue detected!")
                     print(f"   Current: {current_collisions}, Previous: {prev_collisions}, New: {new_collisions}")
-                    print(f"   Attempting to fix by resetting collision count...")
+                    print(f"   This episode may have incorrect collision penalties")
                     
-                    # Try to reset the collision counter automatically
-                    if hasattr(scenario.traffic_generator, 'reset_collision_count'):
-                        old_count = scenario.traffic_generator.reset_collision_count()
-                        print(f"   ✅ Automatically reset collision count from {old_count} to 0")
-                        current_collisions = 0
-                        new_collisions = 0
-                    else:
-                        print(f"   ⚠️ Could not reset collision count automatically")
-                        # Force the count to be reasonable for this episode
-                        current_collisions = min(current_collisions, 10)  # Cap at 10 for this episode
-                        new_collisions = max(0, current_collisions - prev_collisions)
-                        print(f"   🔧 Capped collision count at {current_collisions} for this episode")
+                    # Don't auto-reset here - let the episode continue but log the issue
+                    # The next episode reset should fix this
+                    print(f"   ⚠️ Episode will continue with potential incorrect rewards")
+                    print(f"   🔧 This will be fixed on next episode reset")
                 
-                # SAFETY CHECK: Detect and fix suspicious collision counts
+                # ENHANCED SAFETY CHECK: Detect and handle suspicious collision counts
                 if current_collisions > 100:  # Suspiciously high collision count
                     print(f"🚨 SAFETY CHECK: Suspiciously high collision count detected: {current_collisions}")
                     print(f"   This suggests collision counter was not properly reset between episodes")
                     
-                    # Try to reset the collision counter automatically
-                    if hasattr(scenario.traffic_generator, 'reset_collision_count'):
-                        old_count = scenario.traffic_generator.reset_collision_count()
-                        print(f"   ✅ Automatically reset collision count from {old_count} to 0")
-                        current_collisions = 0
-                        new_collisions = 0
-                    else:
-                        print(f"   ⚠️ Could not reset collision count automatically")
-                        # Force the count to be reasonable for this episode
-                        current_collisions = min(current_collisions, 10)  # Cap at 10 for this episode
-                        new_collisions = max(0, current_collisions - prev_collisions)
-                        print(f"   🔧 Capped collision count at {current_collisions} for this episode")
+                    # Don't auto-reset - just cap the penalty for this episode
+                    if new_collisions > 0:
+                        # Cap new collisions to prevent massive negative rewards
+                        capped_new_collisions = min(new_collisions, 10)  # Cap at 10 for this episode
+                        if capped_new_collisions < new_collisions:
+                            print(f"   🔧 Capping new collisions from {new_collisions} to {capped_new_collisions} for this episode")
+                            new_collisions = capped_new_collisions
                 
                 # VALIDATION: Check for suspicious collision counts
                 if current_collisions > 1000:

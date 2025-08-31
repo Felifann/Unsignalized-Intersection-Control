@@ -50,8 +50,15 @@ class SimulationEnv:
         unified_sim_cfg.update(self.sim_cfg)
         self.sim_cfg = unified_sim_cfg
         
-        # CORRECTED: Track actions vs simulation steps separately 
-        self.max_actions = self.sim_cfg.get('max_steps', 2000)  # This is actually max actions
+        # FIXED: Ensure max_steps is properly set from sim_cfg
+        # The sim_cfg should override unified config for training-specific settings
+        if 'max_steps' in self.sim_cfg:
+            self.max_actions = self.sim_cfg['max_steps']
+            print(f"🔧 FIXED: Using explicit max_steps from sim_cfg: {self.max_actions}")
+        else:
+            self.max_actions = self.sim_cfg.get('max_steps', 2000)  # Fallback to default
+            print(f"⚠️ WARNING: No max_steps in sim_cfg, using default: {self.max_actions}")
+        
         self.current_action = 0  # Track actions taken by DRL agent
         self.current_step = 0    # Track simulation steps (for internal use)
         
@@ -331,6 +338,16 @@ class SimulationEnv:
             done = (self.current_action >= self.max_actions or 
                    self._get_cached_deadlock_status() or
                    severe_deadlock_occurred)
+            
+            # FIXED: Add debugging output for episode termination
+            if self.current_action % 20 == 0 or self.current_action >= self.max_actions - 10:  # Log every 20 steps or last 10 steps
+                print(f"🔍 Episode Progress: {self.current_action}/{self.max_actions} actions ({(self.current_action/self.max_actions)*100:.1f}%)")
+                if self.current_action >= self.max_actions:
+                    print(f"🎯 Episode terminating: Reached max_actions limit ({self.max_actions})")
+                elif self._get_cached_deadlock_status():
+                    print(f"🚨 Episode terminating: Deadlock detected")
+                elif severe_deadlock_occurred:
+                    print(f"⚡ Episode terminating: Severe deadlock detected")
             
             # Generate info using metrics manager
             info = self.metrics_manager.get_info_dict(
@@ -840,9 +857,6 @@ class SimulationEnv:
                 
                 # Tick the world to ensure everything is synchronized
                 self.scenario.carla.world.tick()
-                
-                # CRITICAL FIX: Don't destroy vehicles after reset - they were just created!
-                # self._cleanup_existing_vehicles()  # REMOVED: This was causing the issue
                 
                 # Verify reset success by checking for vehicles
                 vehicles = self.state_extractor.get_vehicle_states(include_all_vehicles=True)
