@@ -248,7 +248,8 @@ class SimpleMetricsCallback(BaseCallback):
                 'total_controlled': info.get('total_controlled', 0),
                 'vehicles_exited': info.get('vehicles_exited', 0),
                 'deadlocks_detected': info.get('deadlocks_detected', 0),
-                'deadlock_severity': info.get('deadlock_severity', 0.0)
+                'deadlock_severity': info.get('deadlock_severity', 0.0),
+                'reward': info.get('reward', 0.0)  # NEW: Add exact reward value
             }
             
             # Add simulation time information if available
@@ -287,8 +288,8 @@ class SimpleMetricsCallback(BaseCallback):
             if len(self.episode_actions) % 20 == 0:
                 print(f"📊 Episode {self.episode_count}: Collected {len(self.episode_metrics)} step metrics, {len(self.episode_actions)} actions")
             
-            # Save step metrics every 1000 steps
-            if self.num_timesteps % 1000 == 0:
+            # Save step metrics every 10 steps (increased frequency for reward tracking)
+            if self.num_timesteps % 10 == 0:
                 self._save_step_metrics()
                 
         except Exception as e:
@@ -366,6 +367,9 @@ class SimpleMetricsCallback(BaseCallback):
                 'avg_acceleration': episode_stats['avg_acceleration'],
                 'total_controlled_vehicles': episode_stats['total_controlled'],
                 
+                # NEW: Reward statistics (exact values only, no calculations)
+                'total_reward': episode_stats['total_reward'],
+                
                 # Simulation time statistics
                 'episode_simulation_time': episode_stats.get('episode_simulation_time', 0.0),
                 'total_simulation_time': episode_stats.get('total_simulation_time', 0.0),
@@ -386,6 +390,7 @@ class SimpleMetricsCallback(BaseCallback):
             print(f"   Deadlocks: {episode_summary['total_deadlocks']}")
             print(f"   Avg throughput: {episode_summary['avg_throughput']:.1f} vehicles/h")
             print(f"   TRUE EXACT params: [{episode_summary['urgency_position_ratio_exact']:.3f}, {episode_summary['speed_diff_modifier_exact']:.1f}, {episode_summary['max_participants_exact']:.0f}, {episode_summary['ignore_vehicles_go_exact']:.1f}]")
+            print(f"   💰 Reward: Total={episode_summary['total_reward']:.1f}")
             print(f"   ⏰ Simulation time: {episode_summary['episode_simulation_time']:.1f}s ({episode_summary['episode_duration_hours']:.3f}h)")
             print(f"   ⏰ Total simulation time: {episode_summary['total_simulation_time']:.1f}s ({episode_summary['total_duration_hours']:.3f}h)")
             
@@ -438,6 +443,10 @@ class SimpleMetricsCallback(BaseCallback):
             episode_start_time = latest_metrics.get('episode_start_time', '')
             simulation_start_time = latest_metrics.get('simulation_start_time', '')
         
+        # Calculate reward statistics (exact values only, no calculations)
+        rewards = [m.get('reward', 0.0) for m in self.episode_metrics]
+        total_reward = sum(rewards) if rewards else 0.0
+        
         return {
             'total_exits': total_exits,
             'total_collisions': total_collisions,
@@ -451,7 +460,8 @@ class SimpleMetricsCallback(BaseCallback):
             'episode_start_time': episode_start_time,
             'simulation_start_time': simulation_start_time,
             'episode_duration_hours': round(episode_simulation_time / 3600, 3) if episode_simulation_time else 0.0,
-            'total_duration_hours': round(total_simulation_time / 3600, 3) if total_simulation_time else 0.0
+            'total_duration_hours': round(total_simulation_time / 3600, 3) if total_simulation_time else 0.0,
+            'total_reward': total_reward
         }
 
     def _save_step_metrics(self):

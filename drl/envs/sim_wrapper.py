@@ -385,6 +385,9 @@ class SimulationEnv:
                 self.current_action, self.max_actions  # Report actions, not sim steps
             )
             
+            # NEW: Add exact reward value to info for metrics collection
+            info['reward'] = reward
+            
             # Add validation info
             current_vehicles = len(self.state_extractor.get_vehicle_states())
             info.update({

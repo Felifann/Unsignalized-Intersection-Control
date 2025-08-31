@@ -299,7 +299,7 @@ class SimulationMetricsManager:
             reward -= 0.1  # Small penalty per step
             
             # Bound reward to reasonable range
-            reward = np.clip(reward, -100.0, 100.0)
+            reward = np.clip(reward, -1000.0, 1000.0)
             
             return reward
             
