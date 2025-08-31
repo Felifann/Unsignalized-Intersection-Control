@@ -44,20 +44,49 @@ class SimulationEnv:
         if 'training_mode' in self.sim_cfg:
             self.unified_config.system.training_mode = self.sim_cfg['training_mode']
         
-        # Generate sim config from unified config
+        # FIXED: Prioritize sim_cfg max_steps over unified config for training
+        # This ensures training scripts can override the default episode length
+        if 'max_steps' in self.sim_cfg:
+            # Training script explicitly set max_steps - use this value
+            self.max_actions = self.sim_cfg['max_steps']
+            print(f"🔧 TRAINING PRIORITY: Using explicit max_steps from sim_cfg: {self.max_actions}")
+            
+            # Update unified config to match training requirements
+            self.unified_config.drl.max_steps = self.max_actions
+            print(f"   ✅ Updated unified config DRL max_steps to: {self.max_actions}")
+        else:
+            # No explicit max_steps in sim_cfg - use unified config default
+            self.max_actions = self.unified_config.drl.max_steps
+            print(f"🔧 UNIFIED CONFIG: Using default max_steps from unified config: {self.max_actions}")
+        
+        # Generate sim config from unified config AFTER setting max_steps
         unified_sim_cfg = self.unified_config.to_sim_config()
-        # Override with any explicit sim_cfg values
-        unified_sim_cfg.update(self.sim_cfg)
+        
+        # FIXED: Ensure max_steps is preserved from training configuration
+        if 'max_steps' in self.sim_cfg:
+            unified_sim_cfg['max_steps'] = self.sim_cfg['max_steps']
+            print(f"   🔒 Preserved training max_steps: {unified_sim_cfg['max_steps']}")
+        
+        # Override with any other explicit sim_cfg values (but preserve max_steps)
+        for key, value in self.sim_cfg.items():
+            if key != 'max_steps':  # Don't override max_steps
+                unified_sim_cfg[key] = value
+        
         self.sim_cfg = unified_sim_cfg
         
-        # FIXED: Ensure max_steps is properly set from sim_cfg
-        # The sim_cfg should override unified config for training-specific settings
+        # FIXED: Verify max_steps is correctly set
         if 'max_steps' in self.sim_cfg:
-            self.max_actions = self.sim_cfg['max_steps']
-            print(f"🔧 FIXED: Using explicit max_steps from sim_cfg: {self.max_actions}")
+            actual_max_steps = self.sim_cfg['max_steps']
+            if actual_max_steps != self.max_actions:
+                print(f"⚠️ WARNING: max_steps mismatch! Expected: {self.max_actions}, Got: {actual_max_steps}")
+                # Force correct value
+                self.sim_cfg['max_steps'] = self.max_actions
+                print(f"   🔧 Forced max_steps to: {self.max_actions}")
+            else:
+                print(f"✅ max_steps correctly set to: {self.max_actions}")
         else:
-            self.max_actions = self.sim_cfg.get('max_steps', 2000)  # Fallback to default
-            print(f"⚠️ WARNING: No max_steps in sim_cfg, using default: {self.max_actions}")
+            print(f"⚠️ WARNING: max_steps not found in sim_cfg, using: {self.max_actions}")
+            self.sim_cfg['max_steps'] = self.max_actions
         
         self.current_action = 0  # Track actions taken by DRL agent
         self.current_step = 0    # Track simulation steps (for internal use)

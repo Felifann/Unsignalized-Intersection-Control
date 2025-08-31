@@ -24,6 +24,10 @@ class AuctionGymEnv(gym.Env):
         # Pass unified config to simulation environment
         self.sim = SimulationEnv(self.sim_cfg, unified_config=unified_config)
         
+        # FIXED: Expose max_actions from simulation environment for proper episode tracking
+        self.max_actions = getattr(self.sim, 'max_actions', 128)
+        print(f"🎯 Episode length: {self.max_actions} steps (max_actions properly exposed)")
+        
         # OPTIMIZED observation space - REDUCED from 169 to 50 dimensions
         obs_dim = 50  # OPTIMIZED: 50 dimensions with 8 vehicles
         self.observation_space = spaces.Box(

@@ -66,6 +66,8 @@ class SimpleMetricsCallback(BaseCallback):
         self.episode_metrics = []  # Store metrics for current episode
         self.episode_count = 0
         self.episode_start_step = 0
+        self.current_episode_termination_reason = "Unknown"  # Store termination reason for current episode
+        self.current_episode_params = {}  # Store current episode parameters
         
         # CSV file paths
         self.step_metrics_path = os.path.join(log_dir, 'step_metrics.csv')
@@ -97,10 +99,140 @@ class SimpleMetricsCallback(BaseCallback):
             info = infos[0] if isinstance(infos[0], dict) else {}
             action = actions[0] if isinstance(actions[0], (np.ndarray, list)) else []
             
-            # Check if episode ended (reset occurred)
-            if self._is_episode_reset():
+            # FIXED: Check for episode termination based on exact step count OR deadlock detection
+            # This ensures episodes end at exactly 128 steps OR when deadlock occurs
+            episode_should_end = False
+            termination_reason = ""
+            
+            # Check if episode reached max steps (128)
+            if len(self.episode_actions) >= 128:
+                episode_should_end = True
+                termination_reason = f"Reached exactly {len(self.episode_actions)} steps"
+                print(f"🎯 Episode {self.episode_count} completed: {termination_reason}")
+            
+            # Check if episode terminated due to deadlock (from environment)
+            elif info.get('termination_info', {}).get('deadlock_detected', False):
+                episode_should_end = True
+                termination_reason = "Deadlock detected by environment"
+                print(f"🚨 Episode {self.episode_count} terminated early: {termination_reason}")
+                print(f"   📊 Deadlock info: {info.get('termination_info', {})}")
+                print(f"   📊 Current episode length: {len(self.episode_actions)} steps")
+            
+            elif info.get('termination_info', {}).get('severe_deadlock_detected', False):
+                episode_should_end = True
+                termination_reason = "Severe deadlock detected by environment"
+                print(f"⚡ Episode {self.episode_count} terminated early: {termination_reason}")
+                print(f"   📊 Severe deadlock info: {info.get('termination_info', {})}")
+                print(f"   📊 Current episode length: {len(self.episode_actions)} steps")
+            
+            # End episode if any termination condition is met
+            if episode_should_end:
+                print(f"📊 Episode {self.episode_count} finalizing: {termination_reason}")
+                # Store termination reason for this episode
+                self.current_episode_termination_reason = termination_reason
+                
+                # CRITICAL: Add current step's action and metrics BEFORE finalizing episode
+                # This ensures the final step is included in the episode data
+                if isinstance(action, (np.ndarray, list)) and len(action) == 4:
+                    self.episode_actions.append(action)
+                
+                # Create and add current step metrics to current episode
+                current_step_metrics = {
+                    'timestep': self.num_timesteps,
+                    'episode': self.episode_count,
+                    'throughput': info.get('throughput', 0.0),
+                    'avg_acceleration': info.get('avg_acceleration', 0.0),
+                    'collision_count': info.get('collision_count', 0),
+                    'total_controlled': info.get('total_controlled', 0),
+                    'vehicles_exited': info.get('vehicles_exited', 0),
+                    'deadlocks_detected': info.get('deadlocks_detected', 0),
+                    'deadlock_severity': info.get('deadlock_severity', 0.0)
+                }
+                
+                # Add simulation time information if available
+                simulation_time_info = info.get('simulation_time', {})
+                if simulation_time_info:
+                    current_step_metrics.update({
+                        'episode_simulation_time': simulation_time_info.get('episode_simulation_time', 0.0),
+                        'total_simulation_time': simulation_time_info.get('total_simulation_time', 0.0),
+                        'episode_start_time': simulation_time_info.get('episode_start_time', ''),
+                        'simulation_start_time': simulation_time_info.get('simulation_start_time', '')
+                    })
+                
+                self.episode_metrics.append(current_step_metrics)
+                print(f"📊 Added final step metrics to episode {self.episode_count}: {len(self.episode_metrics)} total steps")
+                
+                # Now finalize the episode with complete data
                 self._finalize_episode()
                 self._start_new_episode()
+                
+                # CRITICAL: Skip further processing since episode has ended
+                return True
+            
+            # FIXED: Capture new episode parameters at the beginning of each episode
+            # This ensures we store the correct parameters that were applied for this episode
+            if len(self.episode_actions) == 1:  # First action of new episode
+                try:
+                    print(f"🔍 Episode {self.episode_count}: Capturing episode parameters...")
+                    
+                    # Method 1: Get parameters from action_params in info (most reliable)
+                    if 'action_params' in info:
+                        action_params = info['action_params']
+                        self.current_episode_params = {
+                            'urgency_position_ratio': action_params.get('urgency_position_ratio', 1.0),
+                            'speed_diff_modifier': action_params.get('speed_diff_modifier', 0.0),
+                            'max_participants_per_auction': action_params.get('max_participants_per_auction', 4.0),
+                            'ignore_vehicles_go': action_params.get('ignore_vehicles_go', 50.0)
+                        }
+                        print(f"🎯 Episode {self.episode_count} parameters captured from action_params:")
+                        print(f"   Urgency Position Ratio: {self.current_episode_params['urgency_position_ratio']:.3f}")
+                        print(f"   Speed Diff Modifier: {self.current_episode_params['speed_diff_modifier']:.1f}")
+                        print(f"   Max Participants: {self.current_episode_params['max_participants_per_auction']}")
+                        print(f"   Ignore Vehicles GO: {self.current_episode_params['ignore_vehicles_go']:.1f}%")
+                    
+                    # Method 2: Fallback to environment method if action_params not available
+                    elif hasattr(self, 'training_env') and hasattr(self.training_env, 'get_current_parameter_values'):
+                        self.current_episode_params = self.training_env.get_current_parameter_values()
+                        print(f"🎯 Episode {self.episode_count} parameters captured from environment:")
+                        print(f"   Urgency Position Ratio: {self.current_episode_params.get('urgency_position_ratio', 'N/A')}")
+                        print(f"   Speed Diff Modifier: {self.current_episode_params.get('speed_diff_modifier', 'N/A')}")
+                        print(f"   Max Participants: {self.current_episode_params.get('max_participants_per_auction', 'N/A')}")
+                        print(f"   Ignore Vehicles GO: {self.current_episode_params.get('ignore_vehicles_go', 'N/A')}")
+                    
+                    # Method 3: Use fallback values if no other method works
+                    else:
+                        print(f"⚠️ No parameter access method available, using fallback values")
+                        self.current_episode_params = {
+                            'urgency_position_ratio': 1.0,
+                            'speed_diff_modifier': 0.0,
+                            'max_participants_per_auction': 4.0,
+                            'ignore_vehicles_go': 50.0
+                        }
+                        print(f"   Using default parameters for episode {self.episode_count}")
+                        
+                except Exception as e:
+                    print(f"⚠️ Warning: Could not retrieve episode parameters: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # Use fallback values
+                    self.current_episode_params = {
+                        'urgency_position_ratio': 1.0,
+                        'speed_diff_modifier': 0.0,
+                        'max_participants_per_auction': 4.0,
+                        'ignore_vehicles_go': 50.0
+                    }
+            
+            # Debug: Log termination info every 10 steps to monitor episode state
+            if self.num_timesteps % 10 == 0 and info.get('termination_info'):
+                term_info = info.get('termination_info', {})
+                print(f"🔍 Step {self.num_timesteps}: Episode {self.episode_count} termination status:")
+                print(f"   Deadlock: {term_info.get('deadlock_detected', False)}")
+                print(f"   Severe deadlock: {term_info.get('severe_deadlock_detected', False)}")
+                print(f"   Max actions reached: {term_info.get('max_actions_reached', False)}")
+                print(f"   Current actions: {len(self.episode_actions)}/{128}")
+                print(f"   Episode should end: {episode_should_end}")
+                if episode_should_end:
+                    print(f"   🚨 TERMINATION TRIGGERED: {termination_reason}")
             
             # Store action for current episode
             if isinstance(action, (np.ndarray, list)) and len(action) == 4:
@@ -115,10 +247,6 @@ class SimpleMetricsCallback(BaseCallback):
                 'collision_count': info.get('collision_count', 0),
                 'total_controlled': info.get('total_controlled', 0),
                 'vehicles_exited': info.get('vehicles_exited', 0),
-                'urgency_position_ratio': info.get('urgency_position_ratio', 1.0),
-                'speed_diff_modifier': info.get('speed_diff_modifier', 0.0),
-                'max_participants_per_auction': info.get('max_participants_per_auction', 4),
-                'ignore_vehicles_go': info.get('ignore_vehicles_go', 50.0),
                 'deadlocks_detected': info.get('deadlocks_detected', 0),
                 'deadlock_severity': info.get('deadlock_severity', 0.0)
             }
@@ -155,6 +283,10 @@ class SimpleMetricsCallback(BaseCallback):
             
             self.episode_metrics.append(step_metrics)
             
+            # Debug: Log episode metrics collection every 20 steps
+            if len(self.episode_actions) % 20 == 0:
+                print(f"📊 Episode {self.episode_count}: Collected {len(self.episode_metrics)} step metrics, {len(self.episode_actions)} actions")
+            
             # Save step metrics every 1000 steps
             if self.num_timesteps % 1000 == 0:
                 self._save_step_metrics()
@@ -164,38 +296,7 @@ class SimpleMetricsCallback(BaseCallback):
         
         return True
 
-    def _is_episode_reset(self) -> bool:
-        """Check if episode reset occurred by looking for environment reset signals"""
-        # ENHANCED: More reliable episode boundary detection
-        # Check if we have a significant gap in timesteps or if episode length is reasonable
-        if len(self.episode_actions) == 0:
-            return False
-        
-        # Method 1: Check for reasonable episode length (most reliable)
-        # Normal episodes should be around 128 steps based on config
-        if len(self.episode_actions) > 200:  # Episode too long, likely needs reset
-            return True
-        
-        # Method 2: Check for timestep gaps (backup method)
-        if hasattr(self, 'episode_start_step') and self.episode_start_step > 0:
-            current_gap = self.num_timesteps - self.episode_start_step
-            if current_gap > 1000:  # Large gap suggests episode boundary
-                return True
-        
-        # Method 3: Check for action pattern changes (heuristic)
-        if len(self.episode_actions) > 10:
-            recent_actions = self.episode_actions[-10:]
-            early_actions = self.episode_actions[:10]
-            
-            # If recent actions are very different from early actions, might be new episode
-            recent_mean = np.mean(recent_actions, axis=0)
-            early_mean = np.mean(early_actions, axis=0)
-            action_change = np.mean(np.abs(recent_mean - early_mean))
-            
-            if action_change > 2.0:  # Significant change in action patterns
-                return True
-        
-        return False
+
 
     def _start_new_episode(self):
         """Start tracking a new episode"""
@@ -203,6 +304,8 @@ class SimpleMetricsCallback(BaseCallback):
         self.episode_start_step = self.num_timesteps
         self.episode_actions = []
         self.episode_metrics = []
+        self.current_episode_termination_reason = "Unknown"  # Reset termination reason
+        self.current_episode_params = {}  # Reset episode parameters
         print(f"🔄 Starting episode {self.episode_count} at step {self.episode_start_step}")
 
     def _finalize_episode(self):
@@ -211,16 +314,34 @@ class SimpleMetricsCallback(BaseCallback):
             return
         
         try:
-            # Convert actions to numpy array for calculations
+            # Convert actions to numpy array for reference (not for calculations)
             actions_array = np.array(self.episode_actions)
-            
-            # Calculate action space parameter statistics
-            action_means = np.mean(actions_array, axis=0)
-            action_vars = np.var(actions_array, axis=0)
-            action_stds = np.std(actions_array, axis=0)
             
             # Get episode-level metrics
             episode_stats = self._calculate_episode_stats()
+            
+            # Use stored episode parameters (captured at episode start)
+            exact_params = self.current_episode_params
+            if not exact_params:
+                print(f"⚠️ Warning: No episode parameters stored for episode {self.episode_count}")
+                # Use fallback values
+                exact_params = {
+                    'urgency_position_ratio': 1.0,
+                    'speed_diff_modifier': 0.0,
+                    'max_participants_per_auction': 4.0,
+                    'ignore_vehicles_go': 50.0
+                }
+            
+            # Use stored termination reason or determine based on episode length and metrics
+            termination_reason = self.current_episode_termination_reason
+            if termination_reason == "Unknown":
+                # Fallback logic if termination reason wasn't set
+                if len(self.episode_actions) >= 128:
+                    termination_reason = f"Reached exactly {len(self.episode_actions)} steps"
+                elif episode_stats.get('total_deadlocks', 0) > 0:
+                    termination_reason = "Deadlock detected during episode"
+                elif len(self.episode_actions) < 128:
+                    termination_reason = f"Early termination at {len(self.episode_actions)} steps"
             
             # Create episode summary
             episode_summary = {
@@ -228,12 +349,13 @@ class SimpleMetricsCallback(BaseCallback):
                 'episode_start_step': self.episode_start_step,
                 'episode_end_step': self.num_timesteps,
                 'episode_length': len(self.episode_actions),
+                'termination_reason': termination_reason,  # Record why episode ended
                 
                 # TRUE EXACT parameter values (actual values applied in environment)
-                'urgency_position_ratio_exact': 0.0,  # Will be filled by environment
-                'speed_diff_modifier_exact': 0.0,     # Will be filled by environment
-                'max_participants_exact': 4.0,        # Will be filled by environment
-                'ignore_vehicles_go_exact': 50.0,     # Will be filled by environment
+                'urgency_position_ratio_exact': exact_params.get('urgency_position_ratio', 0.0),
+                'speed_diff_modifier_exact': exact_params.get('speed_diff_modifier', 0.0),
+                'max_participants_exact': exact_params.get('max_participants_per_auction', 4.0),
+                'ignore_vehicles_go_exact': exact_params.get('ignore_vehicles_go', 50.0),
                 
                 # Episode performance metrics
                 'total_vehicles_exited': episode_stats['total_exits'],
@@ -263,7 +385,7 @@ class SimpleMetricsCallback(BaseCallback):
             print(f"   Collisions: {episode_summary['total_collisions']}")
             print(f"   Deadlocks: {episode_summary['total_deadlocks']}")
             print(f"   Avg throughput: {episode_summary['avg_throughput']:.1f} vehicles/h")
-            print(f"   Action means: [{action_means[0]:.3f}, {action_means[1]:.1f}, {action_means[2]:.1f}, {action_means[3]:.1f}]")
+            print(f"   TRUE EXACT params: [{episode_summary['urgency_position_ratio_exact']:.3f}, {episode_summary['speed_diff_modifier_exact']:.1f}, {episode_summary['max_participants_exact']:.0f}, {episode_summary['ignore_vehicles_go_exact']:.1f}]")
             print(f"   ⏰ Simulation time: {episode_summary['episode_simulation_time']:.1f}s ({episode_summary['episode_duration_hours']:.3f}h)")
             print(f"   ⏰ Total simulation time: {episode_summary['total_simulation_time']:.1f}s ({episode_summary['total_duration_hours']:.3f}h)")
             
@@ -273,11 +395,14 @@ class SimpleMetricsCallback(BaseCallback):
     def _calculate_episode_stats(self) -> dict:
         """Calculate episode-level statistics from step metrics"""
         if not self.episode_metrics:
+            print(f"⚠️ No episode metrics available for episode {self.episode_count}")
             return {
                 'total_exits': 0, 'total_collisions': 0, 'total_deadlocks': 0,
                 'max_deadlock_severity': 0.0, 'avg_throughput': 0.0,
                 'avg_acceleration': 0.0, 'total_controlled': 0
             }
+        
+        print(f"🔍 Calculating stats for episode {self.episode_count}: {len(self.episode_metrics)} step metrics")
         
         # Calculate cumulative statistics
         total_exits = max(0, self.episode_metrics[-1].get('vehicles_exited', 0) - 
@@ -288,6 +413,8 @@ class SimpleMetricsCallback(BaseCallback):
         
         total_deadlocks = max(0, self.episode_metrics[-1].get('deadlocks_detected', 0) - 
                              self.episode_metrics[0].get('deadlocks_detected', 0))
+        
+        print(f"   📊 Stats calculated: exits={total_exits}, collisions={total_collisions}, deadlocks={total_deadlocks}")
         
         # Calculate averages
         throughputs = [m.get('throughput', 0.0) for m in self.episode_metrics]
@@ -347,19 +474,30 @@ class SimpleMetricsCallback(BaseCallback):
     def _save_episode_metrics(self, episode_summary: dict):
         """Save episode-level metrics to CSV"""
         try:
+            # Debug: Print episode summary before saving
+            print(f"🔍 Saving episode {episode_summary['episode']} to CSV:")
+            print(f"   Length: {episode_summary['episode_length']} steps")
+            print(f"   Termination reason: {episode_summary['termination_reason']}")
+            print(f"   CSV path: {self.episode_metrics_path}")
+            
             # Load existing data or create new file
             csv_path = self.episode_metrics_path
             if os.path.exists(csv_path):
                 existing_df = pd.read_csv(csv_path)
+                print(f"   📁 Existing CSV has {len(existing_df)} episodes")
                 new_df = pd.concat([existing_df, pd.DataFrame([episode_summary])], ignore_index=True)
             else:
+                print(f"   📁 Creating new CSV file")
                 new_df = pd.DataFrame([episode_summary])
             
             new_df.to_csv(csv_path, index=False)
-            print(f"📊 Episode {episode_summary['episode']} metrics saved")
+            print(f"📊 Episode {episode_summary['episode']} metrics saved successfully")
+            print(f"   📊 CSV now contains {len(new_df)} episodes")
             
         except Exception as e:
             print(f"⚠️ Episode metrics save failed: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _cleanup_resources(self):
         """Clean up resources on exit"""
@@ -489,7 +627,7 @@ def main():
         print(f"   📁 Training run directory: {dirs['base_dir']}")
         
         env = AuctionGymEnv(sim_cfg={
-            'max_steps': 128,  # OPTIMAL: Aligned with n_steps=512 for 2 episodes per update
+            'max_steps': 128,  
             'training_mode': True,  # Enable performance optimizations
             # Multi-instance CARLA configuration
             'carla_port': args.carla_port,

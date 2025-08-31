@@ -7,7 +7,7 @@ checkpoint_freq: 1000   # Less frequent checkpoints
 
 # PPO Algorithm Parameters - OPTIMIZED FOR 4 CRITICAL PARAMETERS
 learning_rate: 5e-4     # Higher LR for critical params
-n_steps: 150            # Increased for better exploration with 4 critical params
+n_steps: 256            # Increased for better exploration with 4 critical params
 batch_size: 64          # Larger batch for stable training
 n_epochs: 8             # More epochs for critical parameter learning
 gamma: 0.99

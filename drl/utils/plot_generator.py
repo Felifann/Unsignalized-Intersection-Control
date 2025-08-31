@@ -258,17 +258,10 @@ def _plot_step_metrics(step_df: pd.DataFrame, plots_dir: str, save_plots: bool):
         axes[1, 1].set_ylabel('Throughput (vehicles/h)', fontsize=10)
         axes[1, 1].grid(True, alpha=0.3)
     else:
-        # Fallback: plot urgency position ratio if available
-        if 'urgency_position_ratio' in step_df.columns:
-            axes[1, 1].plot(step_df['timestep'], step_df['urgency_position_ratio'], 'b-', linewidth=1, alpha=0.7)
-            axes[1, 1].set_title('Urgency Position Ratio Over Time', fontsize=12)
-            axes[1, 1].set_xlabel('Timestep', fontsize=10)
-            axes[1, 1].set_ylabel('Ratio', fontsize=10)
-            axes[1, 1].grid(True, alpha=0.3)
-        else:
-            axes[1, 1].text(0.5, 0.5, 'No suitable data available', 
-                            ha='center', va='center', transform=axes[1, 1].transAxes, fontsize=12)
-            axes[1, 1].set_title('No Data Available', fontsize=12)
+        # Action parameters are now stored as exact values per episode, not per step
+        axes[1, 1].text(0.5, 0.5, 'Action parameters stored as exact values per episode\n(see episode_metrics.csv for exact values)', 
+                        ha='center', va='center', transform=axes[1, 1].transAxes, fontsize=10)
+        axes[1, 1].set_title('Action Parameters (Episode-Level Only)', fontsize=12)
     
     plt.tight_layout()
     
