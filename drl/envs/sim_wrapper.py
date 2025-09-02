@@ -269,7 +269,7 @@ class SimulationEnv:
                 raise RuntimeError(f"Complete reset failure: {str(e)}, recovery failed: {recovery_error}")
 
     def step_with_all_params(self, action_params: Dict) -> Tuple[np.ndarray, float, bool, Dict]:
-        """Execute simulation step with all trainable parameters"""
+        """Execute simulation step with all trainable parameters - FIXED reward timing"""
         step_start = time.time()
         
         try:
@@ -294,13 +294,10 @@ class SimulationEnv:
                 cached_params = self.get_current_episode_action_params()
                 self._apply_cached_parameters(cached_params)
             
-            # OPTIMIZED: Don't reconnect bid_policy every step - it's the same object
-            # self.traffic_controller.set_bid_policy(self.bid_policy)  # REMOVED: Unnecessary
-            # self.auction_engine.set_bid_policy(self.bid_policy)     # REMOVED: Unnecessary
-            
             # Run simulation steps
             initial_vehicle_count = len(self.state_extractor.get_vehicle_states())
             severe_deadlock_occurred = False
+            deadlock_detected = False
             
             # EXACT main.py pattern: Only update on final frame (unified_update_interval behavior)
             for i in range(self.steps_per_action):
@@ -327,18 +324,20 @@ class SimulationEnv:
                 
                 # Only check for deadlocks/collisions on final frame (performance optimization)
                 if i == self.steps_per_action - 1:  # Only on final frame
-                    # SIMPLIFIED: Just check for termination conditions - NO MID-EPISODE RESETS
+                    # FIXED: Check deadlock conditions BEFORE reward calculation
+                    # This ensures reward is calculated with the correct episode state
+                    
                     # Check for severe deadlock (severity 1.0) - terminate episode
                     if self._check_severe_deadlock():
                         print(f"🚨 SEVERE DEADLOCK (severity 1.0) detected at step {self.current_step} - TERMINATING EPISODE")
                         severe_deadlock_occurred = True
-                        break  # Terminate episode cleanly
+                        # Don't break here - let the episode complete this step properly
                     
                     # Check for regular deadlock - terminate episode
                     deadlock_detected = self._get_cached_deadlock_status()
                     if deadlock_detected:
                         print(f"🚨 Deadlock detected at step {self.current_step} - TERMINATING EPISODE")
-                        break  # Terminate episode cleanly
+                        # Don't break here - let the episode complete this step properly
                     
                     # Check for collisions - count for reward but don't terminate episode
                     collision_detected = self._check_collision()
@@ -346,26 +345,40 @@ class SimulationEnv:
                         print(f"💥 Collision detected at step {self.current_step} - counting for reward (episode continues)")
                         # Don't break - let episode continue for collision learning
             
-            # Calculate reward using metrics manager with action tracking
+            # FIXED: Calculate reward IMMEDIATELY after deadlock detection
+            # This ensures deadlock penalties are applied to the correct episode
             reward = self.metrics_manager.calculate_reward(
                 self.traffic_controller, self.state_extractor, 
                 self.scenario, self.nash_solver, self.current_step,
                 actions_since_reset=self.current_action
             )
             
+            # FIXED: Apply deadlock punishments IMMEDIATELY after reward calculation
+            # This ensures punishments are applied to the current episode, not delayed
+            
             # Apply severe deadlock punishment if occurred (WITHIN THIS EPISODE)
             if severe_deadlock_occurred:
-                reward += self.severe_deadlock_punishment
-                print(f"⚡ Applied EPISODE severe deadlock punishment: {self.severe_deadlock_punishment} (step reward: {reward})")
-                print(f"   Note: This punishment applies ONLY to this step, not carried to next episode")
+                severe_punishment = self.severe_deadlock_punishment
+                reward += severe_punishment
+                print(f"⚡ Applied EPISODE severe deadlock punishment: {severe_punishment} (step reward: {reward})")
+                print(f"   ✅ Punishment applied to current episode step {self.current_action}")
+            
+            # Apply regular deadlock punishment if occurred (WITHIN THIS EPISODE)
+            if deadlock_detected:
+                # Get deadlock penalty from metrics manager
+                deadlock_penalty = self.metrics_manager._calculate_simple_deadlock_penalty(self.nash_solver)
+                if deadlock_penalty < 0:  # Only apply if there's actually a penalty
+                    reward += deadlock_penalty
+                    print(f"🚨 Applied EPISODE deadlock penalty: {deadlock_penalty} (step reward: {reward})")
+                    print(f"   ✅ Penalty applied to current episode step {self.current_action}")
             
             # Get observation
             obs = self._get_observation_cached()
             
-            # SIMPLIFIED: Check episode termination based on ACTIONS, not simulation steps
+            # FIXED: Check episode termination based on detected conditions
             # Terminate on deadlocks but NOT collisions - collisions only affect reward
             done = (self.current_action >= self.max_actions or 
-                   self._get_cached_deadlock_status() or
+                   deadlock_detected or  # Use local variable, not cached call
                    severe_deadlock_occurred)
             
             # FIXED: Add debugging output for episode termination
@@ -373,7 +386,7 @@ class SimulationEnv:
                 print(f"🔍 Episode Progress: {self.current_action}/{self.max_actions} actions ({(self.current_action/self.max_actions)*100:.1f}%)")
                 if self.current_action >= self.max_actions:
                     print(f"🎯 Episode terminating: Reached max_actions limit ({self.max_actions})")
-                elif self._get_cached_deadlock_status():
+                elif deadlock_detected:
                     print(f"🚨 Episode terminating: Deadlock detected")
                 elif severe_deadlock_occurred:
                     print(f"⚡ Episode terminating: Severe deadlock detected")
@@ -385,15 +398,14 @@ class SimulationEnv:
                 self.current_action, self.max_actions  # Report actions, not sim steps
             )
             
-            # NEW: Add exact reward value to info for metrics collection
+            # FIXED: Add exact reward value to info for metrics collection
             info['reward'] = reward
             
-            # Add validation info
-            current_vehicles = len(self.state_extractor.get_vehicle_states())
+            # FIXED: Add termination info with IMMEDIATE deadlock status
             info.update({
                 'step_validation': {
-                    'vehicles_stable': abs(current_vehicles - initial_vehicle_count) <= 3,
-                    'reward_realistic': abs(reward) <= 50.0,
+                    'vehicles_stable': abs(len(self.state_extractor.get_vehicle_states()) - initial_vehicle_count) <= 3,
+                    'reward_realistic': abs(reward) <= 1000.0,  # Increased threshold for deadlock punishments
                     'observation_valid': len(obs) == 50  # OPTIMIZED: 50 dimensions with 8 vehicles
                 },
                 'action_info': {
@@ -403,13 +415,13 @@ class SimulationEnv:
                     'steps_per_action': self.steps_per_action
                 },
                 'termination_info': {
-                    'deadlock_detected': self._get_cached_deadlock_status(),
+                    'deadlock_detected': deadlock_detected,  # Use local variable
                     'collision_detected': self._check_collision(),
-                    'severe_deadlock_detected': severe_deadlock_occurred,
+                    'severe_deadlock_detected': severe_deadlock_occurred,  # Use local variable
                     'max_actions_reached': self.current_action >= self.max_actions,
                     'termination_reason': 'max_actions' if self.current_action >= self.max_actions else
                                         'severe_deadlock' if severe_deadlock_occurred else
-                                        'deadlock' if self._get_cached_deadlock_status() else 'none'
+                                        'deadlock' if deadlock_detected else 'none'
                 },
                 'simulation_time': {
                     'episode_simulation_time': round(self.episode_simulation_time, 2),

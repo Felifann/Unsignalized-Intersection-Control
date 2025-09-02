@@ -12,6 +12,7 @@ import pandas as pd
 import json
 import resource
 import gc
+import shutil
 from typing import List, Dict
 from datetime import datetime
 
@@ -54,9 +55,10 @@ from drl.utils.analysis import TrainingAnalyzer
 class SimpleMetricsCallback(BaseCallback):
     """Enhanced callback to log training metrics with action space parameter tracking and per-episode statistics"""
     
-    def __init__(self, log_dir: str, verbose: int = 0):
+    def __init__(self, log_dir: str, verbose: int = 0, continue_training: bool = False):
         super().__init__(verbose)
         self.log_dir = log_dir
+        self.continue_training = continue_training
         
         # Create logs directory
         os.makedirs(log_dir, exist_ok=True)
@@ -81,12 +83,148 @@ class SimpleMetricsCallback(BaseCallback):
         import atexit
         atexit.register(self._cleanup_resources)
         
+        # If continuing training, load existing metrics
+        if self.continue_training:
+            self._load_existing_metrics()
+        else:
+            # Auto-detect and copy past_train CSV files if they exist
+            self._auto_copy_past_train_csv()
+        
         print(f"📊 Enhanced Metrics Callback initialized:")
         print(f"   Step metrics: {self.step_metrics_path}")
         print(f"   Episode metrics: {self.episode_metrics_path}")
+        if self.continue_training:
+            print(f"   🔄 Continue training mode: Loaded existing metrics")
+        else:
+            print(f"   🆕 New training mode: Ready to start")
+
+    def _load_existing_metrics(self):
+        """Load existing metrics data to continue recording"""
+        try:
+            # Load existing step metrics
+            if os.path.exists(self.step_metrics_path):
+                existing_step_df = pd.read_csv(self.step_metrics_path)
+                if len(existing_step_df) > 0:
+                    # Get the last timestep
+                    last_timestep = existing_step_df['timestep'].max()
+                    self.num_timesteps = last_timestep
+                    print(f"📊 Loaded existing step metrics: {len(existing_step_df)} rows, last timestep: {last_timestep}")
+                else:
+                    print(f"📊 Existing step metrics file is empty")
+            else:
+                print(f"📊 No existing step metrics file found")
+            
+            # Load existing episode metrics
+            if os.path.exists(self.episode_metrics_path):
+                existing_episode_df = pd.read_csv(self.episode_metrics_path)
+                if len(existing_episode_df) > 0:
+                    # Get the last episode number
+                    last_episode = existing_episode_df['episode'].max()
+                    self.episode_count = last_episode
+                    print(f"📊 Loaded existing episode metrics: {len(existing_episode_df)} rows, last episode: {last_episode}")
+                else:
+                    print(f"📊 Existing episode metrics file is empty")
+            else:
+                print(f"📊 No existing episode metrics file found")
+                
+        except Exception as e:
+            print(f"⚠️ Failed to load existing metrics: {e}")
+            # Continue with default values
+            print(f"   🔄 Continuing with default values (episode_count: 0, timestep: 0)")
+
+    def _auto_copy_past_train_csv(self):
+        """Auto-detect and copy past_train CSV files if they exist."""
+        # 使用绝对路径：past_train与train.py在同一目录下
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        past_train_dir = os.path.join(current_dir, "past_train")
+        results_dir = os.path.join(past_train_dir, "results")
+        
+        if not os.path.exists(results_dir):
+            print(f"📁 past_train/results 目录不存在，无需复制CSV文件。")
+            return
+        
+        print(f"🔍 自动检测并复制 past_train/results 目录中的 CSV 文件...")
+        
+        # 查找 step_metrics.csv 和 episode_metrics.csv
+        step_metrics_src = os.path.join(results_dir, "step_metrics.csv")
+        episode_metrics_src = os.path.join(results_dir, "episode_metrics.csv")
+        
+        # 复制 step_metrics.csv
+        if os.path.exists(step_metrics_src):
+            try:
+                shutil.copy2(step_metrics_src, self.step_metrics_path)
+                print(f"   ✅ 复制 step_metrics.csv 到 {self.step_metrics_path}")
+                
+                # 读取并显示文件信息
+                df = pd.read_csv(self.step_metrics_path)
+                print(f"   📊 step_metrics.csv 包含 {len(df)} 行数据")
+                if 'timestep' in df.columns and len(df) > 0:
+                    last_timestep = df['timestep'].max()
+                    print(f"   🎯 最后时间步: {last_timestep}")
+            except Exception as copy_error:
+                print(f"⚠️ 复制 step_metrics.csv 失败: {copy_error}")
+        else:
+            print(f"   📁 step_metrics.csv 不存在")
+        
+        # 复制 episode_metrics.csv
+        if os.path.exists(episode_metrics_src):
+            try:
+                shutil.copy2(episode_metrics_src, self.episode_metrics_path)
+                print(f"   ✅ 复制 episode_metrics.csv 到 {self.episode_metrics_path}")
+                
+                # 读取并显示文件信息
+                df = pd.read_csv(self.episode_metrics_path)
+                print(f"   📊 episode_metrics.csv 包含 {len(df)} 行数据")
+                if 'episode' in df.columns and len(df) > 0:
+                    last_episode = df['episode'].max()
+                    print(f"   🎯 最后回合: {last_episode}")
+            except Exception as copy_error:
+                print(f"⚠️ 复制 episode_metrics.csv 失败: {copy_error}")
+        else:
+            print(f"   📁 episode_metrics.csv 不存在")
+        
+        print(f"   🔄 CSV文件复制完成，新训练将基于这些数据继续")
+
+    def auto_detect_past_train_checkpoint(self):
+        """自动检测past_train文件夹中的最新检查点"""
+        # 使用绝对路径：past_train与train.py在同一目录下
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        past_train_dir = os.path.join(current_dir, "past_train")
+        checkpoints_dir = os.path.join(past_train_dir, "checkpoints")
+        
+        if not os.path.exists(checkpoints_dir):
+            print(f"📁 past_train/checkpoints 目录不存在")
+            return None
+        
+        # 查找所有检查点文件
+        checkpoint_files = []
+        for file in os.listdir(checkpoints_dir):
+            if file.endswith('.zip') and 'ppo_traffic_' in file and '_steps.zip' in file:
+                try:
+                    # 提取步数
+                    steps_str = file.replace('ppo_traffic_', '').replace('_steps.zip', '')
+                    steps = int(steps_str)
+                    checkpoint_files.append((steps, file))
+                except ValueError:
+                    continue
+        
+        if not checkpoint_files:
+            print(f"📁 没有找到有效的检查点文件")
+            return None
+        
+        # 按步数排序，找到最新的
+        checkpoint_files.sort(key=lambda x: x[0], reverse=True)
+        latest_steps, latest_file = checkpoint_files[0]
+        latest_path = os.path.join(checkpoints_dir, latest_file)
+        
+        print(f"🔍 自动检测到最新检查点: {latest_file}")
+        print(f"   📍 路径: {latest_path}")
+        print(f"   📊 训练步数: {latest_steps}")
+        
+        return latest_path, latest_steps
 
     def _on_step(self) -> bool:
-        """Log metrics every step and track episode boundaries"""
+        """Log metrics every step and track episode boundaries - FIXED deadlock detection"""
         try:
             # Get current info and actions
             infos = self.locals.get('infos', [{}])
@@ -99,8 +237,8 @@ class SimpleMetricsCallback(BaseCallback):
             info = infos[0] if isinstance(infos[0], dict) else {}
             action = actions[0] if isinstance(actions[0], (np.ndarray, list)) else []
             
-            # FIXED: Check for episode termination based on exact step count OR deadlock detection
-            # This ensures episodes end at exactly 128 steps OR when deadlock occurs
+            # FIXED: Check for episode termination based on IMMEDIATE deadlock detection
+            # This ensures episodes end immediately when deadlock occurs, not delayed
             episode_should_end = False
             termination_reason = ""
             
@@ -110,20 +248,23 @@ class SimpleMetricsCallback(BaseCallback):
                 termination_reason = f"Reached exactly {len(self.episode_actions)} steps"
                 print(f"🎯 Episode {self.episode_count} completed: {termination_reason}")
             
-            # Check if episode terminated due to deadlock (from environment)
+            # FIXED: Check for immediate deadlock detection from environment
+            # Use termination_info from the current step, not delayed
             elif info.get('termination_info', {}).get('deadlock_detected', False):
                 episode_should_end = True
-                termination_reason = "Deadlock detected by environment"
-                print(f"🚨 Episode {self.episode_count} terminated early: {termination_reason}")
+                termination_reason = "Deadlock detected by environment (IMMEDIATE)"
+                print(f"🚨 Episode {self.episode_count} terminated immediately: {termination_reason}")
                 print(f"   📊 Deadlock info: {info.get('termination_info', {})}")
                 print(f"   📊 Current episode length: {len(self.episode_actions)} steps")
+                print(f"   ✅ Reward will be applied to current episode, not delayed")
             
             elif info.get('termination_info', {}).get('severe_deadlock_detected', False):
                 episode_should_end = True
-                termination_reason = "Severe deadlock detected by environment"
-                print(f"⚡ Episode {self.episode_count} terminated early: {termination_reason}")
+                termination_reason = "Severe deadlock detected by environment (IMMEDIATE)"
+                print(f"⚡ Episode {self.episode_count} terminated immediately: {termination_reason}")
                 print(f"   📊 Severe deadlock info: {info.get('termination_info', {})}")
                 print(f"   📊 Current episode length: {len(self.episode_actions)} steps")
+                print(f"   ✅ Reward will be applied to current episode, not delayed")
             
             # End episode if any termination condition is met
             if episode_should_end:
@@ -146,7 +287,11 @@ class SimpleMetricsCallback(BaseCallback):
                     'total_controlled': info.get('total_controlled', 0),
                     'vehicles_exited': info.get('vehicles_exited', 0),
                     'deadlocks_detected': info.get('deadlocks_detected', 0),
-                    'deadlock_severity': info.get('deadlock_severity', 0.0)
+                    'deadlock_severity': info.get('deadlock_severity', 0.0),
+                    'reward': info.get('reward', 0.0),  # FIXED: Include reward from current step
+                    'termination_reason': termination_reason,  # NEW: Track why episode ended
+                    'deadlock_detected': info.get('termination_info', {}).get('deadlock_detected', False),  # NEW: Track deadlock status
+                    'severe_deadlock_detected': info.get('termination_info', {}).get('severe_deadlock_detected', False)  # NEW: Track severe deadlock status
                 }
                 
                 # Add simulation time information if available
@@ -161,6 +306,9 @@ class SimpleMetricsCallback(BaseCallback):
                 
                 self.episode_metrics.append(current_step_metrics)
                 print(f"📊 Added final step metrics to episode {self.episode_count}: {len(self.episode_metrics)} total steps")
+                print(f"   💰 Final step reward: {current_step_metrics['reward']:.2f}")
+                print(f"   🚨 Deadlock detected: {current_step_metrics['deadlock_detected']}")
+                print(f"   ⚡ Severe deadlock: {current_step_metrics['severe_deadlock_detected']}")
                 
                 # Now finalize the episode with complete data
                 self._finalize_episode()
@@ -222,17 +370,15 @@ class SimpleMetricsCallback(BaseCallback):
                         'ignore_vehicles_go': 50.0
                     }
             
-            # Debug: Log termination info every 10 steps to monitor episode state
-            if self.num_timesteps % 10 == 0 and info.get('termination_info'):
+            # FIXED: Enhanced debugging for deadlock detection
+            if info.get('termination_info'):
                 term_info = info.get('termination_info', {})
-                print(f"🔍 Step {self.num_timesteps}: Episode {self.episode_count} termination status:")
-                print(f"   Deadlock: {term_info.get('deadlock_detected', False)}")
-                print(f"   Severe deadlock: {term_info.get('severe_deadlock_detected', False)}")
-                print(f"   Max actions reached: {term_info.get('max_actions_reached', False)}")
-                print(f"   Current actions: {len(self.episode_actions)}/{128}")
-                print(f"   Episode should end: {episode_should_end}")
-                if episode_should_end:
-                    print(f"   🚨 TERMINATION TRIGGERED: {termination_reason}")
+                if term_info.get('deadlock_detected') or term_info.get('severe_deadlock_detected'):
+                    print(f"🚨 DEADLOCK DETECTED at step {self.num_timesteps}:")
+                    print(f"   Episode: {self.episode_count}, Actions: {len(self.episode_actions)}")
+                    print(f"   Deadlock: {term_info.get('deadlock_detected', False)}")
+                    print(f"   Severe deadlock: {term_info.get('severe_deadlock_detected', False)}")
+                    print(f"   Current reward: {info.get('reward', 'N/A')}")
             
             # Store action for current episode
             if isinstance(action, (np.ndarray, list)) and len(action) == 4:
@@ -249,8 +395,17 @@ class SimpleMetricsCallback(BaseCallback):
                 'vehicles_exited': info.get('vehicles_exited', 0),
                 'deadlocks_detected': info.get('deadlocks_detected', 0),
                 'deadlock_severity': info.get('deadlock_severity', 0.0),
-                'reward': info.get('reward', 0.0)  # NEW: Add exact reward value
+                'reward': info.get('reward', 0.0),  # FIXED: Add exact reward value
+                'deadlock_detected': info.get('termination_info', {}).get('deadlock_detected', False),  # NEW: Track deadlock status
+                'severe_deadlock_detected': info.get('termination_info', {}).get('severe_deadlock_detected', False)  # NEW: Track severe deadlock status
             }
+            
+            # ENHANCED DEBUG: Log collision and deadlock counts for debugging
+            collision_count = step_metrics['collision_count']
+            deadlocks_detected = step_metrics['deadlocks_detected']
+            
+            if collision_count > 0 or deadlocks_detected > 0:
+                print(f"🔍 Step {self.num_timesteps} Metrics: collisions={collision_count}, deadlocks={deadlocks_detected}")
             
             # Add simulation time information if available
             simulation_time_info = info.get('simulation_time', {})
@@ -263,7 +418,6 @@ class SimpleMetricsCallback(BaseCallback):
                 })
             
             # SAFETY CHECK: Detect suspiciously high collision counts
-            collision_count = step_metrics['collision_count']
             if collision_count > 100:
                 print(f"🚨 SAFETY CHECK: Suspiciously high collision count in training: {collision_count}")
                 print(f"   This suggests collision counter was not properly reset between episodes")
@@ -287,6 +441,13 @@ class SimpleMetricsCallback(BaseCallback):
             # Debug: Log episode metrics collection every 20 steps
             if len(self.episode_actions) % 20 == 0:
                 print(f"📊 Episode {self.episode_count}: Collected {len(self.episode_metrics)} step metrics, {len(self.episode_actions)} actions")
+                # Show current episode totals
+                if self.episode_metrics:
+                    first_step = self.episode_metrics[0]
+                    current_step = self.episode_metrics[-1]
+                    episode_collisions = current_step.get('collision_count', 0) - first_step.get('collision_count', 0)
+                    episode_deadlocks = current_step.get('deadlocks_detected', 0) - first_step.get('deadlocks_detected', 0)
+                    print(f"   📊 Episode totals so far: collisions={episode_collisions}, deadlocks={episode_deadlocks}")
             
             # Save step metrics every 10 steps (increased frequency for reward tracking)
             if self.num_timesteps % 10 == 0:
@@ -413,13 +574,24 @@ class SimpleMetricsCallback(BaseCallback):
         total_exits = max(0, self.episode_metrics[-1].get('vehicles_exited', 0) - 
                          self.episode_metrics[0].get('vehicles_exited', 0))
         
-        total_collisions = max(0, self.episode_metrics[-1].get('collision_count', 0) - 
-                              self.episode_metrics[0].get('collision_count', 0))
+        # FIXED: Collision count calculation - use absolute values, not differences
+        # Each step's collision_count is already cumulative, so we need to get the actual
+        # collisions that occurred during this episode
+        first_step_collisions = self.episode_metrics[0].get('collision_count', 0)
+        last_step_collisions = self.episode_metrics[-1].get('collision_count', 0)
         
-        total_deadlocks = max(0, self.episode_metrics[-1].get('deadlocks_detected', 0) - 
-                             self.episode_metrics[0].get('deadlocks_detected', 0))
+        # Calculate collisions that occurred during this episode
+        total_collisions = max(0, last_step_collisions - first_step_collisions)
+        
+        print(f"   🔍 Collision Debug: first_step={first_step_collisions}, last_step={last_step_collisions}, episode_total={total_collisions}")
+        
+        # FIXED: Deadlock count calculation - also use absolute values
+        first_step_deadlocks = self.episode_metrics[0].get('deadlocks_detected', 0)
+        last_step_deadlocks = self.episode_metrics[-1].get('deadlocks_detected', 0)
+        total_deadlocks = max(0, last_step_deadlocks - first_step_deadlocks)
         
         print(f"   📊 Stats calculated: exits={total_exits}, collisions={total_collisions}, deadlocks={total_deadlocks}")
+        print(f"   🔍 Deadlock Debug: first_step={first_step_deadlocks}, last_step={last_step_deadlocks}, episode_total={total_deadlocks}")
         
         # Calculate averages
         throughputs = [m.get('throughput', 0.0) for m in self.episode_metrics]
@@ -563,8 +735,8 @@ def create_timestamped_directories(instance_id: int = 0) -> Dict[str, str]:
         'instance_id': instance_id,
         'created_at': datetime.now().isoformat(),
         'training_parameters': {
-            'total_timesteps': '5000',  # Default value
-            'learning_rate': '3e-4',
+            'total_timesteps': '100000',  # Default value
+            'learning_rate': '1e-4',
             'n_steps': '256',
             'batch_size': '64',
             'n_epochs': '4'
@@ -589,7 +761,9 @@ def main():
     parser.add_argument('--carla-port', type=int, default=2000, help='CARLA server port (default: 2000)')
     parser.add_argument('--carla-host', type=str, default='localhost', help='CARLA server host (default: localhost)')
     parser.add_argument('--instance-id', type=int, default=0, help='CARLA instance ID for logging (default: 0)')
-    parser.add_argument('--total-timesteps', type=int, default=5000, help='Total training timesteps (default: 5000)')
+    parser.add_argument('--total-timesteps', type=int, default=100000, help='Total training timesteps (default: 100000)')
+    parser.add_argument('--checkpoint', type=str, help='Path to checkpoint file to continue training from')
+    parser.add_argument('--continue-training', action='store_true', help='Continue training from checkpoint')
     
     args = parser.parse_args()
     
@@ -597,20 +771,84 @@ def main():
     print(f"🕐 Creating timestamped directories for training run...")
     dirs = create_timestamped_directories(args.instance_id)
     
-    # DRL parameters
-    config = {
-        'total_timesteps': args.total_timesteps,
-        'learning_rate': 3e-4,
-        'n_steps': 256,
-        'batch_size': 64,
-        'n_epochs': 4,
-        'gamma': 0.99,
-        'gae_lambda': 0.95,
-        'clip_range': 0.2,
-        'ent_coef': 0.01,
-        'vf_coef': 0.5,
-        'max_grad_norm': 0.5,
-        'checkpoint_freq': 1000
+    # DRL parameters - Auto-detect from past_train if available, but expand to 100000 steps
+    past_train_config = None
+    # 使用绝对路径：past_train与train.py在同一目录下
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    past_train_config_path = os.path.join(current_dir, "past_train", "config", "training_config.json")
+    
+    if os.path.exists(past_train_config_path):
+        try:
+            with open(past_train_config_path, 'r') as f:
+                past_train_config = json.load(f)
+            print(f"📋 检测到 past_train 配置: {past_train_config_path}")
+            
+            # 提取 past_train 的训练参数
+            past_params = past_train_config.get('training_parameters', {})
+            past_learning_rate = float(past_params.get('learning_rate', 0.0003))
+            past_n_epochs = int(past_params.get('n_epochs', 4))
+            
+            print(f"   🎯 Past Train 设置:")
+            print(f"      • 原始目标步数: {past_params.get('total_timesteps', 40000)}")
+            print(f"      • 学习率: {past_learning_rate}")
+            print(f"      • 训练轮数: {past_n_epochs}")
+            print(f"   🚀 扩展目标: 100,000 步 (保持其他参数一致)")
+            
+            # 使用 past_train 的设置，但扩展到 100,000 步
+            config = {
+                'total_timesteps': 100000,              # 扩展到 100,000 步
+                'learning_rate': past_learning_rate,   # 保持 past_train 的学习率
+                'n_steps': 256,
+                'batch_size': 64,
+                'n_epochs': past_n_epochs,             # 保持 past_train 的训练轮数
+                'gamma': 0.99,
+                'gae_lambda': 0.95,
+                'clip_range': 0.2,
+                'ent_coef': 0.01,
+                'vf_coef': 0.5,
+                'max_grad_norm': 0.5,
+                'checkpoint_freq': 1000
+            }
+            
+            print(f"   ✅ 使用 past_train 设置 + 扩展步数:")
+            print(f"      • 总训练步数: {config['total_timesteps']} (扩展)")
+            print(f"      • 学习率: {config['learning_rate']} (保持)")
+            print(f"      • 训练轮数: {config['n_epochs']} (保持)")
+            
+        except Exception as e:
+            print(f"⚠️ 读取 past_train 配置失败: {e}")
+            print(f"   🔄 使用默认设置")
+            # 使用默认设置
+            config = {
+                'total_timesteps': args.total_timesteps,
+                'learning_rate': 1e-4,
+                'n_steps': 256,
+                'batch_size': 64,
+                'n_epochs': 4,
+                'gamma': 0.99,
+                'gae_lambda': 0.95,
+                'clip_range': 0.2,
+                'ent_coef': 0.01,
+                'vf_coef': 0.5,
+                'max_grad_norm': 0.5,
+                'checkpoint_freq': 1000
+            }
+    else:
+        print(f"📋 未检测到 past_train 配置，使用默认设置")
+        # 使用默认设置
+        config = {
+            'total_timesteps': args.total_timesteps,
+            'learning_rate': 1e-4,
+            'n_steps': 256,
+            'batch_size': 64,
+            'n_epochs': 4,
+            'gamma': 0.99,
+            'gae_lambda': 0.95,
+            'clip_range': 0.2,
+            'ent_coef': 0.01,
+            'vf_coef': 0.5,
+            'max_grad_norm': 0.5,
+            'checkpoint_freq': 1000
         }
     
     # Update config file with actual training parameters
@@ -786,27 +1024,102 @@ def main():
         # Setup logging WITHOUT TensorBoard
         logger = configure(dirs['log_dir'], ["csv"])  # REMOVED: "tensorboard"
         
-        # Create PPO model with OPTIMAL parameters
-        print("🤖 Creating PPO model...")
-        model = PPO(
-            'MlpPolicy',
-            env,
-            learning_rate=config['learning_rate'],
-            n_steps=config['n_steps'],
-            batch_size=config['batch_size'],
-            n_epochs=config['n_epochs'],
-            gamma=config['gamma'],
-            gae_lambda=config['gae_lambda'],
-            clip_range=config['clip_range'],
-            ent_coef=config['ent_coef'],
-            vf_coef=config['vf_coef'],
-            max_grad_norm=config['max_grad_norm'],
-            verbose=1
-            # REMOVED: tensorboard_log=dirs['log_dir']
-        )
+        # Auto-detect past_train checkpoint if no explicit checkpoint specified
+        auto_checkpoint_path = None
+        auto_checkpoint_steps = 0
         
-        model.set_logger(logger)
-        print("✅ PPO model created successfully")
+        if not args.checkpoint:
+            print("🔍 自动检测past_train文件夹中的检查点...")
+            # 创建临时的metrics callback来检测检查点
+            temp_metrics_callback = SimpleMetricsCallback(
+                log_dir=dirs['results_dir'],
+                verbose=0,
+                continue_training=False
+            )
+            
+            auto_checkpoint_result = temp_metrics_callback.auto_detect_past_train_checkpoint()
+            if auto_checkpoint_result:
+                auto_checkpoint_path, auto_checkpoint_steps = auto_checkpoint_result
+                print(f"✅ 自动检测到检查点: {auto_checkpoint_path}")
+                print(f"   🎯 建议继续训练，当前进度: {auto_checkpoint_steps} 步")
+                
+                # 使用扩展的目标步数计算剩余步数
+                target_timesteps = config['total_timesteps']  # 100,000
+                remaining_steps = target_timesteps - auto_checkpoint_steps
+                
+                print(f"   📊 训练进度分析:")
+                print(f"      • 当前步数: {auto_checkpoint_steps}")
+                print(f"      • 目标步数: {target_timesteps} (扩展目标)")
+                print(f"      • 剩余步数: {remaining_steps}")
+                print(f"      • 完成百分比: {auto_checkpoint_steps/target_timesteps*100:.1f}%")
+                
+                if remaining_steps > 0:
+                    print(f"   🚀 可以继续训练 {remaining_steps} 步完成扩展目标")
+                else:
+                    print(f"   ✅ 训练已完成，无需继续")
+                    return
+                
+                # 询问用户是否继续训练
+                print(f"🔄 是否从检测到的检查点继续训练？")
+                print(f"   📁 检查点: {os.path.basename(auto_checkpoint_path)}")
+                print(f"   📊 当前步数: {auto_checkpoint_steps}")
+                print(f"   🎯 目标步数: {target_timesteps}")
+                
+                # 自动决定继续训练（可以根据需要修改为手动确认）
+                should_continue = True  # 自动继续训练
+                if should_continue:
+                    print(f"🚀 自动选择继续训练模式")
+                    args.checkpoint = auto_checkpoint_path
+                    args.continue_training = True
+                else:
+                    print(f"🆕 选择开始新训练")
+            else:
+                print(f"📁 未检测到past_train检查点，将开始新训练")
+        
+        # Check if we should load from checkpoint
+        if args.checkpoint and args.continue_training:
+            print(f"🔄 Loading model from checkpoint: {args.checkpoint}")
+            try:
+                # Load model from checkpoint
+                model = PPO.load(args.checkpoint, env=env)
+                model.set_logger(logger)
+                print(f"✅ Model loaded successfully from checkpoint")
+                print(f"   Current training timesteps: {model.num_timesteps}")
+                
+                # Calculate remaining training steps
+                remaining_steps = config['total_timesteps'] - model.num_timesteps
+                if remaining_steps > 0:
+                    print(f"   Remaining training steps: {remaining_steps}")
+                    print(f"   Will continue training for {remaining_steps} more steps")
+                else:
+                    print(f"   Training already completed ({model.num_timesteps} >= {config['total_timesteps']})")
+                    return
+            except Exception as e:
+                print(f"❌ Failed to load checkpoint: {e}")
+                print(f"   Starting new training instead")
+                model = None
+        
+        # Create PPO model if not loaded from checkpoint
+        if model is None:
+            print("🤖 Creating new PPO model...")
+            model = PPO(
+                'MlpPolicy',
+                env,
+                learning_rate=config['learning_rate'],
+                n_steps=config['n_steps'],
+                batch_size=config['batch_size'],
+                n_epochs=config['n_epochs'],
+                gamma=config['gamma'],
+                gae_lambda=config['gae_lambda'],
+                clip_range=config['clip_range'],
+                ent_coef=config['ent_coef'],
+                vf_coef=config['vf_coef'],
+                max_grad_norm=config['max_grad_norm'],
+                verbose=1
+                # REMOVED: tensorboard_log=dirs['log_dir']
+            )
+            model.set_logger(logger)
+            print("✅ PPO model created successfully")
         
         # Setup callbacks
         checkpoint_callback = CheckpointCallback(
@@ -818,34 +1131,60 @@ def main():
         # Simple metrics callback
         metrics_callback = SimpleMetricsCallback(
             log_dir=dirs['results_dir'],
-            verbose=0
+            verbose=0,
+            continue_training=args.continue_training
         )
         
         # Start training
-        print(f"\n🎓 Starting DEBUG training for {config['total_timesteps']} timesteps...")
-        print("Press Ctrl+C to stop training early")
-        print("=" * 60)
-        
-        start_time = time.time()
-        
-        # FIXED: Add explicit training termination check
-        print(f"🎓 Training will stop automatically at {config['total_timesteps']} timesteps")
-        
-        model.learn(
-            total_timesteps=config['total_timesteps'],
-            callback=[checkpoint_callback, metrics_callback],
-            progress_bar=True
-        )
-        
-        print(f"🏁 Training COMPLETED - reached {config['total_timesteps']} timesteps")
+        if args.checkpoint and args.continue_training:
+            # Continue training from checkpoint
+            remaining_steps = config['total_timesteps'] - model.num_timesteps
+            print(f"\n🔄 Continuing training from checkpoint for {remaining_steps} more timesteps...")
+            print(f"   Current progress: {model.num_timesteps}/{config['total_timesteps']} ({model.num_timesteps/config['total_timesteps']*100:.1f}%)")
+            print("Press Ctrl+C to stop training early")
+            print("=" * 60)
+            
+            start_time = time.time()
+            
+            model.learn(
+                total_timesteps=remaining_steps,
+                callback=[checkpoint_callback, metrics_callback],
+                progress_bar=True,
+                reset_num_timesteps=False  # Key: Don't reset timestep counter
+            )
+            
+            print(f"🏁 Continued training COMPLETED - reached {config['total_timesteps']} total timesteps")
+        else:
+            # Start new training
+            print(f"\n🎓 Starting new training for {config['total_timesteps']} timesteps...")
+            print("Press Ctrl+C to stop training early")
+            print("=" * 60)
+            
+            start_time = time.time()
+            
+            # FIXED: Add explicit training termination check
+            print(f"🎓 Training will stop automatically at {config['total_timesteps']} timesteps")
+            
+            model.learn(
+                total_timesteps=config['total_timesteps'],
+                callback=[checkpoint_callback, metrics_callback],
+                progress_bar=True
+            )
+            
+            print(f"🏁 Training COMPLETED - reached {config['total_timesteps']} timesteps")
         
         # Save final model
         final_model_path = os.path.join(dirs['checkpoint_dir'], "final_model.zip")
         model.save(final_model_path)
         
         elapsed_time = time.time() - start_time
-        print(f"\n✅ Training completed in {elapsed_time:.2f} seconds")
-        print(f"📁 Final model saved to: {final_model_path}")
+        if args.checkpoint and args.continue_training:
+            print(f"\n✅ Continued training completed in {elapsed_time:.2f} seconds")
+            print(f"📁 Final model saved to: {final_model_path}")
+            print(f"🎯 Total training progress: {model.num_timesteps}/{config['total_timesteps']} timesteps")
+        else:
+            print(f"\n✅ Training completed in {elapsed_time:.2f} seconds")
+            print(f"📁 Final model saved to: {final_model_path}")
         
         training_success = True
         
@@ -853,9 +1192,14 @@ def main():
         print("\n⚠️ Training interrupted by user")
         try:
             if model is not None:
-                interrupted_path = os.path.join(dirs['checkpoint_dir'], "interrupted_model.zip")
+                if args.checkpoint and args.continue_training:
+                    interrupted_path = os.path.join(dirs['checkpoint_dir'], "interrupted_continued_model.zip")
+                    print(f"💾 Saving continued training model to: {interrupted_path}")
+                else:
+                    interrupted_path = os.path.join(dirs['checkpoint_dir'], "interrupted_model.zip")
+                    print(f"💾 Saving interrupted model to: {interrupted_path}")
                 model.save(interrupted_path)
-                print(f"💾 Model saved to: {interrupted_path}")
+                print(f"✅ Model saved successfully")
         except Exception as save_error:
             print(f"❌ Could not save interrupted model: {save_error}")
     

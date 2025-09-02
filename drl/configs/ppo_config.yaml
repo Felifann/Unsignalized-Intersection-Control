@@ -1,12 +1,12 @@
 # PPO Training Configuration for Traffic Intersection DRL - ULTRA-OPTIMIZED MODE with FIXED TIMING
 
 # Training Parameters - OPTIMIZED FOR 4 CRITICAL PARAMETERS
-total_timesteps: 10000  # Increased due to faster convergence with 4 critical params
+total_timesteps: 100000  # Increased due to faster convergence with 4 critical params
 eval_freq: 1000         # Less frequent evaluation for speed
 checkpoint_freq: 1000   # Less frequent checkpoints
 
 # PPO Algorithm Parameters - OPTIMIZED FOR 4 CRITICAL PARAMETERS
-learning_rate: 5e-4     # Higher LR for critical params
+learning_rate: 1e-4     # Higher LR for critical params
 n_steps: 256            # Increased for better exploration with 4 critical params
 batch_size: 64          # Larger batch for stable training
 n_epochs: 8             # More epochs for critical parameter learning
@@ -70,7 +70,7 @@ nash_hyperparams:
 
 # Training Schedule
 schedule:
-  warmup_steps: 50000
+  warmup_steps: 32000
   decay_steps: 100000
   min_learning_rate: 1e-5
 

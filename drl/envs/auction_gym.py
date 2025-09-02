@@ -76,10 +76,9 @@ class AuctionGymEnv(gym.Env):
 
     def _quantize_param(self, value: float, min_val: float, max_val: float, step_size: float) -> float:
         """Quantize parameter to discrete steps for efficient training - FIXED for better range distribution"""
-        # FIXED: Don't clip input value - let it be unbounded for better exploration
-        # The neural network can output any value, and we want to map it to the full range
+        # FIXED: Use improved linear mapping for uniform distribution
         
-        # Map input from [-5, 5] to [0, 1] range using linear mapping (better for bounded inputs)
+        # Map input from [-5, 5] to [0, 1] range using improved linear mapping
         # This ensures uniform distribution across the full range
         normalized_value = (value + 5.0) / 10.0  # Maps [-5, 5] to [0, 1]
         normalized_value = np.clip(normalized_value, 0.0, 1.0)  # Ensure [0, 1]
@@ -87,20 +86,20 @@ class AuctionGymEnv(gym.Env):
         # Map to the target range
         mapped_value = min_val + normalized_value * (max_val - min_val)
         
-        # Now quantize to nearest step
-        steps = round((mapped_value - min_val) / step_size)
+        # Now quantize to nearest step with improved rounding
+        steps = np.round((mapped_value - min_val) / step_size)
         quantized = min_val + steps * step_size
         
         # Ensure within bounds after quantization
         return np.clip(quantized, min_val, max_val).astype(np.float32)
 
     def _sigmoid_map_param(self, raw_value: float, min_val: float, max_val: float) -> float:
-        """Map raw network output to parameter range using sigmoid for smooth training - IMPROVED for better distribution"""
+        """Map raw network output to parameter range using IMPROVED sigmoid for uniform distribution"""
         # IMPROVED: Use better sigmoid scaling for more uniform distribution across the range
         
-        # Apply sigmoid to raw value (bounded input from -5 to 5)
+        # Apply sigmoid to raw value with improved scaling
         # Use scaling factor to make sigmoid more responsive across the full range
-        scaled_value = raw_value / 2.0  # Makes sigmoid more responsive
+        scaled_value = raw_value / 1.5  # Better scaling for more uniform distribution
         sigmoid_value = 1.0 / (1.0 + np.exp(-scaled_value))
         
         # Map to [min_val, max_val] range
@@ -108,20 +107,20 @@ class AuctionGymEnv(gym.Env):
         return np.clip(mapped_value, min_val, max_val).astype(np.float32)
 
     def _discrete_participants(self, raw_value: float) -> int:
-        """Convert continuous action to discrete participants (3,4,5,6) with smooth training - IMPROVED for better distribution"""
-        # IMPROVED: Better mapping to ensure all discrete values are reachable
+        """Convert continuous action to discrete participants (3,4,5,6) with IMPROVED uniform distribution"""
+        # IMPROVED: Better mapping to ensure all discrete values are reachable with uniform distribution
         
         # Map raw value from [-5, 5] to [0, 1] using improved sigmoid
-        scaled_value = raw_value / 2.0  # Better scaling for sigmoid
+        scaled_value = raw_value / 1.5  # Better scaling for more uniform distribution
         sigmoid_value = 1.0 / (1.0 + np.exp(-scaled_value))
         
-        # Map to discrete values with better distribution
-        # Use more balanced thresholds to ensure all values are reachable
-        if sigmoid_value < 0.2:
+        # Map to discrete values with IMPROVED balanced thresholds
+        # Use more balanced thresholds to ensure all values are reachable with equal probability
+        if sigmoid_value < 0.25:
             return 3
-        elif sigmoid_value < 0.4:
+        elif sigmoid_value < 0.5:
             return 4
-        elif sigmoid_value < 0.6:
+        elif sigmoid_value < 0.75:
             return 5
         else:
             return 6
@@ -310,15 +309,15 @@ class AuctionGymEnv(gym.Env):
         return obs, reward, done, info
 
     def test_parameter_mapping(self, num_samples: int = 1000):
-        """Test parameter mapping functions to verify range distribution"""
-        print(f"🧪 Testing Parameter Mapping Functions ({num_samples} samples)")
+        """Test parameter mapping functions to verify range distribution - IMPROVED VERSION"""
+        print(f"🧪 Testing IMPROVED Parameter Mapping Functions ({num_samples} samples)")
         print("=" * 60)
         
         # Test data: Generate samples across the full action space range [-5, 5]
         test_inputs = np.linspace(-5.0, 5.0, num_samples)
         
-        # Test 1: urgency_position_ratio (sigmoid mapping)
-        print("\n🔍 Test 1: urgency_position_ratio (sigmoid mapping)")
+        # Test 1: urgency_position_ratio (IMPROVED sigmoid mapping)
+        print("\n🔍 Test 1: urgency_position_ratio (IMPROVED sigmoid mapping)")
         print("   Expected range: [0.1, 3.0]")
         urgency_values = []
         for x in test_inputs:
@@ -332,8 +331,8 @@ class AuctionGymEnv(gym.Env):
         print(f"   Values < 0.5: {(urgency_values < 0.5).sum()} ({(urgency_values < 0.5).sum()/len(urgency_values)*100:.1f}%)")
         print(f"   Values > 2.5: {(urgency_values > 2.5).sum()} ({(urgency_values > 2.5).sum()/len(urgency_values)*100:.1f}%)")
         
-        # Test 2: speed_diff_modifier (quantized mapping)
-        print("\n🔍 Test 2: speed_diff_modifier (quantized mapping)")
+        # Test 2: speed_diff_modifier (IMPROVED quantized mapping)
+        print("\n🔍 Test 2: speed_diff_modifier (IMPROVED quantized mapping)")
         print("   Expected range: [-30.0, 30.0] with 1.0 steps")
         speed_values = []
         for x in test_inputs:
@@ -347,9 +346,9 @@ class AuctionGymEnv(gym.Env):
         print(f"   Values < -20: {(speed_values < -20).sum()} ({(speed_values < -20).sum()/len(speed_values)*100:.1f}%)")
         print(f"   Values > 20: {(speed_values > 20).sum()} ({(speed_values > 20).sum()/len(speed_values)*100:.1f}%)")
         
-        # Test 3: max_participants_per_auction (discrete mapping)
-        print("\n🔍 Test 3: max_participants_per_auction (discrete mapping)")
-        print("   Expected values: [3, 4, 5, 6]")
+        # Test 3: max_participants_per_auction (IMPROVED discrete mapping)
+        print("\n🔍 Test 3: max_participants_per_auction (IMPROVED discrete mapping)")
+        print("   Expected values: [3, 4, 5, 6] with uniform distribution")
         participant_values = []
         for x in test_inputs:
             mapped = self._discrete_participants(x)
@@ -358,13 +357,13 @@ class AuctionGymEnv(gym.Env):
         participant_values = np.array(participant_values)
         unique_values, counts = np.unique(participant_values, return_counts=True)
         print(f"   Actual values: {unique_values.tolist()}")
-        print(f"   Distribution:")
+        print(f"   Distribution (should be ~25% each):")
         for value, count in zip(unique_values, counts):
             percentage = count / len(participant_values) * 100
             print(f"     {value}: {count} ({percentage:.1f}%)")
         
-        # Test 4: ignore_vehicles_go (quantized mapping)
-        print("\n🔍 Test 4: ignore_vehicles_go (quantized mapping)")
+        # Test 4: ignore_vehicles_go (IMPROVED quantized mapping)
+        print("\n🔍 Test 4: ignore_vehicles_go (IMPROVED quantized mapping)")
         print("   Expected range: [0.0, 80.0] with 1.0 steps")
         ignore_values = []
         for x in test_inputs:
@@ -378,19 +377,34 @@ class AuctionGymEnv(gym.Env):
         print(f"   Values < 20: {(ignore_values < 20).sum()} ({(ignore_values < 20).sum()/len(ignore_values)*100:.1f}%)")
         print(f"   Values > 60: {(ignore_values > 60).sum()} ({(ignore_values > 60).sum()/len(ignore_values)*100:.1f}%)")
         
-        # Summary analysis
-        print("\n📊 SUMMARY ANALYSIS:")
-        print("   ✅ urgency_position_ratio: {'Good distribution' if urgency_values.std() > 0.8 else 'Poor distribution'}")
-        print("   ✅ speed_diff_modifier: {'Good distribution' if speed_values.std() > 15.0 else 'Poor distribution'}")
-        print("   ✅ max_participants_per_auction: {'Good distribution' if len(unique_values) == 4 else 'Poor distribution'}")
-        print("   ✅ ignore_vehicles_go: {'Good distribution' if ignore_values.std() > 20.0 else 'Poor distribution'}")
+        # IMPROVED: Distribution quality analysis
+        print("\n📊 IMPROVED DISTRIBUTION QUALITY ANALYSIS:")
         
-        print("\n✅ Parameter mapping test completed!")
+        # Check uniformity of discrete distribution
+        expected_uniform = 25.0  # 25% for each of 4 values
+        uniform_quality = 100.0 - np.std([count/len(participant_values)*100 for count in counts])
+        print(f"   ✅ Discrete uniformity quality: {uniform_quality:.1f}% (100% = perfect)")
+        
+        # Check sigmoid distribution quality
+        sigmoid_quality = "Good" if urgency_values.std() > 1.0 else "Poor"
+        print(f"   ✅ Sigmoid distribution: {sigmoid_quality} (std={urgency_values.std():.2f})")
+        
+        # Check quantized distribution quality
+        quantized_quality = "Good" if speed_values.std() > 15.0 else "Poor"
+        print(f"   ✅ Quantized distribution: {quantized_quality} (std={speed_values.std():.1f})")
+        
+        # Overall assessment
+        overall_quality = "EXCELLENT" if uniform_quality > 90 and urgency_values.std() > 1.0 and speed_values.std() > 15.0 else "GOOD" if uniform_quality > 70 else "NEEDS IMPROVEMENT"
+        print(f"\n🎯 OVERALL MAPPING QUALITY: {overall_quality}")
+        
+        print("\n✅ IMPROVED Parameter mapping test completed!")
         return {
             'urgency_position_ratio': urgency_values,
             'speed_diff_modifier': speed_values,
             'max_participants_per_auction': participant_values,
-            'ignore_vehicles_go': ignore_values
+            'ignore_vehicles_go': ignore_values,
+            'uniformity_quality': uniform_quality,
+            'overall_quality': overall_quality
         }
 
     def set_action_space_debug(self, enabled: bool = True):

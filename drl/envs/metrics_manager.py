@@ -170,13 +170,15 @@ class SimulationMetricsManager:
         # REMOVED: Don't force reset traffic_generator here - it should already be reset
         # The calling code (sim_wrapper) now handles this in the correct order
         
+        # CRITICAL FIX: Reset deadlock baseline to None for new episode
+        # This prevents deadlock penalties from carrying over between episodes
         self.metrics = {
             'avg_acceleration': 0.0,
             'collision_count': 0,
             'prev_vehicles_exited': initial_vehicles_exited,  # Initialize with current baseline
             'prev_collision_count': initial_collision_count,  # FIXED: Use actual traffic_generator value
             'prev_deadlock_count': 0,  # FIXED: Always start at 0 for new episode
-            'episode_deadlock_baseline': None,  # Will be set on first deadlock check
+            'episode_deadlock_baseline': None,  # FIXED: Reset to None to prevent carryover
             'current_deadlock_severity': 0.0,
             'deadlock_threat_level': 'none',
             'max_severity_seen': 0.0,
@@ -198,6 +200,8 @@ class SimulationMetricsManager:
         self._csv_buffer.clear()
         
         print("🔄 Metrics reset with proper baseline sync")
+        print("   ✅ Deadlock baseline reset to None (prevents cross-episode carryover)")
+        print("   ✅ prev_deadlock_count reset to 0 (fresh episode start)")
 
     def calculate_reward(self, traffic_controller, state_extractor, scenario, 
                         nash_solver, current_step: int, actions_since_reset: int = 0) -> float:
@@ -457,7 +461,7 @@ class SimulationMetricsManager:
         self.perf_stats['total_ticks'] += 1
 
     def _calculate_simple_deadlock_penalty(self, nash_solver) -> float:
-        """SIMPLIFIED deadlock penalty - clear negative signal for DRL agent"""
+        """SIMPLIFIED deadlock penalty - clear negative signal for DRL agent - FIXED episode boundaries"""
         penalty = 0.0
         
         try:
@@ -472,19 +476,42 @@ class SimulationMetricsManager:
                     print(f"🔄 Established deadlock baseline for episode: {current_deadlocks}")
                     return 0.0  # No penalty on baseline establishment
                 
-                # Calculate deadlocks WITHIN THIS EPISODE only
+                # FIXED: Calculate deadlocks WITHIN THIS EPISODE only
                 episode_baseline = self.metrics.get('episode_deadlock_baseline', 0)
                 episode_deadlocks = current_deadlocks - episode_baseline
                 prev_episode_deadlocks = self.metrics.get('prev_deadlock_count', 0)
                 new_deadlocks = episode_deadlocks - prev_episode_deadlocks
                 
+                # ENHANCED VALIDATION: Check for episode boundary issues
+                if new_deadlocks < 0:
+                    print(f"⚠️ WARNING: Negative new deadlocks detected: {new_deadlocks}")
+                    print(f"   Episode baseline: {episode_baseline}, Current: {current_deadlocks}")
+                    print(f"   This suggests episode boundary issue - resetting baseline")
+                    # Reset baseline to current value to prevent negative penalties
+                    self.metrics['episode_deadlock_baseline'] = current_deadlocks
+                    self.metrics['prev_deadlock_count'] = 0
+                    return 0.0
+                
+                # ENHANCED SAFETY CHECK: Detect suspiciously high deadlock counts
+                if current_deadlocks > 100:  # Suspiciously high deadlock count
+                    print(f"🚨 SAFETY CHECK: Suspiciously high deadlock count detected: {current_deadlocks}")
+                    print(f"   This suggests deadlock counter was not properly reset between episodes")
+                    print(f"   Resetting baseline to prevent massive negative rewards")
+                    
+                    # Reset baseline to current value for this episode
+                    self.metrics['episode_deadlock_baseline'] = current_deadlocks
+                    self.metrics['prev_deadlock_count'] = 0
+                    return 0.0
+                
                 if new_deadlocks > 0:
                     # SIMPLE deadlock penalty - clear negative signal
                     penalty = -new_deadlocks * 25.0  # Simple -25 per deadlock
                     
-                    # Update EPISODE deadlock count (not absolute count)
+                    # FIXED: Update EPISODE deadlock count (not absolute count)
                     self.metrics['prev_deadlock_count'] = episode_deadlocks
                     print(f"🚨 Simple deadlock penalty: {penalty:.1f} for {new_deadlocks} deadlocks")
+                    print(f"   ✅ Applied to current episode (baseline: {episode_baseline}, current: {current_deadlocks})")
+                    print(f"   ✅ Episode deadlocks: {episode_deadlocks}, New this step: {new_deadlocks}")
                     
         except Exception as e:
             print(f"⚠️ Deadlock penalty calculation error: {str(e)}")

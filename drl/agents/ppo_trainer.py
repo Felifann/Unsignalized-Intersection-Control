@@ -293,9 +293,9 @@ class PPOTrainer:
         """Load training configuration"""
         default_config = {
             'total_timesteps': 1_000_000,
-            'eval_freq': 5000,
+            'eval_freq': 1000,
             'checkpoint_freq': 1000,
-            'learning_rate': 3e-4,
+            'learning_rate': 1e-4,
             'n_steps': 2048,
             'batch_size': 64,
             'n_epochs': 10,

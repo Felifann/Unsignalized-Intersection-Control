@@ -1,0 +1,12 @@
+{
+  "timestamp": "20250901_162640",
+  "instance_id": 0,
+  "created_at": "2025-09-01T16:26:40.086427",
+  "training_parameters": {
+    "total_timesteps": "50000",
+    "learning_rate": "0.0001",
+    "n_steps": "256",
+    "batch_size": "64",
+    "n_epochs": "4"
+  }
+}

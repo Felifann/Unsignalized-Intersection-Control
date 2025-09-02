@@ -612,17 +612,17 @@ def main():
     print("=" * 50)
     
     # Generate all plots
-    plot_training_metrics(
-        results_dir=args.results_dir,
-        plots_dir=args.plots_dir,
-        save_plots=not args.no_save
-    )
-
     # plot_training_metrics(
-    #     results_dir="/cs/student/projects2/seiot/2024/xueyifan/drl/training_runs/20250831_053325/results",  # 指定具体的日期文件夹
-    #     plots_dir="/cs/student/projects2/seiot/2024/xueyifan/drl/training_runs/20250831_053325/plots",
-    #     save_plots=True
+    #     results_dir=args.results_dir,
+    #     plots_dir=args.plots_dir,
+    #     save_plots=not args.no_save
     # )
+
+    plot_training_metrics(
+        results_dir="/cs/student/projects2/seiot/2024/xueyifan/drl/training_runs/20250831_184712/results",  # 指定具体的日期文件夹
+        plots_dir="/cs/student/projects2/seiot/2024/xueyifan/drl/training_runs/20250831_184712/plots",
+        save_plots=True
+    )
     
     print("🎉 Plot generation completed!")
 

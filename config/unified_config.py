@@ -151,8 +151,8 @@ class DeadlockConfig:
 class DRLConfig:
     """Deep Reinforcement Learning training parameters"""
     # PPO parameters
-    learning_rate: float = 3e-4
-    n_steps: int = 150
+    learning_rate: float = 1e-4
+    n_steps: int = 128
     batch_size: int = 32
     n_epochs: int = 5
     gamma: float = 0.99
@@ -163,10 +163,10 @@ class DRLConfig:
     max_grad_norm: float = 0.5
     
     # Training schedule
-    total_timesteps: int = 50000
-    eval_freq: int = 500
+    total_timesteps: int = 100000
+    eval_freq: int = 1000
     checkpoint_freq: int = 1000
-    warmup_steps: int = 50000
+    warmup_steps: int = 32000
     decay_steps: int = 100000
     min_learning_rate: float = 1e-5
     
