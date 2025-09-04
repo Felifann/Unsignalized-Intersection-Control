@@ -349,6 +349,62 @@ class UnifiedConfig:
     def copy(self) -> 'UnifiedConfig':
         """Create a deep copy of the configuration"""
         return copy.deepcopy(self)
+    
+    def summary(self) -> str:
+        """Generate a summary of the configuration"""
+        summary_lines = [
+            "=" * 60,
+            "UNIFIED CONFIGURATION SUMMARY",
+            "=" * 60,
+            "",
+            "SYSTEM CONFIGURATION:",
+            f"  Map: {self.system.map_name}",
+            f"  CARLA Host: {self.system.carla_host}:{self.system.carla_port}",
+            f"  Max Vehicles: {self.system.max_vehicles}",
+            f"  Spawn Rate: {self.system.spawn_rate}",
+            f"  Training Mode: {self.system.training_mode}",
+            f"  Intersection Center: {self.system.intersection_center}",
+            f"  Intersection Half Size: {self.system.intersection_half_size}",
+            "",
+            "CONFLICT DETECTION:",
+            f"  Time Window: {self.conflict.conflict_time_window}s",
+            f"  Min Safe Distance: {self.conflict.min_safe_distance}m",
+            f"  Collision Threshold: {self.conflict.collision_threshold}m",
+            f"  Prediction Steps: {self.conflict.prediction_steps}",
+            f"  Velocity Threshold: {self.conflict.velocity_threshold}m/s",
+            "",
+            "MWIS SOLVER:",
+            f"  Max Go Agents: {self.mwis.max_go_agents}",
+            f"  Max Exact: {self.mwis.max_exact}",
+            f"  Weight Factor: {self.mwis.weight_factor}",
+            f"  Timeout: {self.mwis.timeout_seconds}s",
+            f"  Prefer Exact: {self.mwis.prefer_exact}",
+            "",
+            "AUCTION SYSTEM:",
+            f"  Max Participants: {self.auction.max_participants_per_auction}",
+            f"  Auction Interval: {self.auction.auction_interval}s",
+            f"  Bidding Duration: {self.auction.bidding_duration}s",
+            f"  Priority Transit Weight: {self.auction.priority_in_transit_weight}",
+            f"  Priority Distance Weight: {self.auction.priority_distance_weight}",
+            "",
+            "DEADLOCK HANDLING:",
+            f"  Speed Threshold: {self.deadlock.deadlock_speed_threshold}m/s",
+            f"  Detection Window: {self.deadlock.deadlock_detection_window}s",
+            f"  Min Vehicles: {self.deadlock.deadlock_min_vehicles}",
+            f"  Check Interval: {self.deadlock.deadlock_check_interval}s",
+            f"  Timeout Duration: {self.deadlock.deadlock_timeout_duration}s",
+            "",
+            "DRL TRAINING:",
+            f"  Learning Rate: {self.drl.learning_rate}",
+            f"  Max Steps: {self.drl.max_steps}",
+            f"  Batch Size: {self.drl.batch_size}",
+            f"  Total Timesteps: {self.drl.total_timesteps}",
+            f"  Gamma: {self.drl.gamma}",
+            f"  Clip Range: {self.drl.clip_range}",
+            "",
+            "=" * 60
+        ]
+        return "\n".join(summary_lines)
 
 # Global configuration instance
 _global_config: Optional[UnifiedConfig] = None

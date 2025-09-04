@@ -463,7 +463,6 @@ class TrafficController:
             else:
                 # Vehicle no longer exists in simulation
                 vehicles_to_restore.add(vehicle_id)
-                print(f"🗑️ 车辆 {vehicle_id} 已从仿真中移除，清理控制")
         
         for vehicle_id in vehicles_to_restore:
             try:

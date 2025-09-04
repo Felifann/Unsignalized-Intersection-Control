@@ -105,6 +105,39 @@ class TrainableBidPolicy:
         if ignore_vehicles_platoon_follower is not None:
             self.ignore_vehicles_platoon_follower = np.clip(ignore_vehicles_platoon_follower, 50.0, 100.0)
 
+    def update_parameters(self, urgency_position_ratio: float = None, 
+                         speed_diff_modifier: float = None,
+                         max_participants_per_auction: int = None,
+                         ignore_vehicles_go: float = None):
+        """Update all parameters from fixed DRL configuration"""
+        print(f"🎯 Updating bid policy with FIXED DRL parameters:")
+        
+        # Update bid-related parameters
+        if urgency_position_ratio is not None:
+            old_value = self.urgency_position_ratio
+            self.urgency_position_ratio = np.clip(urgency_position_ratio, 0.1, 3.0)
+            print(f"   urgency_position_ratio: {old_value:.3f} → {self.urgency_position_ratio:.3f}")
+        
+        # Update control parameters
+        if speed_diff_modifier is not None:
+            old_value = self.speed_diff_modifier
+            self.speed_diff_modifier = np.clip(speed_diff_modifier, -30.0, 30.0)
+            print(f"   speed_diff_modifier: {old_value:.1f} → {self.speed_diff_modifier:.1f}")
+        
+        # Update ignore_vehicles parameters
+        if ignore_vehicles_go is not None:
+            old_value = self.ignore_vehicles_go
+            self.ignore_vehicles_go = np.clip(ignore_vehicles_go, 0.0, 100.0)
+            # Auto-calculate platoon leader value (10% less than go value)
+            self.ignore_vehicles_platoon_leader = max(0.0, ignore_vehicles_go - 10.0)
+            print(f"   ignore_vehicles_go: {old_value:.1f}% → {self.ignore_vehicles_go:.1f}%")
+            print(f"   ignore_vehicles_platoon_leader: auto-calculated → {self.ignore_vehicles_platoon_leader:.1f}%")
+        
+        # Note: max_participants_per_auction is handled by auction engine, not bid policy
+        if max_participants_per_auction is not None:
+            print(f"   max_participants_per_auction: {max_participants_per_auction} (handled by auction engine)")
+        
+
     def calculate_bid(self, vehicle_state: Dict, is_platoon_leader: bool = False, 
                      platoon_size: int = 1, context: Dict = None) -> float:
         """计算增强的训练驱动出价"""

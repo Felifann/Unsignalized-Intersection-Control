@@ -1,0 +1,10 @@
+timestep,episode,throughput,avg_acceleration,collision_count,total_controlled,vehicles_exited,deadlocks_detected,deadlock_severity,reward,deadlock_detected,severe_deadlock_detected
+83252,1096,0.0,0.0,0,0,0,0,0.0,0.0,False,False
+83253,1096,0.0,0.0,0,0,0,0,0.0,0.0,False,False
+83254,1096,0.0,0.0,0,0,0,0,0.0,0.0,False,False
+83255,1096,0.0,0.0,0,0,0,0,0.0,0.0,False,False
+83256,1096,0.0,0.0,0,0,0,0,0.0,0.0,False,False
+83257,1096,0.0,0.0,0,0,0,0,0.0,0.0,False,False
+83258,1096,0.0,0.0,0,0,0,0,0.0,0.0,False,False
+83259,1096,0.0,0.0,0,0,0,0,0.0,0.0,False,False
+83260,1096,0.0,0.0,0,0,0,0,0.0,0.0,False,False

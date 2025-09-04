@@ -667,7 +667,7 @@ class DecentralizedAuctionEngine:
             
             self.current_auction.add_bid(bid)
             policy_type = "DRL" if self.bid_policy else "static"
-            print(f"   - {agent.type} {agent.id}: bid = {bid_value:.2f} ({policy_type})")
+            print(f"   - {agent.type} {agent.id}: bid = {bid_value:.2f}")
 
     def _agent_to_dict(self, agent: AuctionAgent) -> Dict:
         """Convert AuctionAgent to dict format for BidPolicy"""

@@ -218,3 +218,66 @@
    • severe: 5
    • moderate: 24
    • minor: 24
+
+
+
+AFTER:
+⏱ Simulation Time Statistics:
+   • Real time elapsed (wall-clock): 05:21 (320.62s)
+   • Simulation world time    : 00:55 (54.90s)
+
+🎮 Traffic Control Statistics:
+   • Total controlled vehicles: 46
+   • Successfully exited intersection: 45
+   • Still under control: 1
+   • Control history records: 26
+   • Average positive acceleration: 1.592 m/s² (absolute: 1.592 m/s²) (218 samples, 1 vehicles)
+   • Average negative acceleration: -1.670 m/s² (absolute: 1.670 m/s²) (186 samples, 1 vehicles)
+   • Average absolute acceleration: 1.663 m/s² (404 samples, 1 vehicles)
+   • Throughput per unit time: 2950.8 vehicles/h
+
+============================================================
+🚨 COLLISION INCIDENT REPORT (vehicle-vehicle only, deduplicated)
+============================================================
+📊 Total Collisions (deduped): 0
+✅ No vehicle-vehicle collisions detected in intersection area
+
+⏱ Simulation Time Statistics:
+   • Real time elapsed (wall-clock): 09:06 (546.05s)
+   • Simulation world time    : 01:22 (82.30s)
+
+🎮 Traffic Control Statistics:
+   • Total controlled vehicles: 80
+   • Successfully exited intersection: 77
+   • Still under control: 3
+   • Control history records: 38
+   • Average positive acceleration: 0.958 m/s² (absolute: 0.958 m/s²) (461 samples, 3 vehicles)
+   • Average negative acceleration: -0.906 m/s² (absolute: 0.906 m/s²) (341 samples, 3 vehicles)
+   • Average absolute acceleration: 0.993 m/s² (802 samples, 3 vehicles)
+   • Throughput per unit time: 3368.2 vehicles/h
+
+============================================================
+🚨 COLLISION INCIDENT REPORT (vehicle-vehicle only, deduplicated)
+============================================================
+📊 Total Collisions (deduped): 0
+✅ No vehicle-vehicle collisions detected in intersection area
+
+⏱ Simulation Time Statistics:
+   • Real time elapsed (wall-clock): 08:37 (517.04s)
+   • Simulation world time    : 01:26 (85.90s)
+
+🎮 Traffic Control Statistics:
+   • Total controlled vehicles: 67
+   • Successfully exited intersection: 62
+   • Still under control: 5
+   • Control history records: 37
+   • Average positive acceleration: 1.072 m/s² (absolute: 1.072 m/s²) (392 samples, 5 vehicles)
+   • Average negative acceleration: -1.865 m/s² (absolute: 1.865 m/s²) (368 samples, 5 vehicles)
+   • Average absolute acceleration: 1.856 m/s² (760 samples, 5 vehicles)
+   • Throughput per unit time: 2598.4 vehicles/h
+
+============================================================
+🚨 COLLISION INCIDENT REPORT (vehicle-vehicle only, deduplicated)
+============================================================
+📊 Total Collisions (deduped): 0
+✅ No vehicle-vehicle collisions detected in intersection area
