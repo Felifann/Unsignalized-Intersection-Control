@@ -7,4 +7,3 @@ pandas>=1.3.0
 matplotlib>=3.5.0
 seaborn>=0.11.0
 pyyaml>=6.0
-psutil>=5.8.0  # For multi-instance process monitoring

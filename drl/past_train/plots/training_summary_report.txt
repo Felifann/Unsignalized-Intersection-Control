@@ -3,27 +3,27 @@ DRL TRAINING SUMMARY REPORT
 ================================================================================
 
 📊 TRAINING OVERVIEW:
-   Total Episodes: 1099
-   Data Range: Episodes 0 to 1095
+   Total Episodes: 1281
+   Data Range: Episodes 0 to 1275
 
 🚗 PERFORMANCE METRICS:
-   Total Vehicles Exited: 65762
-   Average Exits per Episode: 59.8
-   Total Collisions: 19018
-   Average Collisions per Episode: 17.3
-   Average Throughput: 2790.5 vehicles/h
+   Total Vehicles Exited: 80344
+   Average Exits per Episode: 62.7
+   Total Collisions: 24188
+   Average Collisions per Episode: 18.9
+   Average Throughput: 2898.0 vehicles/h
    Maximum Throughput: 3600.0 vehicles/h
 
 ⚙️ ACTION SPACE PARAMETERS:
    📊 Using TRUE EXACT parameter values (actual values applied in environment)
-   Final Urgency Position Ratio (TRUE EXACT): 1.860
-   Final Speed Diff Modifier (TRUE EXACT): 14.0
+   Final Urgency Position Ratio (TRUE EXACT): 1.549
+   Final Speed Diff Modifier (TRUE EXACT): 7.0
    Final Max Participants (TRUE EXACT): 5
-   Final Ignore Vehicles GO (TRUE EXACT): 21.0%
+   Final Ignore Vehicles GO (TRUE EXACT): 36.0%
 
 📈 TRAINING PROGRESS:
-   Throughput Improvement: -100.0%
-   Exit Rate Improvement: -100.0%
+   Throughput Improvement: +1350.7%
+   Exit Rate Improvement: +53.6%
 
 💡 RECOMMENDATIONS:
    ⚠️  Collisions detected - consider adjusting safety parameters

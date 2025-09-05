@@ -1,2 +1,2 @@
 training_run,instance_id,total_timesteps,training_success,elapsed_time_seconds,base_directory,created_at
-20250903_113242,0,100000,False,0,drl/training_runs/20250903_113242,2025-09-04T12:03:42.631384
+20250905_020241,0,100000,True,10722.800519943237,drl/training_runs/20250905_020241,2025-09-05T05:03:12.857672
