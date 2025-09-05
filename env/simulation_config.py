@@ -1,4 +1,3 @@
-import carla
 class SimulationConfig:
     # ===== 地图设置 =====
     MAP_NAME = 'Town05'
@@ -10,7 +9,7 @@ class SimulationConfig:
     
     # ===== 仿真设置 =====
     SYNCHRONOUS_MODE = True
-    FIXED_DELTA_SECONDS = 0.2
+    FIXED_DELTA_SECONDS = 0.05  # SPEED UP: 4x faster for training
     
     # ===== 交通生成设置 =====
     MAX_VEHICLES = 500
@@ -31,7 +30,6 @@ class SimulationConfig:
     TARGET_INTERSECTION_CENTER = (-188.9, -89.7, 0.0)
     # 改为正方形检测区域 - 边长80米（半边长40米）
     INTERSECTION_HALF_SIZE = 40.0  # 正方形半边长（米）
-    INTERSECTION_RADIUS = 40.0  # 保持兼容性，等同于半边长
     
     # 新增：明确标识这是无信号灯路口
     INTERSECTION_TYPE = 'unsignalized'  # 'signalized' 或 'unsignalized'
@@ -40,14 +38,14 @@ class SimulationConfig:
     CONTROL_TARGET_INTERSECTION_ONLY = True
     
     # ===== 状态提取设置 =====
-    ACTOR_CACHE_INTERVAL = 1  # 改为1，每帧都更新
+    ACTOR_CACHE_INTERVAL = 5  # SPEED UP: Update every 5 steps instead of every step
     
     # ===== 打印设置 =====
     PRINT_INTERVAL = 30
     
     # ===== 路口容量控制设置 =====
-    MAX_CONCURRENT_AGENTS = 4      # 最多同时通过的agent数
-    INTERSECTION_CAPACITY_ENABLED = True  # 是否启用容量限制
+    # MAX_CONCURRENT_AGENTS = 4      # 最多同时通过的agent数
+    # INTERSECTION_CAPACITY_ENABLED = True  # 是否启用容量限制
     
     @classmethod
     def get_overview_setting(cls):

@@ -1,22 +1,100 @@
-import carla
 import math
+import time
+import carla
 from .carla_wrapper import CarlaWrapper
 from .traffic_generator import TrafficGenerator
 from .simulation_config import SimulationConfig
 
 class ScenarioManager:
-    def __init__(self, town=None):
-        # 使用配置文件中的地图设置
-        map_name = town or SimulationConfig.MAP_NAME
-        self.carla = CarlaWrapper(town=map_name)
+    def __init__(self, town=None, unified_config=None):
+        """
+        Initialize ScenarioManager with optional unified configuration
+        
+        Args:
+            town: Map name override
+            unified_config: UnifiedConfig object for dynamic configuration
+        """
+        self.unified_config = unified_config
+        
+        # Use unified config if available, otherwise fall back to legacy config
+        if unified_config:
+            map_name = town or unified_config.system.map_name
+        else:
+            map_name = town or SimulationConfig.MAP_NAME
+        
+        # Pass unified config to CarlaWrapper
+        self.carla = CarlaWrapper(town=map_name, unified_config=unified_config)
         self.traffic_gen = TrafficGenerator(self.carla)
 
-        # 初始化时显示道路和车道ID
-        # self.show_road_lane_ids()
+        self.traffic_generator = self.traffic_gen
+
+        # Timing attributes for real and simulation time measurements
+        self._real_start = None
+        self._real_end = None
+        self._sim_start = None
+        self._sim_end = None
+
+    
+    def update_carla_settings(self, fixed_delta_seconds=None):
+        """Update CARLA world settings dynamically"""
+        if hasattr(self.carla, 'update_world_settings'):
+            self.carla.update_world_settings(fixed_delta_seconds=fixed_delta_seconds)
+        else:
+            print("⚠️ CarlaWrapper does not support dynamic settings updates")
+    
+    def get_carla_settings(self):
+        """Get current CARLA world settings"""
+        if hasattr(self.carla, 'get_current_settings'):
+            return self.carla.get_current_settings()
+        else:
+            return None
 
     def reset_scenario(self):
+        """Reset scenario with improved vehicle cleanup to prevent spawn collisions"""
+        # CRITICAL: Clean up collision sensors first to prevent file handle leaks
+        if hasattr(self.traffic_gen, 'cleanup_sensors'):
+            self.traffic_gen.cleanup_sensors()
+        
+        # Reset traffic generator episode state (collision counts, etc.)
+        if hasattr(self.traffic_gen, 'reset_episode_state'):
+            self.traffic_gen.reset_episode_state()
+        
+        # Then destroy all vehicles
         self.carla.destroy_all_vehicles()
+        
+        # Wait for physics simulation to process destructions
+        world = self.carla.world
+        world.tick()  # Process one simulation tick
+        time.sleep(0.2)  # Longer wait for cleanup to complete
+        
+        # Verify vehicles are actually destroyed
+        remaining_vehicles = world.get_actors().filter('vehicle.*')
+        if len(remaining_vehicles) > 0:
+            print(f"⚠️ {len(remaining_vehicles)} vehicles still exist, forcing cleanup...")
+            for vehicle in remaining_vehicles:
+                try:
+                    vehicle.destroy()
+                except:
+                    pass
+            world.tick()
+            time.sleep(0.2)
+        
+        # Clear any cached vehicle lists in traffic generator
+        if hasattr(self.traffic_gen, 'vehicles'):
+            self.traffic_gen.vehicles = []
+        
+        # Generate new traffic
         self.traffic_gen.generate_traffic()
+        
+        # CRITICAL: Ensure vehicles are fully registered and stable
+        world.tick()  # First tick to register vehicles
+        time.sleep(0.1)  # Short wait for physics stabilization
+        world.tick()  # Second tick to ensure stability
+        
+        # Verify vehicle generation was successful
+        new_vehicles = world.get_actors().filter('vehicle.*')
+        print(f"✅ Scenario reset complete: {len(new_vehicles)} vehicles generated")
+        time.sleep(0.1)
     
     def update_vehicle_labels(self):
         """更新车辆标签显示"""
@@ -60,6 +138,43 @@ class ScenarioManager:
             )
         
         print(f"✅ 已显示正方形检测区域：中心({center[0]:.1f}, {center[1]:.1f})，边长{half_size*2}米")
+
+    def show_intersection_area1(self):
+        """在地图上显示目标交叉口中心点和正方形检测区域"""
+        world = self.carla.world
+        center = SimulationConfig.TARGET_INTERSECTION_CENTER
+        half_size = SimulationConfig.INTERSECTION_HALF_SIZE
+
+        # 显示中心点
+        world.debug.draw_point(
+            carla.Location(x=center[0], y=center[1], z=center[2]+1.0),
+            size=0.1,
+            color=carla.Color(255, 0, 0),
+            life_time=99999.0
+        )
+        
+        # 绘制正方形边界
+        # 计算正方形四个角的坐标
+        corners = [
+            (center[0] - half_size/5, center[1] - half_size/5),  # 左下角
+            (center[0] + half_size/5, center[1] - half_size/5),  # 右下角
+            (center[0] + half_size/5, center[1] + half_size/5),  # 右上角
+            (center[0] - half_size/5, center[1] + half_size/5),  # 左上角
+        ]
+        
+        # 绘制正方形的四条边
+        for i in range(4):
+            start_corner = corners[i]
+            end_corner = corners[(i + 1) % 4]  # 下一个角点（循环到第一个）
+            
+            world.debug.draw_line(
+                carla.Location(x=start_corner[0], y=start_corner[1], z=center[2]+0.5),
+                carla.Location(x=end_corner[0], y=end_corner[1], z=center[2]+0.5),
+                thickness=0.3,
+                color=carla.Color(0, 0, 255),
+                life_time=99999.0,
+                persistent_lines=False
+            )
 
     def show_road_lane_ids(self, display_radius=40):
         """在交叉口附近显示道路和车道ID"""
@@ -131,3 +246,58 @@ class ScenarioManager:
             except Exception as e:
                 print(f"[Warning] 显示road/lane标签失败: {e}")
                 continue
+
+    def start_time_counters(self):
+        """Start both real-world and simulation-world timers."""
+        try:
+            self._real_start = time.time()
+            # CARLA snapshot timestamp contains elapsed_seconds for simulation time
+            snapshot = self.carla.world.get_snapshot()
+            self._sim_start = getattr(snapshot.timestamp, 'elapsed_seconds', None)
+        except Exception:
+            # Fallback: only set real time if sim time not available
+            self._real_start = time.time()
+            self._sim_start = None
+
+    def stop_time_counters(self):
+        """Stop timers and record end times."""
+        try:
+            self._real_end = time.time()
+            snapshot = self.carla.world.get_snapshot()
+            self._sim_end = getattr(snapshot.timestamp, 'elapsed_seconds', None)
+        except Exception:
+            self._real_end = time.time()
+            # keep sim end as None if unavailable
+
+    def get_real_elapsed(self):
+        """Return elapsed real-world seconds (float)."""
+        if self._real_start is None:
+            return 0.0
+        end = self._real_end if self._real_end is not None else time.time()
+        return max(0.0, end - self._real_start)
+
+    def get_sim_elapsed(self):
+        """Return elapsed simulation seconds (float). Returns None if sim-timestamp unavailable."""
+        if self._sim_start is None:
+            return None
+        end = self._sim_end if self._sim_end is not None else None
+        if end is None:
+            try:
+                snapshot = self.carla.world.get_snapshot()
+                end = getattr(snapshot.timestamp, 'elapsed_seconds', None)
+            except Exception:
+                end = None
+        if end is None:
+            return None
+        return max(0.0, end - self._sim_start)
+
+    def format_elapsed(self, seconds):
+        """Format seconds into H:MM:SS or return 'N/A' for None."""
+        if seconds is None:
+            return "N/A"
+        s = int(round(seconds))
+        h, rem = divmod(s, 3600)
+        m, sec = divmod(rem, 60)
+        if h > 0:
+            return f"{h}:{m:02d}:{sec:02d}"
+        return f"{m:02d}:{sec:02d}"

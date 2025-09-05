@@ -6,9 +6,10 @@ from agents.navigation.global_route_planner_dao import GlobalRoutePlannerDAO
 from agents.navigation.global_route_planner import GlobalRoutePlanner
 
 class StateExtractor:
-    def __init__(self, carla_wrapper):
+    def __init__(self, carla_wrapper, training_mode=False):
         self.carla = carla_wrapper
         self.world_map = self.carla.world.get_map()  # 缓存地图对象
+        self.training_mode = training_mode  # SPEED UP: Skip expensive ops in training
 
         # 初始化GlobalRoutePlannerDAO
         dao = GlobalRoutePlannerDAO(self.world_map, 2.0)  # 2.0米采样距离
@@ -25,54 +26,90 @@ class StateExtractor:
         # 新增：状态缓存机制
         self._vehicle_states_cache = []
         self._states_cache_timestamp = 0
-        self._states_cache_duration = 0.1  # 缓存持续时间（秒）
+        self._states_cache_duration = 0.5  # SPEED UP: Longer cache duration
         
-        # 新增：waypoint缓存
+        # 新增：waypoint缓存 - OPTIMIZED FOR TRAINING  
         self._waypoint_cache = {}
         self._waypoint_cache_timestamp = 0
-        self._waypoint_cache_duration = 0.1  # waypoint缓存持续时间
+        self._waypoint_cache_duration = 1.0  # SPEED UP: Much longer cache
         
-        # 新增：车辆目标点缓存
+        # 新增：车辆目标点缓存 - OPTIMIZED FOR TRAINING
         self._vehicle_destinations = {}
         self._destination_cache_timestamp = 0
-        self._destination_cache_duration = 5.0  # 目标点缓存时间较长
+        self._destination_cache_duration = 10.0  # SPEED UP: Very long cache
         
         # 使用正方形检测区域
         self.intersection_half_size = SimulationConfig.INTERSECTION_HALF_SIZE
 
-    def get_vehicle_states(self, force_update=False):
+    def get_vehicle_states(self, force_update=False, include_all_vehicles=False):
         """获取车辆状态，支持缓存机制"""
         current_time = time.time()
         
         # 检查是否可以使用缓存的状态
-        if (not force_update and 
+        if (not force_update and not include_all_vehicles and
             self._vehicle_states_cache and 
             current_time - self._states_cache_timestamp < self._states_cache_duration):
             return self._vehicle_states_cache
         
         # 更新状态缓存
-        self._vehicle_states_cache = self._extract_vehicle_states()
+        self._vehicle_states_cache = self._extract_vehicle_states(include_all_vehicles)
         self._states_cache_timestamp = current_time
         
         return self._vehicle_states_cache
 
-    def _extract_vehicle_states(self):
+    def _extract_vehicle_states(self, include_all_vehicles=False):
         """实际提取车辆状态的方法"""
         # 更频繁地更新 actor 列表以捕获新车辆
         if self._cache_counter % self._cache_interval == 0:
             self._cached_actors = list(self.carla.world.get_actors().filter('vehicle.*'))
         self._cache_counter += 1
         
+        # For include_all_vehicles mode (used during reset validation), 
+        # return simplified states of all vehicles without complex processing
+        if include_all_vehicles:
+            # Force refresh of actors list for accurate count - bypass cache entirely
+            all_vehicles = list(self.carla.world.get_actors().filter('vehicle.*'))
+            simple_states = []
+            
+            for vehicle in all_vehicles:
+                try:
+                    # Test if vehicle is truly alive and accessible
+                    if not vehicle.is_alive:
+                        continue
+                        
+                    transform = vehicle.get_transform()
+                    location = transform.location
+                    velocity = vehicle.get_velocity()
+                    
+                    # Minimal state for reset validation - just count alive vehicles
+                    state = {
+                        'id': vehicle.id,
+                        'location': (location.x, location.y, location.z),
+                        'velocity': (velocity.x, velocity.y, velocity.z),
+                        'type': vehicle.type_id,
+                        'road_id': 0,  # Skip complex waypoint calculation during reset
+                        'lane_id': 0,
+                        'is_junction': False,
+                        'leading_vehicle_dist': -1.0,
+                        'distance_to_center': self._calculate_distance_to_intersection_center(location),
+                    }
+                    simple_states.append(state)
+                except Exception as e:
+                    # Log vehicle access issues during reset validation
+                    print(f"⚠️ Debug: Vehicle {getattr(vehicle, 'id', 'unknown')} access failed: {e}")
+                    continue
+            
+            return simple_states
+        
+        # Normal operation - only intersection vehicles with full processing
         # 获取或更新waypoint缓存
         vehicle_waypoints = self._get_cached_waypoints()
         
         # 更新车辆目标点
         self._update_vehicle_destinations()
         
-        valid_vehicles = [
-            vehicle for vehicle in self._cached_actors
-            if vehicle.is_alive and vehicle.id in vehicle_waypoints
-        ]
+        # Include all alive vehicles for processing, filtering happens below
+        valid_vehicles = [vehicle for vehicle in self._cached_actors if vehicle.is_alive]
         
         vehicle_states = []
 
@@ -81,8 +118,12 @@ class StateExtractor:
                 transform = vehicle.get_transform()
                 location = transform.location
                 
+                # Get waypoint if available
+                current_waypoint = vehicle_waypoints.get(vehicle.id)
+                
+                # For normal operation, check intersection area and leaving logic
                 # 检查车辆是否在目标交叉口正方形区域内
-                if not SimulationConfig.is_in_intersection_area(location):
+                if not self._is_in_intersection_area(location):
                     continue
                 
                 # 剔除驶离路口的车辆
@@ -90,12 +131,16 @@ class StateExtractor:
                     continue
                 
                 velocity = vehicle.get_velocity()
-                current_waypoint = vehicle_waypoints[vehicle.id]
 
                 # 计算到前方车辆的距离（优化版本）
-                leading_vehicle_dist = self._calculate_leading_distance(
-                    vehicle, transform, valid_vehicles, vehicle_waypoints, current_waypoint
-                )
+                # FIXED: Always try to calculate leading distance, even without waypoints
+                if current_waypoint:
+                    leading_vehicle_dist = self._calculate_leading_distance(
+                        vehicle, transform, valid_vehicles, vehicle_waypoints, current_waypoint
+                    )
+                else:
+                    # Fallback: simple distance calculation without waypoints
+                    leading_vehicle_dist = self._calculate_simple_leading_distance(vehicle, transform, valid_vehicles)
 
                 state = {
                     'id': vehicle.id,
@@ -103,9 +148,9 @@ class StateExtractor:
                     'rotation': (transform.rotation.pitch, transform.rotation.yaw, transform.rotation.roll),
                     'velocity': (velocity.x, velocity.y, velocity.z),
                     'type': vehicle.type_id,
-                    'road_id': current_waypoint.road_id,  # 从waypoint获取道路ID
-                    'lane_id': current_waypoint.lane_id,  # 从waypoint获取车道ID
-                    'is_junction': current_waypoint.is_junction,
+                    'road_id': current_waypoint.road_id if current_waypoint else 0,  # 从waypoint获取道路ID
+                    'lane_id': current_waypoint.lane_id if current_waypoint else 0,  # 从waypoint获取车道ID
+                    'is_junction': current_waypoint.is_junction if current_waypoint else False,
                     'leading_vehicle_dist': leading_vehicle_dist,
                     'distance_to_center': self._calculate_distance_to_intersection_center(location),
                     'destination': self._vehicle_destinations.get(vehicle.id),  # 添加目标点信息
@@ -239,16 +284,31 @@ class StateExtractor:
             not self._waypoint_cache):
             
             self._waypoint_cache = {}
+            waypoint_success_count = 0
+            waypoint_fail_count = 0
+            
             for vehicle in self._cached_actors:
                 if vehicle.is_alive:
                     try:
-                        waypoint = self.world_map.get_waypoint(vehicle.get_location())
+                        waypoint = self.world_map.get_waypoint(vehicle.get_location(), project_to_road=True, lane_type=carla.LaneType.Driving)
                         if waypoint is not None:
                             self._waypoint_cache[vehicle.id] = waypoint
-                    except:
-                        continue
+                            waypoint_success_count += 1
+                        else:
+                            waypoint_fail_count += 1
+                    except Exception as e:
+                        waypoint_fail_count += 1
+                        # Only log if there are many failures
+                        if waypoint_fail_count % 10 == 0:
+                            print(f"⚠️ Waypoint generation failed for vehicle {vehicle.id}: {e}")
             
             self._waypoint_cache_timestamp = current_time
+            
+            # Debug info when there are issues
+            total_vehicles = len(self._cached_actors)
+            if waypoint_fail_count > 0 and total_vehicles > 0:
+                success_rate = waypoint_success_count / total_vehicles * 100
+                print(f"🗺️ Waypoint generation: {waypoint_success_count}/{total_vehicles} ({success_rate:.1f}% success)")
         
         return self._waypoint_cache
 
@@ -285,6 +345,31 @@ class StateExtractor:
                     dist = math.sqrt(vec_to_other.x**2 + vec_to_other.y**2 + vec_to_other.z**2)
                     if dist < min_dist:
                         min_dist = dist
+        
+        return min_dist if min_dist != float('inf') else -1.0
+
+    def _calculate_simple_leading_distance(self, vehicle, transform, valid_vehicles):
+        """简单的前车距离计算（不需要waypoints）"""
+        min_dist = float('inf')
+        
+        for other_vehicle in valid_vehicles:
+            if vehicle.id == other_vehicle.id:
+                continue
+            
+            try:
+                other_transform = other_vehicle.get_transform()
+                other_location = other_transform.location
+                
+                # 简单的欧氏距离计算
+                dist = math.sqrt(
+                    (transform.location.x - other_location.x) ** 2 +
+                    (transform.location.y - other_location.y) ** 2
+                )
+                
+                if dist < min_dist:
+                    min_dist = dist
+            except Exception:
+                continue
         
         return min_dist if min_dist != float('inf') else -1.0
 
@@ -326,7 +411,21 @@ class StateExtractor:
         # 如果点积为负，说明车辆正在远离交叉口
         return dot_product < 0
 
+    def _is_in_intersection_area(self, location):
+        """检查车辆是否在目标交叉口正方形区域内"""
+        center = SimulationConfig.TARGET_INTERSECTION_CENTER
+        half_size = SimulationConfig.INTERSECTION_HALF_SIZE
+        
+        # 使用正方形检测区域
+        in_x_range = (center[0] - half_size) <= location.x <= (center[0] + half_size)
+        in_y_range = (center[1] - half_size) <= location.y <= (center[1] + half_size)
+        
+        return in_x_range and in_y_range
+
     def _calculate_distance_to_intersection_center(self, location):
         """计算到交叉口中心的距离"""
-        return SimulationConfig.distance_to_intersection_center(location)
+        center = SimulationConfig.TARGET_INTERSECTION_CENTER
+        dx = location.x - center[0]
+        dy = location.y - center[1]
+        return math.sqrt(dx * dx + dy * dy)
 
