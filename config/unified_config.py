@@ -436,20 +436,6 @@ def print_config_summary(config: Optional[UnifiedConfig] = None):
         config = get_config()
     print(config.summary())
 
-
-def load_config_from_yaml(yaml_path: str) -> UnifiedConfig:
-    """Load configuration from a YAML file (placeholder for future implementation)"""
-    # TODO: Implement YAML loading if needed
-    print(f"📄 Loading config from {yaml_path} (not yet implemented)")
-    return get_config()
-
-
-def save_config_to_yaml(config: UnifiedConfig, yaml_path: str):
-    """Save configuration to a YAML file (placeholder for future implementation)"""
-    # TODO: Implement YAML saving if needed
-    print(f"💾 Saving config to {yaml_path} (not yet implemented)")
-
-
 # Initialize default configuration on import
 if _global_config is None:
     _global_config = UnifiedConfig()

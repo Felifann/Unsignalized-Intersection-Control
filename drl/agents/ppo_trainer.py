@@ -374,8 +374,7 @@ class PPOTrainer:
         model.set_logger(logger)
         
         # Setup callbacks with reduced frequency to prevent file handle exhaustion
-        # 减少检查点保存频率以避免文件句柄耗尽
-        safe_checkpoint_freq = self.checkpoint_freq  # 最少2000步保存一次
+        safe_checkpoint_freq = self.checkpoint_freq
         checkpoint_callback = CheckpointCallback(
             save_freq=safe_checkpoint_freq,
             save_path=self.checkpoint_dir,

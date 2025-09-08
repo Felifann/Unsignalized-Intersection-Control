@@ -134,74 +134,74 @@ class SimpleMetricsCallback(BaseCallback):
 
     def _auto_copy_past_train_csv(self):
         """Auto-detect and copy past_train CSV files if they exist."""
-        # 使用绝对路径：past_train与train.py在同一目录下
+        # Use absolute path: past_train is in same directory as train.py
         current_dir = os.path.dirname(os.path.abspath(__file__))
         past_train_dir = os.path.join(current_dir, "past_train")
         results_dir = os.path.join(past_train_dir, "results")
         
         if not os.path.exists(results_dir):
-            print(f"📁 past_train/results 目录不存在，无需复制CSV文件。")
+            print(f"📁 past_train/results directory does not exist, no CSV files to copy.")
             return
         
-        print(f"🔍 自动检测并复制 past_train/results 目录中的 CSV 文件...")
+        print(f"🔍 Auto-detecting and copying CSV files from past_train/results directory...")
         
-        # 查找 step_metrics.csv 和 episode_metrics.csv
+        # Find step_metrics.csv and episode_metrics.csv
         step_metrics_src = os.path.join(results_dir, "step_metrics.csv")
         episode_metrics_src = os.path.join(results_dir, "episode_metrics.csv")
         
-        # 复制 step_metrics.csv
+        # Copy step_metrics.csv
         if os.path.exists(step_metrics_src):
             try:
                 shutil.copy2(step_metrics_src, self.step_metrics_path)
-                print(f"   ✅ 复制 step_metrics.csv 到 {self.step_metrics_path}")
+                print(f"   ✅ Copied step_metrics.csv to {self.step_metrics_path}")
                 
-                # 读取并显示文件信息
+                # Read and display file information
                 df = pd.read_csv(self.step_metrics_path)
-                print(f"   📊 step_metrics.csv 包含 {len(df)} 行数据")
+                print(f"   📊 step_metrics.csv contains {len(df)} rows of data")
                 if 'timestep' in df.columns and len(df) > 0:
                     last_timestep = df['timestep'].max()
-                    print(f"   🎯 最后时间步: {last_timestep}")
+                    print(f"   🎯 Last timestep: {last_timestep}")
             except Exception as copy_error:
-                print(f"⚠️ 复制 step_metrics.csv 失败: {copy_error}")
+                print(f"⚠️ Failed to copy step_metrics.csv: {copy_error}")
         else:
-            print(f"   📁 step_metrics.csv 不存在")
+            print(f"   📁 step_metrics.csv does not exist")
         
-        # 复制 episode_metrics.csv
+        # Copy episode_metrics.csv
         if os.path.exists(episode_metrics_src):
             try:
                 shutil.copy2(episode_metrics_src, self.episode_metrics_path)
-                print(f"   ✅ 复制 episode_metrics.csv 到 {self.episode_metrics_path}")
+                print(f"   ✅ Copied episode_metrics.csv to {self.episode_metrics_path}")
                 
-                # 读取并显示文件信息
+                # Read and display file information
                 df = pd.read_csv(self.episode_metrics_path)
-                print(f"   📊 episode_metrics.csv 包含 {len(df)} 行数据")
+                print(f"   📊 episode_metrics.csv contains {len(df)} rows of data")
                 if 'episode' in df.columns and len(df) > 0:
                     last_episode = df['episode'].max()
-                    print(f"   🎯 最后回合: {last_episode}")
+                    print(f"   🎯 Last episode: {last_episode}")
             except Exception as copy_error:
-                print(f"⚠️ 复制 episode_metrics.csv 失败: {copy_error}")
+                print(f"⚠️ Failed to copy episode_metrics.csv: {copy_error}")
         else:
-            print(f"   📁 episode_metrics.csv 不存在")
+            print(f"   📁 episode_metrics.csv does not exist")
         
-        print(f"   🔄 CSV文件复制完成，新训练将基于这些数据继续")
+        print(f"   🔄 CSV file copying complete, new training will continue based on this data")
 
     def auto_detect_past_train_checkpoint(self):
-        """自动检测past_train文件夹中的最新检查点"""
-        # 使用绝对路径：past_train与train.py在同一目录下
+        """Auto-detect latest checkpoint in past_train folder"""
+        # Use absolute path: past_train is in same directory as train.py
         current_dir = os.path.dirname(os.path.abspath(__file__))
         past_train_dir = os.path.join(current_dir, "past_train")
         checkpoints_dir = os.path.join(past_train_dir, "checkpoints")
         
         if not os.path.exists(checkpoints_dir):
-            print(f"📁 past_train/checkpoints 目录不存在")
+            print(f"📁 past_train/checkpoints directory does not exist")
             return None
         
-        # 查找所有检查点文件
+        # Find all checkpoint files
         checkpoint_files = []
         for file in os.listdir(checkpoints_dir):
             if file.endswith('.zip') and 'ppo_traffic_' in file and '_steps.zip' in file:
                 try:
-                    # 提取步数
+                    # Extract step count
                     steps_str = file.replace('ppo_traffic_', '').replace('_steps.zip', '')
                     steps = int(steps_str)
                     checkpoint_files.append((steps, file))
@@ -209,17 +209,17 @@ class SimpleMetricsCallback(BaseCallback):
                     continue
         
         if not checkpoint_files:
-            print(f"📁 没有找到有效的检查点文件")
+            print(f"📁 No valid checkpoint files found")
             return None
         
-        # 按步数排序，找到最新的
+        # Sort by step count and find the latest
         checkpoint_files.sort(key=lambda x: x[0], reverse=True)
         latest_steps, latest_file = checkpoint_files[0]
         latest_path = os.path.join(checkpoints_dir, latest_file)
         
-        print(f"🔍 自动检测到最新检查点: {latest_file}")
-        print(f"   📍 路径: {latest_path}")
-        print(f"   📊 训练步数: {latest_steps}")
+        print(f"🔍 Auto-detected latest checkpoint: {latest_file}")
+        print(f"   📍 Path: {latest_path}")
+        print(f"   📊 Training steps: {latest_steps}")
         
         return latest_path, latest_steps
 
@@ -773,7 +773,7 @@ def main():
     
     # DRL parameters - Auto-detect from past_train if available, but expand to 100000 steps
     past_train_config = None
-    # 使用绝对路径：past_train与train.py在同一目录下
+    # Use absolute path: past_train is in same directory as train.py
     current_dir = os.path.dirname(os.path.abspath(__file__))
     past_train_config_path = os.path.join(current_dir, "past_train", "config", "training_config.json")
     
@@ -781,26 +781,26 @@ def main():
         try:
             with open(past_train_config_path, 'r') as f:
                 past_train_config = json.load(f)
-            print(f"📋 检测到 past_train 配置: {past_train_config_path}")
+            print(f"📋 Detected past_train configuration: {past_train_config_path}")
             
-            # 提取 past_train 的训练参数
+            # Extract past_train training parameters
             past_params = past_train_config.get('training_parameters', {})
             past_learning_rate = float(past_params.get('learning_rate', 0.0003))
             past_n_epochs = int(past_params.get('n_epochs', 4))
             
-            print(f"   🎯 Past Train 设置:")
-            print(f"      • 原始目标步数: {past_params.get('total_timesteps', 40000)}")
-            print(f"      • 学习率: {past_learning_rate}")
-            print(f"      • 训练轮数: {past_n_epochs}")
-            print(f"   🚀 扩展目标: 100,000 步 (保持其他参数一致)")
+            print(f"   🎯 Past Train Settings:")
+            print(f"      • Original target steps: {past_params.get('total_timesteps', 40000)}")
+            print(f"      • Learning rate: {past_learning_rate}")
+            print(f"      • Training epochs: {past_n_epochs}")
+            print(f"   🚀 Extended target: 100,000 steps (keeping other parameters consistent)")
             
-            # 使用 past_train 的设置，但扩展到 100,000 步
+            # Use past_train settings, but extend to 100,000 steps
             config = {
-                'total_timesteps': 100000,              # 扩展到 100,000 步
-                'learning_rate': past_learning_rate,   # 保持 past_train 的学习率
+                'total_timesteps': 100000,              # Extended to 100,000 steps
+                'learning_rate': past_learning_rate,   # Keep past_train learning rate
                 'n_steps': 256,
                 'batch_size': 64,
-                'n_epochs': past_n_epochs,             # 保持 past_train 的训练轮数
+                'n_epochs': past_n_epochs,             # Keep past_train training epochs
                 'gamma': 0.99,
                 'gae_lambda': 0.95,
                 'clip_range': 0.2,
@@ -810,15 +810,15 @@ def main():
                 'checkpoint_freq': 1000
             }
             
-            print(f"   ✅ 使用 past_train 设置 + 扩展步数:")
-            print(f"      • 总训练步数: {config['total_timesteps']} (扩展)")
-            print(f"      • 学习率: {config['learning_rate']} (保持)")
-            print(f"      • 训练轮数: {config['n_epochs']} (保持)")
+            print(f"   ✅ Using past_train settings + extended steps:")
+            print(f"      • Total training steps: {config['total_timesteps']} (extended)")
+            print(f"      • Learning rate: {config['learning_rate']} (maintained)")
+            print(f"      • Training epochs: {config['n_epochs']} (maintained)")
             
         except Exception as e:
-            print(f"⚠️ 读取 past_train 配置失败: {e}")
-            print(f"   🔄 使用默认设置")
-            # 使用默认设置
+            print(f"⚠️ Failed to read past_train configuration: {e}")
+            print(f"   🔄 Using default settings")
+            # Use default settings
             config = {
                 'total_timesteps': args.total_timesteps,
                 'learning_rate': 1e-4,
@@ -834,8 +834,8 @@ def main():
                 'checkpoint_freq': 1000
             }
     else:
-        print(f"📋 未检测到 past_train 配置，使用默认设置")
-        # 使用默认设置
+        print(f"📋 No past_train configuration detected, using default settings")
+        # Use default settings
         config = {
             'total_timesteps': args.total_timesteps,
             'learning_rate': 1e-4,
@@ -1029,8 +1029,8 @@ def main():
         auto_checkpoint_steps = 0
         
         if not args.checkpoint:
-            print("🔍 自动检测past_train文件夹中的检查点...")
-            # 创建临时的metrics callback来检测检查点
+            print("🔍 Auto-detecting checkpoints in past_train folder...")
+            # Create temporary metrics callback to detect checkpoints
             temp_metrics_callback = SimpleMetricsCallback(
                 log_dir=dirs['results_dir'],
                 verbose=0,
@@ -1040,41 +1040,41 @@ def main():
             auto_checkpoint_result = temp_metrics_callback.auto_detect_past_train_checkpoint()
             if auto_checkpoint_result:
                 auto_checkpoint_path, auto_checkpoint_steps = auto_checkpoint_result
-                print(f"✅ 自动检测到检查点: {auto_checkpoint_path}")
-                print(f"   🎯 建议继续训练，当前进度: {auto_checkpoint_steps} 步")
+                print(f"✅ Auto-detected checkpoint: {auto_checkpoint_path}")
+                print(f"   🎯 Suggested to continue training, current progress: {auto_checkpoint_steps} steps")
                 
-                # 使用扩展的目标步数计算剩余步数
+                # Calculate remaining steps using extended target steps
                 target_timesteps = config['total_timesteps']  # 100,000
                 remaining_steps = target_timesteps - auto_checkpoint_steps
                 
-                print(f"   📊 训练进度分析:")
-                print(f"      • 当前步数: {auto_checkpoint_steps}")
-                print(f"      • 目标步数: {target_timesteps} (扩展目标)")
-                print(f"      • 剩余步数: {remaining_steps}")
-                print(f"      • 完成百分比: {auto_checkpoint_steps/target_timesteps*100:.1f}%")
+                print(f"   📊 Training progress analysis:")
+                print(f"      • Current steps: {auto_checkpoint_steps}")
+                print(f"      • Target steps: {target_timesteps} (extended target)")
+                print(f"      • Remaining steps: {remaining_steps}")
+                print(f"      • Completion percentage: {auto_checkpoint_steps/target_timesteps*100:.1f}%")
                 
                 if remaining_steps > 0:
-                    print(f"   🚀 可以继续训练 {remaining_steps} 步完成扩展目标")
+                    print(f"   🚀 Can continue training for {remaining_steps} steps to complete extended target")
                 else:
-                    print(f"   ✅ 训练已完成，无需继续")
+                    print(f"   ✅ Training already completed, no need to continue")
                     return
                 
-                # 询问用户是否继续训练
-                print(f"🔄 是否从检测到的检查点继续训练？")
-                print(f"   📁 检查点: {os.path.basename(auto_checkpoint_path)}")
-                print(f"   📊 当前步数: {auto_checkpoint_steps}")
-                print(f"   🎯 目标步数: {target_timesteps}")
+                # Ask user whether to continue training
+                print(f"🔄 Continue training from detected checkpoint?")
+                print(f"   📁 Checkpoint: {os.path.basename(auto_checkpoint_path)}")
+                print(f"   📊 Current steps: {auto_checkpoint_steps}")
+                print(f"   🎯 Target steps: {target_timesteps}")
                 
-                # 自动决定继续训练（可以根据需要修改为手动确认）
-                should_continue = True  # 自动继续训练
+                # Automatically decide to continue training (can be modified to manual confirmation if needed)
+                should_continue = True  # Auto-continue training
                 if should_continue:
-                    print(f"🚀 自动选择继续训练模式")
+                    print(f"🚀 Auto-selected continue training mode")
                     args.checkpoint = auto_checkpoint_path
                     args.continue_training = True
                 else:
-                    print(f"🆕 选择开始新训练")
+                    print(f"🆕 Selected to start new training")
             else:
-                print(f"📁 未检测到past_train检查点，将开始新训练")
+                print(f"📁 No past_train checkpoint detected, will start new training")
         
         # Check if we should load from checkpoint
         if args.checkpoint and args.continue_training:

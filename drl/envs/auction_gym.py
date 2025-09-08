@@ -247,8 +247,8 @@ class AuctionGymEnv(gym.Env):
         # FIXED: ONLY 4 trainable parameters - others are fixed for deadlock avoidance focus
         # NOTE: Raw neural network output should be unbounded - processing functions handle bounds
         action_params = {
-            # 1. NEW: 紧急度与位置优势的关系因子 (1 parameter) - 替换 bid_scale
-            'urgency_position_ratio': self._sigmoid_map_param(action[0], 0.1, 3.0),  # 控制紧急度vs位置优势的平衡
+           
+            'urgency_position_ratio': self._sigmoid_map_param(action[0], 0.1, 3.0),
             
             # 2. Control parameter (1 parameter)
             'speed_diff_modifier': self._quantize_param(action[1], -30.0, 30.0, 1.0),  # Steps of 1.0
@@ -260,7 +260,7 @@ class AuctionGymEnv(gym.Env):
             'ignore_vehicles_go': self._quantize_param(action[3], 0.0, 80.0, 1.0),  # GO state: 0-80%, steps of 1%
         }
         
-        # FIXED: NO extra parameters - only the 4 trainable ones
+
         # The sim_wrapper will handle setting fixed values for non-trainable parameters
         
         # Update simulation
@@ -496,22 +496,6 @@ class AuctionGymEnv(gym.Env):
         if hasattr(self, 'sim'):
             self.sim.close()
         print("🏁 Optimized Auction Gym Environment closed")
-
-    def get_action_meanings(self) -> List[str]:
-        """Get human-readable action descriptions for 4 MOST IMPORTANT deadlock avoidance parameters"""
-        return [
-            # 1. Bid Scale - 总体出价缩放因子（最重要）
-            "Bid Scale (0.1-5.0, sigmoid mapping): 总体出价缩放因子 ⚡ - 控制车辆优先级，避免死锁",
-            
-            # 2. Speed Diff Modifier - 速度控制修正（关键）
-            "Speed Diff Modifier (-30 to +30, steps=5): 速度控制修正 ⚡ - 保持车辆流动，防止停滞",
-            
-            # 3. Max Participants Per Auction - 拍卖参与者数量（策略性）
-            "Max Participants Per Auction (3-6, discrete): 每轮拍卖最大参与者数量 🔢 - 优化决策速度",
-            
-            # 4. Ignore Vehicles Go - GO状态ignore_vehicles百分比（重要）
-            "Ignore Vehicles GO (0-80%, steps=10%): GO状态ignore_vehicles% ⚡ - 减少不必要等待，车队领队自动-10%"
-        ]
 
     def get_current_action_space_config(self) -> Dict[str, Any]:
         """Get current action space configuration for verification"""

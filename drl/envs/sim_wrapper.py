@@ -470,7 +470,6 @@ class SimulationEnv:
         # Track which parameters actually changed
         changed_params = []
         
-        # 1. NEW: 紧急度与位置优势关系因子 (1 parameter - 替换 bid_scale)
         if 'urgency_position_ratio' in action_params:
             new_value = action_params['urgency_position_ratio']
             old_value = self.bid_policy.urgency_position_ratio
@@ -545,7 +544,6 @@ class SimulationEnv:
         # Track which parameters actually changed
         changed_params = []
         
-        # 1. NEW: 紧急度与位置优势关系因子 (1 parameter - 替换 bid_scale)
         if 'urgency_position_ratio' in cached_params:
             new_value = cached_params['urgency_position_ratio']
             old_value = self.bid_policy.urgency_position_ratio
@@ -961,9 +959,6 @@ class SimulationEnv:
         # Reconnect all components
         self.traffic_controller.set_platoon_manager(self.platoon_manager)
         self.auction_engine.set_nash_controller(self.nash_solver)
-        # OPTIMIZED: Don't reconnect bid_policy during reset - it's the same object
-        # self.traffic_controller.set_bid_policy(self.bid_policy)  # REMOVED: Unnecessary
-        # self.auction_engine.set_bid_policy(self.bid_policy)     # REMOVED: Unnecessary
         
         # OPTIMIZED: Reset episode state for all components - no unnecessary waits
         self.traffic_controller.reset_episode_state()

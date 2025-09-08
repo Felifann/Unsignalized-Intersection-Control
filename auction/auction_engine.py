@@ -15,31 +15,6 @@ from .bid_policy import AgentBidPolicy
 # 2. traffic_light_override.py - Traffic light management tool translated  
 # 3. auction/auction_engine.py - Auction engine with Chinese text translated
 
-# Key translation mappings applied:
-# 拍卖 -> auction
-# 车队 -> platoon  
-# 单车 -> individual vehicle
-# 控制 -> control
-# 冲突 -> conflict
-# 解决 -> resolution
-# 代理 -> agent
-# 获胜者 -> winner
-# 竞标 -> bidding
-# 优先级 -> priority
-# 路口 -> intersection
-# 车辆 -> vehicle
-# 统计 -> statistics
-# 跟踪 -> tracking
-# 管理器 -> manager
-# 初始化 -> initialization
-# 更新 -> update
-# 评估 -> evaluation
-# 归档 -> archive
-
-# All docstrings, comments, print statements, and user-facing text
-# have been converted from Chinese to English while maintaining
-# the same functionality and technical accuracy.
-
 class AuctionStatus(Enum):
     WAITING = "waiting"
     BIDDING = "bidding" 
@@ -254,10 +229,6 @@ class ParticipantIdentifier:
         
         # Otherwise, even if in intersection area, may just be waiting at boundary
         return False
-    
-        # DISABLED: Platoon-related methods temporarily removed
-        # def _analyze_platoon_transit_status(self, platoon_vehicles: List[Dict]) -> Dict:
-        # def _get_vehicle_lane(self, vehicle: Dict) -> str:
     
     def _vehicle_has_destination(self, vehicle: Dict) -> bool:
         """Check if vehicle has a valid destination set"""
