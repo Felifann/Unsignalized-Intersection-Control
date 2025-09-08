@@ -5,8 +5,8 @@ from env.simulation_config import SimulationConfig
 
 class TrafficController:
     """
-    基于拍卖结果的统一交通控制器 - 支持车队和单车
-    核心思想：所有控制都基于拍卖获胜者的优先级排序
+    Unified traffic controller based on auction results - supports platoons and individual vehicles
+    Core principle: All control is based on priority ranking of auction winners
     """
     
     def __init__(self, carla_wrapper, state_extractor, max_go_agents: int = None):
@@ -15,15 +15,15 @@ class TrafficController:
         self.world = carla_wrapper.world
         self.traffic_manager = carla_wrapper.client.get_trafficmanager()
         
-        # 添加交叉口中心和检测区域配置
+        # Add intersection center and detection area configuration
         self.intersection_center = SimulationConfig.TARGET_INTERSECTION_CENTER
         self.intersection_half_size = SimulationConfig.INTERSECTION_HALF_SIZE
         
-        # 控制参数
-        self.default_speed_diff = -40.0  # 默认速度差异
-        self.default_follow_distance = 1.5  # 默认跟车距离
+        # Control parameters
+        self.default_speed_diff = -40.0  # Default speed difference
+        self.default_follow_distance = 1.5  # Default following distance
 
-        # 控制状态跟踪
+        # Control state tracking
         self.controlled_vehicles: Dict[str, Dict] = {}
         self.current_controlled_vehicles: Set[str] = set()
         self.platoon_manager = None
@@ -64,12 +64,12 @@ class TrafficController:
         self._reset_update_count = 0
         
         limit_text = "unlimited" if max_go_agents is None else str(max_go_agents)
-        print(f"🎮 增强交通控制器初始化完成 - 支持车队、单车 (max go agents: {limit_text})")
+        print(f"🎮 Enhanced traffic controller initialized - supports platoons and individual vehicles (max go agents: {limit_text})")
 
     def set_platoon_manager(self, platoon_manager):
         """Set platoon manager reference"""
         self.platoon_manager = platoon_manager
-        print("🔗 车队管理器已连接到交通控制器")
+        print("🔗 Platoon manager connected to traffic controller")
 
     # Add method to update configuration
     def update_max_go_agents(self, max_go_agents: int = None):
@@ -79,7 +79,7 @@ class TrafficController:
         print(f"🔄 Traffic controller: Updated MAX_GO_AGENTS to {limit_text}")
 
     def update_control(self, platoon_manager=None, auction_engine=None, direct_winners=None):
-        """主控制更新函数"""
+        """Main control update function"""
         if platoon_manager:
             self.platoon_manager = platoon_manager
         
@@ -104,11 +104,11 @@ class TrafficController:
         # 3. Update acceleration data for currently controlled vehicles
         self._update_acceleration_data(current_controlled)
         
-        # 4. 恢复不再被控制的车辆 (using expanded vehicle state detection)
+        # 4. Restore vehicles no longer under control (using expanded vehicle state detection)
         # CRITICAL: Skip exit tracking for first few updates after reset
         self._restore_uncontrolled_vehicles(current_controlled)
         
-        # 5. 更新当前控制状态
+        # 5. Update current control state
         self.current_controlled_vehicles = current_controlled
 
     def _update_acceleration_data(self, controlled_vehicles: Set[str]):
@@ -188,11 +188,11 @@ class TrafficController:
                     self.previous_sim_timestamps[vehicle_id] = current_sim_time
                     
                 except Exception as e:
-                    print(f"[Warning] 计算车辆 {vehicle_id} 加速度失败: {e}")
+                    print(f"[Warning] Failed to calculate acceleration for vehicle {vehicle_id}: {e}")
                     # Debug: Print velocity data format for troubleshooting
                     try:
                         velocity_debug = vehicle_state.get('velocity', 'NOT_FOUND')
-                        print(f"[Debug] 车辆 {vehicle_id} 速度数据格式: {type(velocity_debug)} = {velocity_debug}")
+                        print(f"[Debug] Vehicle {vehicle_id} velocity data format: {type(velocity_debug)} = {velocity_debug}")
                     except:
                         pass
 
@@ -258,30 +258,30 @@ class TrafficController:
         return results
 
     def _maintain_intersection_vehicle_control(self) -> Set[str]:
-        """维持路口内车辆的控制"""
+        """Maintain control of vehicles inside intersection"""
         maintained_vehicles = set()
         vehicle_states = self.state_extractor.get_vehicle_states()
         
         for vehicle_state in vehicle_states:
             vehicle_id = str(vehicle_state['id'])
             
-            # 如果车辆在路口内且之前被控制，继续维持控制
+            # If vehicle is inside intersection and was previously controlled, continue maintaining control
             if (vehicle_state.get('is_junction', False) and 
                 vehicle_id in self.controlled_vehicles):
                 
-                # 确保控制仍然有效
+                # Ensure control is still valid
                 if self._apply_single_vehicle_control(
                     vehicle_id, 
                     self.controlled_vehicles[vehicle_id]['rank'],
                     0.0,  # bid_value
-                    'go'  # 路口内车辆应该继续通行
+                    'go'  # Vehicles inside intersection should continue moving
                 ):
                     maintained_vehicles.add(vehicle_id)
         
         return maintained_vehicles
 
     def _get_control_action_by_rank(self, rank: int) -> str:
-        """根据排名获取控制动作"""
+        """Get control action based on ranking"""
         if self.max_go_agents is None:
             return 'go'  # No limit, everyone can go
         elif rank <= self.max_go_agents:
@@ -375,9 +375,9 @@ class TrafficController:
     def _get_control_params_by_rank_and_action(self, rank: int, action: str, 
                                          is_platoon_member: bool = False,
                                          is_leader: bool = False) -> Dict[str, float]:
-        """根据排名、动作和车队状态获取控制参数 - 集成bid_policy参数"""
+        """Get control parameters based on rank, action and platoon status - integrates bid_policy parameters"""
         
-        # 如果有bid_policy，使用其增强的控制参数
+        # If bid_policy exists, use its enhanced control parameters
         if hasattr(self, 'bid_policy') and self.bid_policy:
             return self.bid_policy.get_enhanced_control_params(
                 action=action,
@@ -385,7 +385,7 @@ class TrafficController:
                 is_leader=is_leader
             )
         
-        # 原有的fallback逻辑
+        # Original fallback logic
         if action == 'wait':
             if is_platoon_member:
                 # Same parameters for both leader and follower
@@ -424,12 +424,12 @@ class TrafficController:
                 }
 
     def set_bid_policy(self, bid_policy):
-        """设置bid_policy引用以使用其控制参数"""
+        """Set bid_policy reference to use its control parameters"""
         self.bid_policy = bid_policy
         print("🔗 Bid policy connected to traffic controller")
 
     def _restore_uncontrolled_vehicles(self, current_controlled: Set[str]):
-        """恢复不再被控制的车辆，包括已离开路口的车辆"""
+        """Restore vehicles no longer under control, including those that have left the intersection"""
         # CRITICAL: Skip exit tracking immediately after reset to prevent false rewards
         skip_exit_tracking = (hasattr(self, '_just_reset') and 
                              self._just_reset and 
@@ -446,7 +446,7 @@ class TrafficController:
         previously_controlled = set(self.controlled_vehicles.keys())
         vehicles_to_restore = previously_controlled - current_controlled
         
-        # 检查是否有车辆已完全离开路口区域
+        # Check if any vehicles have completely left the intersection area
         vehicle_states = self.state_extractor.get_vehicle_states()
         vehicle_lookup = {str(v['id']): v for v in vehicle_states}
         
@@ -454,12 +454,12 @@ class TrafficController:
             if vehicle_id in vehicle_lookup:
                 vehicle_state = vehicle_lookup[vehicle_id]
                 
-                # 如果车辆已离开路口且不在当前控制列表中，移除控制
+                # If vehicle has left intersection and is not in current control list, remove control
                 if (not vehicle_state.get('is_junction', False) and 
                     vehicle_id not in current_controlled and
                     self._vehicle_has_exited_intersection(vehicle_state)):
                     vehicles_to_restore.add(vehicle_id)
-                    print(f"✅ 车辆 {vehicle_id} 已离开路口，移除控制")
+                    print(f"✅ Vehicle {vehicle_id} has left intersection, removing control")
             else:
                 # Vehicle no longer exists in simulation
                 vehicles_to_restore.add(vehicle_id)
@@ -468,7 +468,7 @@ class TrafficController:
             try:
                 carla_vehicle = self.world.get_actor(int(vehicle_id))
                 if carla_vehicle and carla_vehicle.is_alive:
-                    # 恢复默认控制参数
+                    # Restore default control parameters
                     self.traffic_manager.vehicle_percentage_speed_difference(
                         carla_vehicle, self.default_speed_diff
                     )
@@ -502,18 +502,18 @@ class TrafficController:
                         )
                         del self.acceleration_data[accel_type][vehicle_id]
                 
-                # 移除控制记录
+                # Remove control record
                 self.controlled_vehicles.pop(vehicle_id, None)
                 
             except Exception as e:
-                print(f"[Warning] 恢复车辆控制失败 {vehicle_id}: {e}")
+                print(f"[Warning] Failed to restore vehicle control {vehicle_id}: {e}")
 
     def _vehicle_has_exited_intersection(self, vehicle_state: Dict) -> bool:
-        """检查车辆是否已完全离开路口区域"""
+        """Check if vehicle has completely left the intersection area"""
         vehicle_location = vehicle_state['location']
         distance_to_center = SimulationConfig.distance_to_intersection_center(vehicle_location)
         
-        # 如果车辆距离路口中心超过一定距离，认为已离开
+        # If vehicle distance to intersection center exceeds threshold, consider it as exited
         exit_threshold = self.intersection_half_size/ 2
         return distance_to_center > exit_threshold
 
@@ -651,7 +651,7 @@ class TrafficController:
             return True
             
         except Exception as e:
-            print(f"[Warning] 应用车辆控制失败 {vehicle_id}: {e}")
+            print(f"[Warning] Failed to apply vehicle control {vehicle_id}: {e}")
             return False
 
     def _apply_platoon_control(self, participant, rank: int, bid_value: float, 
@@ -677,7 +677,7 @@ class TrafficController:
             return controlled_vehicles
             
         except Exception as e:
-            print(f"[Warning] 应用车队控制失败 {participant.id}: {e}")
+            print(f"[Warning] Failed to apply platoon control {participant.id}: {e}")
             return controlled_vehicles
 
     def _apply_single_platoon_vehicle_control(self, vehicle_id: str, rank: int, 
@@ -731,5 +731,5 @@ class TrafficController:
             return True
             
         except Exception as e:
-            print(f"[Warning] 应用车队车辆控制失败 {vehicle_id}: {e}")
+            print(f"[Warning] Failed to apply platoon vehicle control {vehicle_id}: {e}")
             return False
