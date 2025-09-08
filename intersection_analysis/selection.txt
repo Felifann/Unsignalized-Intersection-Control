@@ -1,0 +1,44 @@
+town5
+
+--- Intersection 2 (Recommendation Level: 2) ---
+ID: 396
+Center Position: (-188.9, -89.7, 0.0)
+Connected Roads: 12
+Number of Lanes: 16
+Width Metric: 1695.0
+Has Traffic Light: False
+Incoming Road IDs: [416, 481, 455, 552, 489, 553, 467, 499, 507, 476, 444, 415]
+Outgoing Road IDs: [416, 481, 455, 552, 489, 553, 467, 499, 507, 476, 444, 415]
+Suggested Overhead Position: (-188.9327573776245, -89.66813325881958, 100.02772521972656)
+Complexity Rating: Medium ⭐⭐
+Recommendation Reason: Multi-road convergence, sufficient lanes
+Screenshot Saved: e:/Unisignalized-Intersection-Control-main\intersection_screenshots\Town05_intersection_396_rank2.png
+
+--- Intersection 3 (Recommendation Level: 3) ---
+ID: 562
+Center Position: (-189.4, 89.1, 0.0)
+Connected Roads: 12
+Number of Lanes: 16
+Width Metric: 1692.2
+Has Traffic Light: False
+Incoming Road IDs: [608, 706, 646, 715, 623, 639, 627, 564, 693, 694, 572, 607]
+Outgoing Road IDs: [608, 706, 646, 715, 623, 639, 627, 564, 693, 694, 572, 607]
+Suggested Overhead Position: (-189.42076110839844, 89.12556982040405, 100.02772521972656)
+Complexity Rating: Medium ⭐⭐
+Recommendation Reason: Multi-road convergence, sufficient lanes
+Screenshot Saved: e:/Unisignalized-Intersection-Control-main\intersection_screenshots\Town05_intersection_562_rank3.png
+
+town3
+--- Intersection 2 (Recommendation Level: 2) ---
+ID: 730
+Center Position: (-81.9, -138.2, 0.0)
+Connected Roads: 12
+Number of Lanes: 14
+Width Metric: 1665.1
+Has Traffic Light: False
+Incoming Road IDs: [800, 742, 743, 776, 809, 823, 783, 817, 852, 853, 791, 831]
+Outgoing Road IDs: [800, 742, 743, 776, 809, 823, 783, 817, 852, 853, 791, 831]
+Suggested Overhead Position: (-81.91795076642718, -138.1560788835798, 100.02285810453552)
+Complexity Rating: Medium ⭐⭐
+Recommendation Reason: Multi-road convergence, sufficient lanes
+Screenshot Saved: e:/Unisignalized-Intersection-Control-main\intersection_screenshots\Town03_intersection_730_rank2.png
